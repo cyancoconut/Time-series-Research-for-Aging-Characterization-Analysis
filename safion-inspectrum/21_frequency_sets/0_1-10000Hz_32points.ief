@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<frequencyTable>
+    <frequencyComponent frequency="0.1" amplitude="0.1" phase="0.1924980"/>
+    <frequencyComponent frequency="0.2" amplitude="0.1" phase="0.0000000"/>
+    <frequencyComponent frequency="0.3" amplitude="0.1" phase="0.3739512"/>
+    <frequencyComponent frequency="0.4" amplitude="0.1" phase="0.2446883"/>
+    <frequencyComponent frequency="0.6" amplitude="0.1" phase="0.2630906"/>
+    <frequencyComponent frequency="0.8" amplitude="0.1" phase="0.0786890"/>
+    <frequencyComponent frequency="1" amplitude="0.1" phase="0.8338070"/>
+    <frequencyComponent frequency="1.3" amplitude="0.1" phase="0.3729660"/>
+    <frequencyComponent frequency="2" amplitude="0.1" phase="0.8438307"/>
+    <frequencyComponent frequency="2.8" amplitude="0.1" phase="0.6130406"/>
+    <frequencyComponent frequency="4.1" amplitude="0.1" phase="0.6560330"/>
+    <frequencyComponent frequency="5.9" amplitude="0.1" phase="0.1486164"/>
+    <frequencyComponent frequency="8.6" amplitude="0.1" phase="0.1739205"/>
+    <frequencyComponent frequency="12.5" amplitude="0.1" phase="0.3159254"/>
+    <frequencyComponent frequency="18.1" amplitude="0.1" phase="0.2487588"/>
+    <frequencyComponent frequency="26.3" amplitude="0.1" phase="0.2177069"/>
+    <frequencyComponent frequency="38.1" amplitude="0.1" phase="0.1397925"/>
+    <frequencyComponent frequency="55.2" amplitude="0.1" phase="0.9396534"/>
+    <frequencyComponent frequency="80" amplitude="0.1" phase="0.9825639"/>
+    <frequencyComponent frequency="116" amplitude="0.1" phase="0.2367201"/>
+    <frequencyComponent frequency="168.2" amplitude="0.1" phase="0.2886212"/>
+    <frequencyComponent frequency="243.8" amplitude="0.1" phase="0.2241229"/>
+    <frequencyComponent frequency="353.5" amplitude="0.1" phase="0.8352687"/>
+    <frequencyComponent frequency="512.5" amplitude="0.1" phase="0.9347107"/>
+    <frequencyComponent frequency="743" amplitude="0.1" phase="0.5282316"/>
+    <frequencyComponent frequency="1077.1" amplitude="0.1" phase="0.2446996"/>
+    <frequencyComponent frequency="1561.5" amplitude="0.1" phase="0.8105304"/>
+    <frequencyComponent frequency="2263.8" amplitude="0.1" phase="0.1726685"/>
+    <frequencyComponent frequency="3281.9" amplitude="0.1" phase="0.5009020"/>
+    <frequencyComponent frequency="4757.9" amplitude="0.1" phase="0.7596552"/>
+    <frequencyComponent frequency="6897.8" amplitude="0.1" phase="0.5449354"/>
+    <frequencyComponent frequency="10000" amplitude="0.1" phase="0.1955337"/>
+</frequencyTable>

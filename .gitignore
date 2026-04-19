@@ -1,0 +1,12 @@
+__pycache__
+/config.json
+/config_SE.json
+dig2mat.log
+/dist
+/env
+/.vscode
+/src/ahjo_dl.egg-info/
+/.venv/**
+/eval.py
+/download.py
+/ahjo-dl

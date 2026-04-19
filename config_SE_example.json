@@ -1,0 +1,16 @@
+{
+    "sources": {
+        "ahjo": {
+            "type": "ahjo",
+            "url": "https://ahjo.isea.rwth-aachen.de",
+            "apikey": ""
+        }
+    },
+    "targets": {
+        "local": {
+            "type": "nanu",
+            "folder": "Z:/Forschung/bgA/J7099_SIE_Alterung/Daten/ahjo_dl",
+            "format": "mat"
+        }
+    }
+}

@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inspectrumSuiteMeasurementResults description="30.10.2023 - 17:24:08" comment="">
+    <deviceInformation>
+        <hardware revision="1.0" serial="IE10521120002"/>
+        <software revision="1.6"/>
+        <calibration date="2021/12/13"/>
+    </deviceInformation>
+    <deviceConfiguration>
+        <currentExcitation periods="5" currentScalingFactor="1.07535">
+            <frequencyTable frequencyCount="32">
+                <frequencyComponent frequency="0.01" amplitude="0.0451277" phase="0.389313"/>
+                <frequencyComponent frequency="0.016" amplitude="0.0451277" phase="0.872901"/>
+                <frequencyComponent frequency="0.024" amplitude="0.0451277" phase="0.184351"/>
+                <frequencyComponent frequency="0.038" amplitude="0.0451277" phase="0.817652"/>
+                <frequencyComponent frequency="0.06" amplitude="0.0451277" phase="0.24546"/>
+                <frequencyComponent frequency="0.092" amplitude="0.0451277" phase="0.983055"/>
+                <frequencyComponent frequency="0.144" amplitude="0.0451277" phase="0.439171"/>
+                <frequencyComponent frequency="0.226" amplitude="0.0451277" phase="0.699902"/>
+                <frequencyComponent frequency="0.354" amplitude="0.0451277" phase="0.44298"/>
+                <frequencyComponent frequency="0.552" amplitude="0.0451277" phase="0.35986"/>
+                <frequencyComponent frequency="0.862" amplitude="0.0451277" phase="0.536743"/>
+                <frequencyComponent frequency="1.346" amplitude="0.0451277" phase="0.112276"/>
+                <frequencyComponent frequency="2.102" amplitude="0.0451277" phase="0.287075"/>
+                <frequencyComponent frequency="3.282" amplitude="0.0451277" phase="0.975356"/>
+                <frequencyComponent frequency="5.124" amplitude="0.0451277" phase="0.383309"/>
+                <frequencyComponent frequency="8.002" amplitude="0.0451277" phase="0.962036"/>
+                <frequencyComponent frequency="12.496" amplitude="0.0451277" phase="0.812781"/>
+                <frequencyComponent frequency="19.512" amplitude="0.0451277" phase="0.855536"/>
+                <frequencyComponent frequency="30.47" amplitude="0.0451277" phase="0.642122"/>
+                <frequencyComponent frequency="47.58" amplitude="0.0451277" phase="0.47019"/>
+                <frequencyComponent frequency="74.296" amplitude="0.0451277" phase="0.580255"/>
+                <frequencyComponent frequency="116.016" amplitude="0.0451277" phase="0.961811"/>
+                <frequencyComponent frequency="181.16" amplitude="0.0451277" phase="0.353281"/>
+                <frequencyComponent frequency="282.886" amplitude="0.0451277" phase="0.612829"/>
+                <frequencyComponent frequency="441.734" amplitude="0.0451277" phase="0.850545"/>
+                <frequencyComponent frequency="689.778" amplitude="0.0451277" phase="0.837369"/>
+                <frequencyComponent frequency="1077.11" amplitude="0.0451277" phase="0.405781"/>
+                <frequencyComponent frequency="1681.92" amplitude="0.0451277" phase="0.371117"/>
+                <frequencyComponent frequency="2626.36" amplitude="0.0451277" phase="0.695653"/>
+                <frequencyComponent frequency="4101.13" amplitude="0.0451277" phase="0.856809"/>
+                <frequencyComponent frequency="6404" amplitude="0.0451277" phase="0.196729"/>
+                <frequencyComponent frequency="10000" amplitude="0.0451277" phase="0.25"/>
+            </frequencyTable>
+        </currentExcitation>
+        <continousMeasurement period="10"/>
+        <adaptiveCurrentScaling enabled="1" targetVoltage="0.01"/>
+        <enhancements discardFirstLeastCommonPeriods="0"/>
+        <outputLimits vMin="2.6" vMax="3.6" iMax="2.5" faultDuration="10"/>
+        <misc>
+            <automaticBatteryConnect enabled="0"/>
+            <automaticBatteryDisconnect enabled="0"/>
+            <automaticPowerDown duration="30"/>
+        </misc>
+    </deviceConfiguration>
+    <canUserMailboxes>
+        <mailbox1 length="0" data=""/>
+        <mailbox2 length="0" data=""/>
+        <mailbox3 length="0" data=""/>
+        <mailbox4 length="0" data=""/>
+    </canUserMailboxes>
+    <userParameters parameterCount="0"/>
+    <measurementResults multiplexerChannel="0" batteryName="">
+        <batteryVoltage voltage="3.29802" date="2023/10/30" time="17:15:48"/>
+        <temperatureSensor temperature="45.5369" date="2023/10/30" time="17:15:48"/>
+        <impedanceSpectrum frequencyCount="32" voltageAmplitude="0.00308058" clipped="0" currentAmplitude="1.03052" currentAverage="-0.0016872" date="2023/10/30" time="17:24:08">
+            <spectrumData freq="0.01" zRe="0.0011839" zIm="-0.000840342"/>
+            <spectrumData freq="0.016" zRe="0.0011073" zIm="-0.00055321"/>
+            <spectrumData freq="0.024" zRe="0.000999079" zIm="-0.000500248"/>
+            <spectrumData freq="0.038" zRe="0.00090761" zIm="-0.000331243"/>
+            <spectrumData freq="0.06" zRe="0.000835573" zIm="-0.000280657"/>
+            <spectrumData freq="0.092" zRe="0.000813288" zIm="-0.00020735"/>
+            <spectrumData freq="0.144" zRe="0.000753116" zIm="-0.000147983"/>
+            <spectrumData freq="0.226" zRe="0.000738161" zIm="-0.000115012"/>
+            <spectrumData freq="0.354" zRe="0.000717694" zIm="-9.24191e-05"/>
+            <spectrumData freq="0.552" zRe="0.000703535" zIm="-7.01062e-05"/>
+            <spectrumData freq="0.862" zRe="0.000689679" zIm="-5.6051e-05"/>
+            <spectrumData freq="1.346" zRe="0.000681352" zIm="-4.74325e-05"/>
+            <spectrumData freq="2.102" zRe="0.000672134" zIm="-4.12055e-05"/>
+            <spectrumData freq="3.282" zRe="0.00066352" zIm="-3.64336e-05"/>
+            <spectrumData freq="5.124" zRe="0.000655053" zIm="-3.30886e-05"/>
+            <spectrumData freq="8.002" zRe="0.000646799" zIm="-3.1502e-05"/>
+            <spectrumData freq="12.496" zRe="0.000638648" zIm="-3.06307e-05"/>
+            <spectrumData freq="19.512" zRe="0.000629286" zIm="-2.9627e-05"/>
+            <spectrumData freq="30.47" zRe="0.00061796" zIm="-2.87018e-05"/>
+            <spectrumData freq="47.58" zRe="0.000604088" zIm="-2.62471e-05"/>
+            <spectrumData freq="74.296" zRe="0.000583903" zIm="-1.60062e-05"/>
+            <spectrumData freq="116.016" zRe="0.000561849" zIm="9.18447e-06"/>
+            <spectrumData freq="181.16" zRe="0.000542472" zIm="5.3025e-05"/>
+            <spectrumData freq="282.886" zRe="0.000527339" zIm="0.00012125"/>
+            <spectrumData freq="441.734" zRe="0.000518891" zIm="0.000224993"/>
+            <spectrumData freq="689.778" zRe="0.000520769" zIm="0.000381229"/>
+            <spectrumData freq="1077.11" zRe="0.000544981" zIm="0.000613635"/>
+            <spectrumData freq="1681.92" zRe="0.000594781" zIm="0.000964105"/>
+            <spectrumData freq="2626.36" zRe="0.000735148" zIm="0.00149788"/>
+            <spectrumData freq="4101.13" zRe="0.001056" zIm="0.0022144"/>
+            <spectrumData freq="6404" zRe="0.00158024" zIm="0.00337157"/>
+            <spectrumData freq="10000" zRe="0.0207616" zIm="0.0178373"/>
+        </impedanceSpectrum>
+    </measurementResults>
+</inspectrumSuiteMeasurementResults>

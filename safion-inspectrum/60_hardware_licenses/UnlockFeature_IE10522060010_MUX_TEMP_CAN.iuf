@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inspectrumSuiteFeatureUnlock>
+    <deviceInformation serial="IE10522060010"/>
+    <feature name="Temperature sensor interface"/>
+    <feature name="Multiplexer interface"/>
+    <feature name="CAN interface"/>
+    <key value="5CC1D5C1C65634F3166E32BFBFB0FACFDF7FCD24BF2A58745FDB1876F82138F22691CEBEB863D0524AE1D86BF9CC9121135914F704C6F91B7AB8D4C8CCAF7207"/>
+</inspectrumSuiteFeatureUnlock>

@@ -1,0 +1,1 @@
+Das Template musst du mit dem Tool öffnen und die richtige Seriennummer vom Typenschild eintragen. Das Tool (FT_Prog) bekommst du auf der FTDI Webseite. Sollte das damit nicht funktionieren müssten die Geräte einmal zu uns.

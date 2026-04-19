@@ -1,0 +1,158 @@
+from .cluster_preparation import DismemblerFunctions
+from .cluster_preparation import allocate_IDs
+from util import bronze_column_filter
+
+import os
+import duckdb
+import pandas as pd
+import numpy as np
+
+
+def processing_procedure_filter(loadpath, procedure_filter):
+    # filters out the whole cell if result is False
+    filter_param = (
+        "%" + procedure_filter + "%" if procedure_filter is not None else None
+    )
+    con = duckdb.connect()
+    query = """
+        SELECT 
+            EXISTS (
+                SELECT 1
+                FROM read_parquet(?)
+                WHERE ? IS NULL OR Prozedur LIKE ?
+            ) AS contains_procedure_filter
+    """
+    # result will be True if any Prozedur contains the filter, False otherwise
+    result = con.execute(query, [loadpath, filter_param, filter_param]).fetchone()
+
+    return result[0]
+
+
+def read_and_fix_format(loadpath, V_max):
+
+    df_cell = pd.read_parquet(loadpath)
+
+    # Fix the format
+    df_cell[df_cell.select_dtypes(np.float64).columns] = df_cell.select_dtypes(
+        np.float64
+    ).astype(np.float32)
+    df_cell = df_cell.rename(
+        columns={
+            "Spannung": "Voltage",
+            "Strom": "Current",
+            "Zeit": "Time",
+            "T1": "Temperature",
+        }
+    )
+
+    df_cell[df_cell.select_dtypes(np.float64).columns] = df_cell.select_dtypes(
+        np.float64
+    ).astype(np.float32)
+    df_cell["Time_UTC"] = df_cell.Time.dt.tz_convert("UTC")
+    df_cell["Zustand"] = df_cell["Zustand"].astype(object)
+    df_cell["Prozedur"] = df_cell["Prozedur"].astype(object)
+    df_cell["Power"] = df_cell["Current"] * df_cell["Voltage"]
+    df_cell["Label_Procedure"] = np.nan
+    df_cell["Capacity_py"] = np.nan
+    df_cell["Pulse_py"] = np.nan
+    df_cell["BM_Programm"] = df_cell.groupby("Ahjo_Test_ID").ngroup()
+    df_cell["target"] = np.array(-1, dtype=str)
+
+    if "PAUO**" in df_cell["Zustand"].values:
+        df_cell.loc[df_cell["Zustand"] == "PAUO**", "Zustand"] = "PAUO"
+    if "PAU**" in df_cell["Zustand"].values:
+        df_cell.loc[df_cell["Zustand"] == "PAU**", "Zustand"] = "PAU"
+
+    # Find columns with 'Floater' and "EIS" in their name
+    floater_columns = [col for col in df_cell.columns if "Floater" in col]
+
+    eis_columns = [col for col in df_cell.columns if "EIS" in col]
+
+    # Create a mask for rows where any of these columns have values
+    has_floater = df_cell[floater_columns].notna().any(axis=1)
+    has_eis = (df_cell[eis_columns].notna().any(axis=1)) & (df_cell["AhAkku"].isna())
+
+    # Set Zustand to FLOATER and EIS for these rows
+    # Ensure Zustand is a categorical type with the new categories
+    if df_cell.Zustand.dtype != "O":
+        new_categories = df_cell.Zustand.dtype.categories.tolist() + ["FLOATER", "EIS"]
+        new_dtype = pd.CategoricalDtype(
+            categories=new_categories, ordered=df_cell.Zustand.dtype.ordered
+        )
+        df_cell["Zustand"] = df_cell["Zustand"].astype(new_dtype)
+
+    df_cell.loc[has_floater, ["Zustand"]] = "FLOATER"
+    df_cell.loc[has_eis, ["Zustand"]] = "EIS"
+
+    # Find columns that contain both "Floater" and "Voltage" in their names
+    floater_voltage_cols = [
+        col for col in df_cell.columns if "Floater" in col and "Voltage" in col
+    ]
+
+    # Create mask for rows where any of these columns exceed V_max
+    # (this happens when ppl forget to turn off the floaters...)
+    if floater_voltage_cols:
+        rows_to_drop = False
+        for col in floater_voltage_cols:
+            rows_to_drop = rows_to_drop | (df_cell[col] > V_max * 1.05)
+
+        # Keep rows where the condition is False (logical negation)
+        df_cell = df_cell[rows_to_drop == False]
+
+    return df_cell
+
+
+def dismember_raw_cell(
+    cell, loadpath, savepath, MIN_ROWS, PAU_DURATION, V_max, procedure_filter=None
+):
+    """
+    Process a single cell file using the existing workflow,
+    but only if the output file doesn't already exist.
+    """
+
+    bronze_columns = [
+        "index",
+        "Time",
+        "Current",
+        "Voltage",
+        "Temperature",
+        "Zustand",
+        "Prozedur",
+        "Duration_minutes",
+        "ID",
+        "BM_Programm",
+        "Ah_throughput",
+        "Label_Procedure",
+        "Capacity_py",
+        "Pulse_py",
+        "target",
+    ]
+
+    print(f"Processing {cell}")
+    # Check if any Prozedur values contain "jri_Aging"
+
+    result = processing_procedure_filter(loadpath, procedure_filter)
+
+    if result:
+
+        df_cell = read_and_fix_format(loadpath, V_max)
+        # Dismember df
+        globals = DismemblerFunctions(MIN_ROWS, PAU_DURATION)
+        prefiltered_df = globals.prefiltering(df_cell, ["SAVE", "REST"])
+        prefiltered_df = globals.add_ah_throughput(prefiltered_df)
+        dismembered_df = globals.dismembling(prefiltered_df)
+        dismembered_df = allocate_IDs(dismembered_df)
+
+        # Reset index, filter columns, and save
+        dismembered_df = dismembered_df.reset_index()
+        available_bronze_cols = [
+            col for col in bronze_columns if col in dismembered_df.columns
+        ]
+        dismembered_df = dismembered_df[available_bronze_cols]
+
+        # dismembered_df.to_parquet(savepath, coerce_timestamps="us", index=True)
+
+    else:
+        print("No matching procedure found.")
+
+    return dismembered_df
