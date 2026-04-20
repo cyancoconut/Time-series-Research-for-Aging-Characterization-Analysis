@@ -35,6 +35,8 @@ def feature_extraction(
         X_unlabeled_features["Duration_minutes"]
     )
 
+    X_unlabeled_features["abs_Current_mean"] = X_unlabeled_features["Current_mean"].abs()
+
     # Add target column
     X_unlabeled_features["target"] = np.nan
 

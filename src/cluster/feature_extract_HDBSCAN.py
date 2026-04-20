@@ -1,19 +1,23 @@
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras.models import Model, Sequential
-from tensorflow.keras.layers import Dense, Input, LeakyReLU
-from hdbscan import HDBSCAN
+from sklearn.cluster import HDBSCAN
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
-import seaborn as sns
 import joblib
 from sklearn.metrics.pairwise import euclidean_distances
 
 np.random.seed(42)
-tf.random.set_seed(42)
+
+def _get_tf():
+    import tensorflow as tf
+    tf.random.set_seed(42)
+    return tf
+
+def _get_keras():
+    from tensorflow.keras.models import Model, Sequential
+    from tensorflow.keras.layers import Dense, Input, LeakyReLU
+    return Model, Sequential, Dense, Input, LeakyReLU
 
 class TabularAutoencoderHDBSCAN:
     def __init__(self, input_dim, encoding_dim=10, hdbscan_params=None):
@@ -30,6 +34,8 @@ class TabularAutoencoderHDBSCAN:
         self.autoencoder = None  # Will be set in fit
         
     def fit(self, df, autoencoder_epochs=50, batch_size=32):
+        tf = _get_tf()
+        Model, Sequential, Dense, Input, LeakyReLU = _get_keras()
         if "target" in df.columns:
             # print("Target column dropped")
             df.drop("target", axis=1, inplace=True)
@@ -52,9 +58,10 @@ class TabularAutoencoderHDBSCAN:
         self.autoencoder.summary()
 
         # Create a model that outputs layer_4 activations
+        Model, *_ = _get_keras()
         intermediate_layer_model = Model(inputs=self.autoencoder.layers[0].input,
                                       outputs=self.autoencoder.layers[5].output)
-        
+
         # Get layer_4 activations
         layer_4_output = intermediate_layer_model.predict(input_features)
         
@@ -77,7 +84,7 @@ class TabularAutoencoderHDBSCAN:
             df.drop("target", axis=1, inplace=True)
 
         input_features = df.drop("ID", axis=1)
-        
+
         # Perform HDBSCAN clustering
         self.labels_ = self.clusterer.fit_predict(input_features)
 
@@ -132,6 +139,8 @@ class TabularAutoencoderHDBSCAN:
         return self, df
     
     def fit_with_autoscaler(self, df, autoencoder_epochs=50, batch_size=32):
+        _get_tf()
+        Model, Sequential, Dense, Input, LeakyReLU = _get_keras()
         if "target" in df.columns:
             # print("Target column dropped")
             df.drop("target", axis=1, inplace=True)
@@ -157,9 +166,10 @@ class TabularAutoencoderHDBSCAN:
         self.autoencoder.summary()
 
         # Create a model that outputs layer_4 activations
+        Model, *_ = _get_keras()
         intermediate_layer_model = Model(inputs=self.autoencoder.layers[0].input,
                                       outputs=self.autoencoder.layers[0].output)
-        
+
         # Get layer_4 activations
         layer_0_output = intermediate_layer_model.predict(X_scaled)
         
@@ -175,6 +185,7 @@ class TabularAutoencoderHDBSCAN:
         return self, df
         
     def predict(self, df):
+        Model, *_ = _get_keras()
         input_features = df.drop("ID", axis=1)
         intermediate_layer_model = Model(inputs=self.autoencoder.layers[0].input,
                                       outputs=self.autoencoder.layers[3].output)
@@ -286,6 +297,7 @@ class TabularAutoencoderHDBSCAN:
         
     def load_model(self, path):
         """Load all model components"""
+        tf = _get_tf()
         self.autoencoder = tf.keras.models.load_model(f'{path}_autoencoder.keras')
         self.clusterer = joblib.load(f'{path}_hdbscan.joblib')
 

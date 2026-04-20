@@ -154,5 +154,6 @@ def dismember_raw_cell(
 
     else:
         print("No matching procedure found.")
+        return None
 
     return dismembered_df
