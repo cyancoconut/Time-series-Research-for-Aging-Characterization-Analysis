@@ -162,6 +162,9 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
     except Exception as e:
         logging.warning(f"{cell}: add_aging_labels failed ({e}), skipping label step")
 
+    for col in df_gold.columns:
+        if df_gold[col].dtype == "object":
+            df_gold[col] = df_gold[col].astype(str)
     df_gold.to_parquet(paths["gold"], index=False)
     logging.info(f"{cell}: GOLD exported to {paths['gold']}")
 

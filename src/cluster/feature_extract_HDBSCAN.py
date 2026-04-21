@@ -68,7 +68,7 @@ class TabularAutoencoderHDBSCAN:
         # Perform HDBSCAN clustering
         self.labels_ = self.clusterer.fit_predict(layer_4_output)
 
-        df["target"] = np.nan
+        df.loc[:, "target"] = np.nan
         for cluster in set(self.labels_):
             # print(f"\nCluster {cluster}:")
             mask = self.labels_ == cluster
@@ -79,16 +79,16 @@ class TabularAutoencoderHDBSCAN:
     
     
     def fit_cluster_only(self, df, autoencoder_epochs=50, batch_size=32):
+        df = df.copy()
         if "target" in df.columns:
-            # print("Target column dropped")
-            df.drop("target", axis=1, inplace=True)
+            df = df.drop("target", axis=1)
 
         input_features = df.drop("ID", axis=1)
 
         # Perform HDBSCAN clustering
         self.labels_ = self.clusterer.fit_predict(input_features)
 
-        df["target"] = np.nan
+        df.loc[:, "target"] = np.nan
         for cluster in set(self.labels_):
             # print(f"\nCluster {cluster}:")
             mask = self.labels_ == cluster
@@ -98,8 +98,9 @@ class TabularAutoencoderHDBSCAN:
         return self, df
     
     def fit_cluster_with_partial_init(self, df, n_clusters=4, known_centers=None, autoencoder_epochs=50, batch_size=32):
+        df = df.copy()
         if "target" in df.columns:
-            df.drop("target", axis=1, inplace=True)
+            df = df.drop("target", axis=1)
         
         input_features = df.drop("ID", axis=1)
         
@@ -131,7 +132,7 @@ class TabularAutoencoderHDBSCAN:
         self.clusterer = kmeans
         
         # Assign targets
-        df["target"] = np.nan
+        df.loc[:, "target"] = np.nan
         for cluster in set(self.labels_):
             mask = self.labels_ == cluster
             df.loc[mask, "target"] = cluster
@@ -141,9 +142,9 @@ class TabularAutoencoderHDBSCAN:
     def fit_with_autoscaler(self, df, autoencoder_epochs=50, batch_size=32):
         _get_tf()
         Model, Sequential, Dense, Input, LeakyReLU = _get_keras()
+        df = df.copy()
         if "target" in df.columns:
-            # print("Target column dropped")
-            df.drop("target", axis=1, inplace=True)
+            df = df.drop("target", axis=1)
 
         #input_features = df.drop("ID", axis=1)
 
@@ -175,7 +176,7 @@ class TabularAutoencoderHDBSCAN:
         
         # Perform HDBSCAN clustering
         self.labels_ = self.clusterer.fit_predict(layer_0_output)
-        df["target"] = np.nan
+        df.loc[:, "target"] = np.nan
         for cluster in set(self.labels_):
             print(f"\nCluster {cluster}:")
             mask = self.labels_ == cluster
@@ -193,7 +194,7 @@ class TabularAutoencoderHDBSCAN:
 
         self.labels_ = self.clusterer.fit_predict(layer_4_output)
 
-        df["target"] = np.nan
+        df.loc[:, "target"] = np.nan
         for cluster in set(self.labels_):
             # print(f"\nCluster {cluster}:")
             mask = self.labels_ == cluster
@@ -207,7 +208,7 @@ class TabularAutoencoderHDBSCAN:
 
         self.labels_ = self.clusterer.fit_predict(input_features)
 
-        df["target"] = np.nan
+        df.loc[:, "target"] = np.nan
         for cluster in set(self.labels_):
             # print(f"\nCluster {cluster}:")
             mask = self.labels_ == cluster

@@ -132,7 +132,8 @@ def second_layer_HDBSCANModel(
         df_potential_cap, X_unlabeled_features_updated
     )
     df_potential_cap_labeled.set_index("index", inplace=True)
-    df_clustered["target"].update(df_potential_cap_labeled["target"])
+    df_clustered["target"] = df_clustered["target"].astype(object)
+    df_clustered.loc[df_potential_cap_labeled.index, "target"] = df_potential_cap_labeled["target"]
 
     X_clustered = merge_target(X_potential_cap, X_unlabeled_features_updated)
 

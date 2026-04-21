@@ -13,7 +13,7 @@ class DismemblerFunctions:
 
     def prefiltering(self, df_cell, drop_columns):
         df_cell.drop_duplicates(subset=["Time", "Zustand"], inplace=True)
-        df_cell = df_cell.loc[~df_cell["Zustand"].isin(drop_columns)]
+        df_cell = df_cell.loc[~df_cell["Zustand"].isin(drop_columns)].copy()
         return df_cell
 
     def add_ah_throughput(self, df_cell):
