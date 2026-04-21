@@ -14,6 +14,18 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 PROCEDURE_FILTER = "jri_CU"
 
+_REQUIRED_COLS = {
+    "preSILVER": {"Voltage", "Current", "Time", "Temperature", "ID", "BM_Programm", "target"},
+    "features":  {"Duration_quartile", "abs_Current_mean", "Current_mean", "ID"},
+    "silver":    {"Voltage", "Current", "Time", "Temperature", "ID", "BM_Programm", "target"},
+}
+
+
+def _validate(df, layer):
+    missing = _REQUIRED_COLS[layer] - set(df.columns)
+    if missing:
+        raise ValueError(f"{layer} missing columns: {missing}")
+
 
 def load_config(config_path: str) -> dict:
     with open(config_path, "r") as f:
@@ -59,7 +71,6 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
     dismembered_df = dismember_raw_cell(
         cell,
         paths["bronze"],
-        paths["preSILVER"],
         cfg["min_rows"],
         cfg["pau_duration"],
         cfg["v_max"],
@@ -68,6 +79,7 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
     if dismembered_df is None or dismembered_df.empty:
         logging.warning(f"{cell}: empty after dismember, skipping")
         return
+    _validate(dismembered_df, "preSILVER")
 
     n_progs = int(
         dismembered_df.groupby("BM_Programm")["Prozedur"]
@@ -90,6 +102,7 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
         cfg["feature_columns"],
         overwrite=1,
     )
+    _validate(X_features, "features")
 
     # --- clustering ---
     logging.info(f"{cell}: clustering")
@@ -122,6 +135,8 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
         cfg["hdbscan_para_layer_2"],
         post_filter,
     )
+
+    _validate(df_silver, "silver")
 
     os.makedirs(os.path.dirname(paths["X_silver"]), exist_ok=True)
     X_silver.to_csv(paths["X_silver"], index=False)
@@ -217,9 +232,7 @@ def _build_paths(cell: str, working_path: str, type_cell: str) -> dict:
     stem = cell.split(".")[0]
     return {
         "bronze":   os.path.join(working_path, "BRONZE_CU", cell),
-        "preSILVER": os.path.join(working_path, "preSILVER", cell),
         "X_silver": os.path.join(working_path, "with_features_post_labeled", stem + ".csv"),
-        "silver":   os.path.join(working_path, "SILVER", cell),
         "gold":     os.path.join(working_path, "GOLD", type_cell, cell),
     }
 

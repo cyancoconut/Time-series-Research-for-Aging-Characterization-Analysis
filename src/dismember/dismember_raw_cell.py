@@ -103,12 +103,8 @@ def read_and_fix_format(loadpath, V_max):
 
 
 def dismember_raw_cell(
-    cell, loadpath, savepath, MIN_ROWS, PAU_DURATION, V_max, procedure_filter=None
+    cell, loadpath, MIN_ROWS, PAU_DURATION, V_max, procedure_filter=None
 ):
-    """
-    Process a single cell file using the existing workflow,
-    but only if the output file doesn't already exist.
-    """
 
     bronze_columns = [
         "index",
@@ -149,8 +145,6 @@ def dismember_raw_cell(
             col for col in bronze_columns if col in dismembered_df.columns
         ]
         dismembered_df = dismembered_df[available_bronze_cols]
-
-        # dismembered_df.to_parquet(savepath, coerce_timestamps="us", index=True)
 
     else:
         print("No matching procedure found.")
