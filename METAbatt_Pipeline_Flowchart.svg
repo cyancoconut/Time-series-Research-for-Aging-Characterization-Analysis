@@ -1,0 +1,252 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 1380" font-family="Arial, sans-serif">
+
+  <!-- Background -->
+  <rect width="900" height="1380" fill="#f8f9fa" rx="8"/>
+
+  <!-- Title -->
+  <text x="450" y="38" text-anchor="middle" font-size="20" font-weight="bold" fill="#1a1a2e">METAbatt Processing Pipeline</text>
+  <text x="450" y="58" text-anchor="middle" font-size="12" fill="#555">Automated battery test procedure classification and results extraction</text>
+  <line x1="60" y1="68" x2="840" y2="68" stroke="#ccc" stroke-width="1"/>
+
+  <!-- ─────────────────── STYLES (inline via shared attrs) ─────────────────── -->
+
+  <!-- ══════════════ STAGE 1: INPUT ══════════════ -->
+  <rect x="300" y="88" width="300" height="52" rx="8" fill="#2196f3" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="450" y="109" text-anchor="middle" font-size="13" font-weight="bold" fill="white">INPUT</text>
+  <text x="450" y="127" text-anchor="middle" font-size="11" fill="#e3f2fd">BRONZE_CU / &lt;cell&gt;.parquet</text>
+
+  <!-- arrow -->
+  <line x1="450" y1="140" x2="450" y2="162" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="460" y="153" font-size="10" fill="#888">raw cycler data (German cols)</text>
+
+  <!-- ══════════════ STAGE 2: DISMEMBER ══════════════ -->
+  <rect x="120" y="162" width="660" height="130" rx="8" fill="#fff" stroke="#90caf9" stroke-width="1.5"/>
+  <rect x="120" y="162" width="660" height="24" rx="8" fill="#1565c0"/>
+  <text x="450" y="179" text-anchor="middle" font-size="12" font-weight="bold" fill="white">STAGE 1 — DISMEMBER  (dismember_raw_cell.py)</text>
+
+  <rect x="140" y="196" width="180" height="40" rx="5" fill="#e3f2fd" stroke="#90caf9"/>
+  <text x="230" y="213" text-anchor="middle" font-size="10" font-weight="bold" fill="#1565c0">Rename columns</text>
+  <text x="230" y="228" text-anchor="middle" font-size="9" fill="#444">Spannung→Voltage  Strom→Current</text>
+
+  <rect x="340" y="196" width="180" height="40" rx="5" fill="#e3f2fd" stroke="#90caf9"/>
+  <text x="430" y="213" text-anchor="middle" font-size="10" font-weight="bold" fill="#1565c0">Segment procedures</text>
+  <text x="430" y="228" text-anchor="middle" font-size="9" fill="#444">Split on Prozedur change / PAU &gt; 9.9 min</text>
+
+  <rect x="540" y="196" width="220" height="40" rx="5" fill="#e3f2fd" stroke="#90caf9"/>
+  <text x="650" y="213" text-anchor="middle" font-size="10" font-weight="bold" fill="#1565c0">Filter &amp; assign IDs</text>
+  <text x="650" y="228" text-anchor="middle" font-size="9" fill="#444">Drop &lt; MIN_ROWS rows → ID = BM_Prog_ProcNum</text>
+
+  <!-- arrows inside box -->
+  <line x1="320" y1="216" x2="338" y2="216" stroke="#1565c0" stroke-width="1" marker-end="url(#arrowBlue)"/>
+  <line x1="520" y1="216" x2="538" y2="216" stroke="#1565c0" stroke-width="1" marker-end="url(#arrowBlue)"/>
+
+  <text x="450" y="282" text-anchor="middle" font-size="10" fill="#666" font-style="italic">Output: preSILVER DataFrame with segmented procedures and IDs</text>
+
+  <!-- arrow -->
+  <line x1="450" y1="292" x2="450" y2="314" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ══════════════ STAGE 3: FEATURE EXTRACTION ══════════════ -->
+  <rect x="120" y="314" width="660" height="148" rx="8" fill="#fff" stroke="#a5d6a7" stroke-width="1.5"/>
+  <rect x="120" y="314" width="660" height="24" rx="8" fill="#2e7d32"/>
+  <text x="450" y="331" text-anchor="middle" font-size="12" font-weight="bold" fill="white">STAGE 2 — FEATURE EXTRACTION  (create_features.py + classification.py)</text>
+
+  <!-- feature table -->
+  <rect x="140" y="348" width="295" height="96" rx="5" fill="#e8f5e9" stroke="#a5d6a7"/>
+  <text x="287" y="364" text-anchor="middle" font-size="10" font-weight="bold" fill="#2e7d32">Statistical features per segment</text>
+  <text x="155" y="380" font-size="9" fill="#333">• Voltage_mean/std/min/max/range  (norm. by V_max−V_min)</text>
+  <text x="155" y="393" font-size="9" fill="#333">• Current_mean/std/min/max        (norm. by Nom_Capacity)</text>
+  <text x="155" y="406" font-size="9" fill="#333">• Temperature_mean/std/min/max</text>
+  <text x="155" y="419" font-size="9" fill="#333">• Duration_minutes,  BM_Programm</text>
+  <text x="155" y="432" font-size="9" fill="#333">• Duration_quartile = log1p(Duration_minutes)</text>
+
+  <rect x="455" y="348" width="305" height="96" rx="5" fill="#e8f5e9" stroke="#a5d6a7"/>
+  <text x="607" y="364" text-anchor="middle" font-size="10" font-weight="bold" fill="#2e7d32">Clustering-specific features</text>
+  <text x="470" y="380" font-size="9" fill="#333">• abs_Current_mean = |Current_mean|</text>
+  <text x="470" y="393" font-size="9" fill="#444" font-style="italic">  → separates qOCV (|I|≈0.05) from rest (|I|≈0)</text>
+  <text x="470" y="406" font-size="9" fill="#444" font-style="italic">  qOCV pairs cancel to mean≈0 if signed current used</text>
+  <text x="470" y="432" font-size="9" fill="#333">Saved to: with_features_pre_labeled/&lt;cell&gt;.csv</text>
+
+  <line x1="450" y1="370" x2="453" y2="370" stroke="#2e7d32" stroke-width="1"/>
+
+  <!-- arrow -->
+  <line x1="450" y1="462" x2="450" y2="484" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ══════════════ STAGE 4: HDBSCAN LAYER 1 ══════════════ -->
+  <rect x="120" y="484" width="660" height="130" rx="8" fill="#fff" stroke="#ce93d8" stroke-width="1.5"/>
+  <rect x="120" y="484" width="660" height="24" rx="8" fill="#6a1b9a"/>
+  <text x="450" y="501" text-anchor="middle" font-size="12" font-weight="bold" fill="white">STAGE 3a — HDBSCAN LAYER 1  (model_and_supervise.py)</text>
+
+  <rect x="140" y="518" width="260" height="60" rx="5" fill="#f3e5f5" stroke="#ce93d8"/>
+  <text x="270" y="534" text-anchor="middle" font-size="10" font-weight="bold" fill="#6a1b9a">Cluster features</text>
+  <text x="155" y="549" font-size="9" fill="#333">Input:  [Duration_quartile,  abs_Current_mean,  ID]</text>
+  <text x="155" y="562" font-size="9" fill="#333">Model:  TabularAutoencoderHDBSCAN.fit_cluster_only()</text>
+  <text x="155" y="575" font-size="9" fill="#333">ε = 0.5   min_cluster_size = n_programs − 1</text>
+
+  <rect x="420" y="518" width="340" height="60" rx="5" fill="#f3e5f5" stroke="#ce93d8"/>
+  <text x="590" y="534" text-anchor="middle" font-size="10" font-weight="bold" fill="#6a1b9a">Supervised filter  (post_cluster_filter.py)</text>
+  <text x="435" y="549" font-size="9" fill="#333">find_capacity: |I|≈CAP_Rate, discharge, duration≈60/C, V_min≈0</text>
+  <text x="435" y="562" font-size="9" fill="#333">find_pulses:   shortest Duration_minutes cluster</text>
+  <text x="435" y="575" font-size="9" fill="#333">find_qocv:     Duration closest to 60/qOCV_CRate (~1200 min)</text>
+
+  <line x1="400" y1="548" x2="418" y2="548" stroke="#6a1b9a" stroke-width="1" marker-end="url(#arrowPurple)"/>
+
+  <!-- decision diamond -->
+  <line x1="450" y1="614" x2="450" y2="636" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <polygon points="450,636 520,660 450,684 380,660" fill="#fff9c4" stroke="#f9a825" stroke-width="1.5"/>
+  <text x="450" y="657" text-anchor="middle" font-size="10" font-weight="bold" fill="#f57f17">Capacity cluster</text>
+  <text x="450" y="671" text-anchor="middle" font-size="10" font-weight="bold" fill="#f57f17">unambiguous?</text>
+
+  <!-- YES branch -->
+  <line x1="520" y1="660" x2="720" y2="660" stroke="#43a047" stroke-width="1.5"/>
+  <line x1="720" y1="660" x2="720" y2="752" stroke="#43a047" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <text x="618" y="652" text-anchor="middle" font-size="10" fill="#43a047" font-weight="bold">YES</text>
+
+  <!-- NO branch -->
+  <line x1="450" y1="684" x2="450" y2="706" stroke="#e53935" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+  <text x="460" y="697" font-size="10" fill="#e53935" font-weight="bold">NO</text>
+
+  <!-- ══════════════ STAGE 4b: HDBSCAN LAYER 2 ══════════════ -->
+  <rect x="140" y="706" width="580" height="66" rx="8" fill="#fff" stroke="#ef9a9a" stroke-width="1.5"/>
+  <rect x="140" y="706" width="580" height="20" rx="8" fill="#b71c1c"/>
+  <text x="430" y="721" text-anchor="middle" font-size="11" font-weight="bold" fill="white">STAGE 3b — HDBSCAN LAYER 2  (on capacity candidates)</text>
+  <text x="160" y="742" font-size="9" fill="#333">Input:  [Current_mean,  ID]  — restricted to candidate capacity cluster from Layer 1</text>
+  <text x="160" y="755" font-size="9" fill="#333">Stricter mask: |I| within ±2 % of CAP_Rate,  discharge only  →  smallest valid cluster wins</text>
+
+  <line x1="450" y1="772" x2="450" y2="752" stroke="#555" stroke-width="1.5" marker-end="url(#arrowUp)"/>
+
+  <!-- ══════════════ MERGE ══════════════ -->
+  <rect x="560" y="752" width="220" height="50" rx="8" fill="#fff8e1" stroke="#f9a825" stroke-width="1.5"/>
+  <text x="670" y="773" text-anchor="middle" font-size="11" font-weight="bold" fill="#e65100">Merge targets</text>
+  <text x="670" y="789" text-anchor="middle" font-size="9" fill="#555">CAP* / PUL* / QOCV* / −1</text>
+
+  <!-- arrow from merge to post-filter -->
+  <line x1="670" y1="802" x2="670" y2="834" stroke="#555" stroke-width="1.5"/>
+  <line x1="670" y1="834" x2="560" y2="834" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ══════════════ POST-CLUSTER FILTERS ══════════════ -->
+  <rect x="120" y="820" width="440" height="68" rx="8" fill="#fff" stroke="#80cbc4" stroke-width="1.5"/>
+  <rect x="120" y="820" width="440" height="20" rx="8" fill="#00695c"/>
+  <text x="340" y="835" text-anchor="middle" font-size="11" font-weight="bold" fill="white">Post-cluster quality filters  (post_cluster_filter.py)</text>
+  <text x="135" y="852" font-size="9" fill="#333">• check_temperature:  keep capacity segments within ±3 °C of CAP_Temp</text>
+  <text x="135" y="865" font-size="9" fill="#333">• check_CRate:        current within ±5 % of CAP_Rate</text>
+  <text x="135" y="878" font-size="9" fill="#333">• check_previous_voltage:  Voltage_max of preceding segment &gt; 0.99  (fully charged)</text>
+
+  <!-- arrow -->
+  <line x1="340" y1="888" x2="340" y2="910" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="350" y="901" font-size="10" fill="#888">SILVER DataFrame</text>
+
+  <!-- ══════════════ STAGE 5: RESULTS ══════════════ -->
+  <rect x="120" y="910" width="660" height="192" rx="8" fill="#fff" stroke="#ffcc80" stroke-width="1.5"/>
+  <rect x="120" y="910" width="660" height="24" rx="8" fill="#e65100"/>
+  <text x="450" y="927" text-anchor="middle" font-size="12" font-weight="bold" fill="white">STAGE 4 — RESULTS CALCULATION  (results_fetching.py)</text>
+
+  <!-- Capacity box -->
+  <rect x="140" y="944" width="185" height="140" rx="5" fill="#fff3e0" stroke="#ffcc80"/>
+  <text x="232" y="960" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">Capacity (CAP*)</text>
+  <text x="148" y="975" font-size="9" fill="#333">Trapezoidal integration of |I| dt</text>
+  <text x="148" y="988" font-size="9" fill="#333">→ Ah throughput per segment</text>
+  <text x="148" y="1003" font-size="9" fill="#333">Reject if &lt; Nom_Capacity / 3</text>
+  <text x="148" y="1018" font-size="9" fill="#333">Stored in: Capacity_py</text>
+
+  <!-- Pulse box -->
+  <rect x="345" y="944" width="220" height="140" rx="5" fill="#fff3e0" stroke="#ffcc80"/>
+  <text x="455" y="960" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">Pulse Resistance (PUL*)</text>
+  <text x="355" y="975" font-size="9" fill="#333">① Filter restore pulses:</text>
+  <text x="360" y="988" font-size="9" fill="#555" font-style="italic">same |I|, opposite sign, next in BM_Prog</text>
+  <text x="355" y="1002" font-size="9" fill="#333">② R_ct = |ΔV| / |I_mean|  (charge-transfer)</text>
+  <text x="355" y="1015" font-size="9" fill="#333">③ R_0  = (V_before − V_first) / I_first</text>
+  <text x="360" y="1028" font-size="9" fill="#555" font-style="italic">  (ohmic / series resistance)</text>
+  <text x="355" y="1042" font-size="9" fill="#333">Stored in: Pulse_py  [R_ct, R_0]</text>
+
+  <!-- qOCV box -->
+  <rect x="585" y="944" width="175" height="140" rx="5" fill="#fff3e0" stroke="#ffcc80"/>
+  <text x="672" y="960" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">Quasi-OCV (QOCV*)</text>
+  <text x="595" y="975" font-size="9" fill="#333">Confirm |I_mean| &lt; qOCV_CRate</text>
+  <text x="595" y="988" font-size="9" fill="#333">and  I_std &lt; 1 mA</text>
+  <text x="595" y="1003" font-size="9" fill="#333">Label qOCV_DCH / qOCV_CHA</text>
+  <text x="595" y="1018" font-size="9" fill="#333">by sign of current</text>
+  <text x="595" y="1033" font-size="9" fill="#333">Reject if Ah &lt; Nom_Cap / 3</text>
+
+  <!-- arrow -->
+  <line x1="450" y1="1102" x2="450" y2="1124" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ══════════════ OPTIONAL: AGING LABELS ══════════════ -->
+  <rect x="280" y="1124" width="340" height="44" rx="8" fill="#fce4ec" stroke="#f48fb1" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="450" y="1142" text-anchor="middle" font-size="11" font-weight="bold" fill="#880e4f">add_aging_labels()  (visualize/)</text>
+  <text x="450" y="1158" text-anchor="middle" font-size="9" fill="#555">Optional — adds aging cycle labels to GOLD DataFrame</text>
+
+  <!-- arrow -->
+  <line x1="450" y1="1168" x2="450" y2="1190" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ══════════════ OUTPUT ══════════════ -->
+  <rect x="300" y="1190" width="300" height="52" rx="8" fill="#2196f3" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="450" y="1211" text-anchor="middle" font-size="13" font-weight="bold" fill="white">OUTPUT</text>
+  <text x="450" y="1229" text-anchor="middle" font-size="11" fill="#e3f2fd">GOLD / &lt;type&gt; / &lt;cell&gt;.parquet</text>
+
+  <!-- ══════════════ CONFIG sidebar ══════════════ -->
+  <rect x="12" y="270" width="95" height="420" rx="6" fill="#e8eaf6" stroke="#9fa8da" stroke-width="1"/>
+  <text x="59" y="286" text-anchor="middle" font-size="9" font-weight="bold" fill="#283593">CONFIG JSON</text>
+  <line x1="20" y1="291" x2="99" y2="291" stroke="#9fa8da" stroke-width="0.8"/>
+  <text x="18" y="304" font-size="8" fill="#333">nom_capacity: 3.0</text>
+  <text x="18" y="317" font-size="8" fill="#333">v_min: 2.5</text>
+  <text x="18" y="330" font-size="8" fill="#333">v_max: 4.2</text>
+  <text x="18" y="343" font-size="8" fill="#333">v_nom: 3.6</text>
+  <text x="18" y="360" font-size="8" fill="#333">qocv_crate: 0.05</text>
+  <text x="18" y="373" font-size="8" fill="#333">cap_type: CC</text>
+  <text x="18" y="386" font-size="8" fill="#333">cap_rate: 0.5</text>
+  <text x="18" y="399" font-size="8" fill="#333">cap_temp: 25</text>
+  <text x="18" y="416" font-size="8" fill="#333">pulse_dur: 20 s</text>
+  <text x="18" y="429" font-size="8" fill="#333">pulse_type: 1</text>
+  <text x="18" y="446" font-size="8" fill="#333">min_rows: 20</text>
+  <text x="18" y="459" font-size="8" fill="#333">pau_dur: 9.9</text>
+  <text x="18" y="476" font-size="8" fill="#333">L1 epsilon: 0.3</text>
+  <text x="18" y="489" font-size="8" fill="#333">L1 min_cs: 8</text>
+  <text x="18" y="506" font-size="8" fill="#333">L2 epsilon: 0.001</text>
+  <text x="18" y="519" font-size="8" fill="#333">L2 min_cs: 3</text>
+  <!-- dashed lines pointing to stages -->
+  <line x1="107" y1="380" x2="120" y2="380" stroke="#9fa8da" stroke-width="0.8" stroke-dasharray="3,2"/>
+  <line x1="107" y1="530" x2="120" y2="530" stroke="#9fa8da" stroke-width="0.8" stroke-dasharray="3,2"/>
+  <line x1="107" y1="630" x2="120" y2="630" stroke="#9fa8da" stroke-width="0.8" stroke-dasharray="3,2"/>
+
+  <!-- ══════════════ LEGEND ══════════════ -->
+  <rect x="790" y="480" width="98" height="150" rx="6" fill="#fafafa" stroke="#ccc" stroke-width="1"/>
+  <text x="839" y="496" text-anchor="middle" font-size="9" font-weight="bold" fill="#333">LEGEND</text>
+  <rect x="800" y="503" width="14" height="10" rx="2" fill="#1565c0"/>
+  <text x="820" y="513" font-size="8" fill="#333">Data layer</text>
+  <rect x="800" y="521" width="14" height="10" rx="2" fill="#2e7d32"/>
+  <text x="820" y="531" font-size="8" fill="#333">Feature stage</text>
+  <rect x="800" y="539" width="14" height="10" rx="2" fill="#6a1b9a"/>
+  <text x="820" y="549" font-size="8" fill="#333">Clustering L1</text>
+  <rect x="800" y="557" width="14" height="10" rx="2" fill="#b71c1c"/>
+  <text x="820" y="567" font-size="8" fill="#333">Clustering L2</text>
+  <rect x="800" y="575" width="14" height="10" rx="2" fill="#e65100"/>
+  <text x="820" y="585" font-size="8" fill="#333">Results calc</text>
+  <rect x="800" y="593" width="14" height="10" rx="2" fill="#fff9c4" stroke="#f9a825"/>
+  <text x="820" y="603" font-size="8" fill="#333">Decision</text>
+  <rect x="800" y="611" width="14" height="10" rx="2" fill="#fce4ec" stroke="#f48fb1" stroke-dasharray="3,2"/>
+  <text x="820" y="621" font-size="8" fill="#333">Optional step</text>
+
+  <!-- ══════════════ ARROWHEAD DEFS ══════════════ -->
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#555"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="7" markerHeight="7" refX="5" refY="2.5" orient="auto">
+      <path d="M0,0 L0,5 L7,2.5 z" fill="#1565c0"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="7" markerHeight="7" refX="5" refY="2.5" orient="auto">
+      <path d="M0,0 L0,5 L7,2.5 z" fill="#6a1b9a"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="7" markerHeight="7" refX="5" refY="2.5" orient="auto">
+      <path d="M0,0 L0,5 L7,2.5 z" fill="#43a047"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="7" markerHeight="7" refX="2.5" refY="3.5" orient="auto">
+      <path d="M0,0 L5,3.5 L0,7 z" fill="#e53935"/>
+    </marker>
+    <marker id="arrowUp" markerWidth="8" markerHeight="8" refX="3" refY="6" orient="auto">
+      <path d="M0,8 L6,8 L3,0 z" fill="#555"/>
+    </marker>
+  </defs>
+
+</svg>
