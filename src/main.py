@@ -12,8 +12,6 @@ from calculate import results_fetching
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-PROCEDURE_FILTER = "jri_CU"
-
 _REQUIRED_COLS = {
     "preSILVER": {"Voltage", "Current", "Time", "Temperature", "ID", "BM_Programm", "target"},
     "features":  {"Duration_quartile", "abs_Current_mean", "Current_mean", "ID"},
@@ -32,7 +30,7 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-def run_pipeline(cfg: dict, target_specimen: list = None):
+def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = False):
     working_path = cfg["working_path"]
     cells = glob.glob1(os.path.join(working_path, "BRONZE_CU"), "*.parquet")
     if target_specimen:
@@ -45,7 +43,7 @@ def run_pipeline(cfg: dict, target_specimen: list = None):
         if type_cell not in cell or "eis" in cell:
             continue
         gold_path = _build_paths(cell, working_path, type_cell)["gold"]
-        if os.path.exists(gold_path):
+        if not overwrite and os.path.exists(gold_path):
             logging.info(f"Skipping {cell} — GOLD already exists")
             continue
         try:
@@ -68,24 +66,30 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
 
     # --- preSILVER ---
     logging.info(f"{cell}: dismembering")
+    procedure_filter = cfg.get("procedure_filter", None)
     dismembered_df = dismember_raw_cell(
         cell,
         paths["bronze"],
         cfg["min_rows"],
         cfg["pau_duration"],
         cfg["v_max"],
-        PROCEDURE_FILTER,
+        procedure_filter,
     )
     if dismembered_df is None or dismembered_df.empty:
         logging.warning(f"{cell}: empty after dismember, skipping")
         return
     _validate(dismembered_df, "preSILVER")
 
-    n_progs = int(
-        dismembered_df.groupby("BM_Programm")["Prozedur"]
-        .apply(lambda x: x.str.contains(PROCEDURE_FILTER, na=False).any())
-        .sum()
-    )
+    n_progs = 0
+    if procedure_filter is not None:
+        n_progs = int(
+            dismembered_df.groupby("BM_Programm")["Prozedur"]
+            .apply(lambda x: x.str.contains(procedure_filter, na=False).any())
+            .sum()
+        )
+    else:
+        # If no filter, count all unique programs
+        n_progs = dismembered_df["BM_Programm"].nunique()
     logging.info(f"{cell}: {n_progs} programs found")
 
     # --- features ---
@@ -106,11 +110,11 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
 
     # --- clustering ---
     logging.info(f"{cell}: clustering")
+    default_min_cluster_size = max(2, n_progs - 1)
     hdbscan_l1 = {
-        **cfg["hdbscan_para_layer_1"],
-        "min_cluster_size": max(2, n_progs - 1),
+        "min_cluster_size": default_min_cluster_size,
         "min_samples": 1,
-        "cluster_selection_epsilon": 0.5,
+        **cfg["hdbscan_para_layer_1"],
     }
     post_filter = post_cluster_filter.cluster_filter(
         n_progs,
@@ -155,6 +159,11 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
     df_gold.update(calc.update_pulse())
     df_gold.update(calc.update_capacity())
     df_gold.update(calc.update_qOCV())
+
+    # Propagate final targets back to X_silver and re-save
+    target_map = df_gold.groupby("ID")["target"].first()
+    X_silver["target"] = X_silver["ID"].map(target_map).fillna(X_silver["target"])
+    X_silver.to_csv(paths["X_silver"], index=False)
 
     try:
         from visualize import add_test_schedule
@@ -246,6 +255,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="METAbatt pipeline")
     parser.add_argument("config", help="Path to battery config JSON")
     parser.add_argument("--cells", nargs="*", help="Optional subset of cell names to process")
+    parser.add_argument("--overwrite", action="store_true", help="Reprocess cells even if GOLD already exists")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -255,4 +265,4 @@ if __name__ == "__main__":
     cfg["minio_secret_key"] = os.environ.get("MINIO_SECRET_KEY", "")
     cfg["influx_token"] = os.environ.get("INFLUX_TOKEN", "")
 
-    run_pipeline(cfg, target_specimen=args.cells)
+    run_pipeline(cfg, target_specimen=args.cells, overwrite=args.overwrite)
