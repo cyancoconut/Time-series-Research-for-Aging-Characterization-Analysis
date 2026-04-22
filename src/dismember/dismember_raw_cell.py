@@ -9,6 +9,10 @@ import numpy as np
 
 
 def processing_procedure_filter(loadpath, procedure_filter):
+    # If no filter is provided, allow all cells
+    if procedure_filter is None:
+        return True
+
     # filters out the whole cell if result is False
     filter_param = (
         "%" + procedure_filter + "%" if procedure_filter is not None else None
@@ -45,23 +49,47 @@ def read_and_fix_format(loadpath, V_max):
         }
     )
 
+    # Convert Time to datetime if it isn't already
+    if not pd.api.types.is_datetime64_any_dtype(df_cell["Time"]):
+        df_cell["Time"] = pd.to_datetime(df_cell["Time"], errors='coerce')
+
     df_cell[df_cell.select_dtypes(np.float64).columns] = df_cell.select_dtypes(
         np.float64
     ).astype(np.float32)
-    df_cell["Time_UTC"] = df_cell.Time.dt.tz_convert("UTC")
+    
+    # Only attempt UTC conversion if Time is actually a datetime object
+    if pd.api.types.is_datetime64_any_dtype(df_cell["Time"]):
+        try:
+            df_cell["Time_UTC"] = df_cell.Time.dt.tz_convert("UTC")
+        except Exception:
+            # If it has no timezone info, tz_convert fails; try tz_localize
+            try:
+                df_cell["Time_UTC"] = df_cell.Time.dt.tz_localize('UTC')
+            except Exception:
+                df_cell["Time_UTC"] = df_cell["Time"]
+    else:
+        df_cell["Time_UTC"] = df_cell["Time"]
     df_cell["Zustand"] = df_cell["Zustand"].astype(object)
     df_cell["Prozedur"] = df_cell["Prozedur"].astype(object)
     df_cell["Power"] = df_cell["Current"] * df_cell["Voltage"]
     df_cell["Label_Procedure"] = np.nan
     df_cell["Capacity_py"] = np.nan
     df_cell["Pulse_py"] = pd.array([None] * len(df_cell), dtype=object)
-    df_cell["BM_Programm"] = df_cell.groupby("Ahjo_Test_ID").ngroup()
+    # BM_Programm identification
+    if "Ahjo_Test_ID" in df_cell.columns:
+        df_cell["BM_Programm"] = df_cell.groupby("Ahjo_Test_ID").ngroup()
+    else:
+        # If no ID column, treat the entire file as one program (group 0)
+        df_cell["BM_Programm"] = 0
     df_cell["target"] = np.array(-1, dtype=str)
 
-    if "PAUO**" in df_cell["Zustand"].values:
-        df_cell.loc[df_cell["Zustand"] == "PAUO**", "Zustand"] = "PAUO"
-    if "PAU**" in df_cell["Zustand"].values:
-        df_cell.loc[df_cell["Zustand"] == "PAU**", "Zustand"] = "PAU"
+    # Fix Zustand values
+    if df_cell["Zustand"].dtype == "object" or df_cell["Zustand"].dtype == "category":
+        zustand_values = df_cell["Zustand"].astype(str).values
+        if "PAUO**" in zustand_values:
+            df_cell.loc[df_cell["Zustand"].astype(str) == "PAUO**", "Zustand"] = "PAUO"
+        if "PAU**" in zustand_values:
+            df_cell.loc[df_cell["Zustand"].astype(str) == "PAU**", "Zustand"] = "PAU"
 
     # Find columns with 'Floater' and "EIS" in their name
     floater_columns = [col for col in df_cell.columns if "Floater" in col]
