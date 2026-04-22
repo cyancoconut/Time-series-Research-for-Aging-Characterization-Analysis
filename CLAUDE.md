@@ -1,6 +1,9 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Always tell me what the plan is before changing code.
+Working data path is at /home/ann/Documents/Data_Metabatt.
+Update every changes made to the pipeline also here.
 
 ## Running the pipeline
 
@@ -69,22 +72,50 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
 | `min_rows` | Minimum rows to keep a procedure segment (default 20) |
 | `target_pulse_duration` | Expected pulse duration in seconds (default 20 s) |
 
-`hdbscan_para_layer_1["min_cluster_size"]` is overridden at runtime to `max(2, n_programs − 1)`.
+`hdbscan_para_layer_1["min_cluster_size"]` defaults to `max(2, n_programs − 1)` at runtime. If `min_cluster_size` is explicitly set in the config JSON, that value takes precedence (config key is merged last via `{defaults, **cfg["hdbscan_para_layer_1"]}`).
 `hdbscan_para_layer_1["cluster_selection_epsilon"]` must be **0.3** (not 3.0) for correct qOCV separation.
 
 ## qOCV detection note
 
 qOCV procedures come in discharge+charge pairs per aging cycle. Their signed `Current_mean` ≈ 0 (cancels), making them indistinguishable from rest segments if only signed current is used. `abs_Current_mean` is added to Layer 1 features to break this degeneracy. Layer 1 `cluster_selection_epsilon = 0.3` (tight) is required — 3.0 merges qOCV with rests.
 
+**Type coercion fix** (`cluster/model_and_supervise.py` `merge_target`): previously used `fillna` to merge Layer 1 integer cluster labels with Layer 2 string labels (`"cap_layer_N"`). NaNs in the string column forced int64→float64 coercion, so labels became `1.0`, `2.0` etc., causing `isin([np.int32(N)])` in `concat_clusters` to match 0 rows and produce no `QOCV*` labels. Fixed by using `.where(notna, target_x.astype(object))` to preserve integer types.
+
 ## Restore pulse structure
 
-After each test pulse a restore pulse returns the cell to its original SoC. All restore pulses run at C/2. The C/2 restores (20 s) are filtered in `update_pulse` by `_filter_restore_pulses`: within each BM_Programm, a PUL* segment is a restore if it has the same |current| (±5 %) as the immediately preceding pulse but opposite sign. 1C restores (~40 s at C/2) are already rejected by the duration check in `fetch_pulse`.
+After each test pulse a restore pulse returns the cell to its original SoC. All restore pulses run at C/2. The C/2 restores (20 s) are filtered in `update_pulse` by `_filter_restore_pulses`: within each BM_Programm, a PUL* segment is a restore if **all three** conditions hold:
+1. Its proc_num is exactly 1 more than the preceding PUL* segment (adjacent in the procedure sequence).
+2. Same |current| (±5 %) as the preceding PUL* segment.
+3. Opposite sign.
+
+The proc_num gap check (condition 1) is critical: if the true 1C restore (C/2 current, ~40 s) is not labeled PUL* by HDBSCAN, consecutive test pulses of opposite sign would otherwise be wrongly flagged as restores. A gap > 1 between consecutive PUL* segments means a non-PUL* segment sits between them, so the pair are two tests, not a test+restore. 1C restores (~40 s at C/2) that do reach `fetch_pulse` are rejected by the duration check there.
+
+Restore pulses are **not dropped** — they are labelled `PUL*RES` in both the GOLD parquet and the `with_features_post_labeled` CSV. Test pulses proceed to `fetch_pulse` and are labelled `PUL` after calculation.
 
 ## Configuration
 
 - **Battery parameters**: JSON config file passed to `main.py` (e.g. `battery_config_VTC_linux.json` in the data directory).
 - **MinIO/Ahjo credentials**: `config.json` at project root (gitignored). Copy structure from `config_SE_example.json`. Also available via env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`.
 - **Data path**: set `working_path` in the config JSON. BRONZE_CU parquet files must be under `<working_path>/BRONZE_CU/`.
+
+## CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `--cells` | Process a subset of cells by name fragment |
+| `--overwrite` | Reprocess cells even if GOLD already exists |
+
+## Post-labeling target sync
+
+After all three `df_gold.update(...)` calls in `_process_cell`, final targets are propagated back to `with_features_post_labeled/<cell>.csv`:
+
+```python
+target_map = df_gold.groupby("ID")["target"].first()
+X_silver["target"] = X_silver["ID"].map(target_map).fillna(X_silver["target"])
+X_silver.to_csv(paths["X_silver"], index=False)
+```
+
+This overwrites the intermediate clustering labels (CAP\*, PUL\*, QOCV\*) with the final calculated targets (CAP, PUL, PUL\*RES, qOCV\_DCH, qOCV\_CHA, −1). Numeric HDBSCAN labels not matched to any test type are left as-is (to be set to −1 in a future cleanup step).
 
 ## Documentation
 
