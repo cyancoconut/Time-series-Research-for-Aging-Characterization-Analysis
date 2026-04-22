@@ -8,7 +8,12 @@ def merge_target(df, X_unlabeled):
         df_merged = df.merge(
             X_unlabeled[["ID", "target"]], on="ID", how="left", suffixes=("_x", "_y")
         )
-        df_merged["target"] = df_merged["target_y"].fillna(df_merged["target_x"])
+        # Use .where() instead of fillna to avoid int64→float64 coercion when NaNs are
+        # present in target_y. astype(object) boxes integers as Python ints so isin()
+        # comparisons against integer cluster IDs work correctly downstream.
+        df_merged["target"] = df_merged["target_y"].where(
+            df_merged["target_y"].notna(), df_merged["target_x"].astype(object)
+        )
 
         df_final = df_merged.drop(["target_x", "target_y"], axis=1)
 
