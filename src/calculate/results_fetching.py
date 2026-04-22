@@ -215,10 +215,60 @@ class calculation:
         self.df.update(updated_subset_cap)
         return self.df
 
+    @staticmethod
+    def _filter_restore_pulses(subset_pul):
+        """Split PUL* segments into test pulses and restore pulses.
+
+        A restore pulse has the same |current| as the immediately preceding pulse
+        in the same BM_Programm but opposite sign. All restore pulses run at C/2.
+
+        Returns:
+            test_pul: DataFrame of test pulses (to be processed)
+            restore_ids: set of IDs identified as restore pulses
+        """
+        if subset_pul.empty:
+            return subset_pul, set()
+
+        id_stats = (
+            subset_pul.groupby("ID")["Current"]
+            .mean()
+            .reset_index()
+            .rename(columns={"Current": "Current_mean"})
+        )
+        id_stats["BM_Programm"] = id_stats["ID"].str.rsplit("_", n=1).str[0]
+        id_stats["proc_num"] = id_stats["ID"].str.rsplit("_", n=1).str[1].astype(int)
+        id_stats = id_stats.sort_values(["BM_Programm", "proc_num"])
+
+        restore_ids = set()
+        for _, grp in id_stats.groupby("BM_Programm"):
+            grp = grp.reset_index(drop=True)
+            for i in range(1, len(grp)):
+                # Restores are always immediately after their test (proc_num gap = 1).
+                # A gap > 1 means a non-PUL* segment sits between them (e.g. an
+                # undetected 1C restore), so the pair are two tests, not test+restore.
+                if grp.loc[i, "proc_num"] - grp.loc[i - 1, "proc_num"] != 1:
+                    continue
+                prev_I = grp.loc[i - 1, "Current_mean"]
+                curr_I = grp.loc[i, "Current_mean"]
+                same_magnitude = abs(abs(curr_I) - abs(prev_I)) / (abs(prev_I) + 1e-9) < 0.05
+                opposite_sign = np.sign(curr_I) != np.sign(prev_I)
+                if same_magnitude and opposite_sign:
+                    restore_ids.add(grp.loc[i, "ID"])
+
+        if restore_ids:
+            print(f"Filtering {len(restore_ids)} restore pulse IDs: {sorted(restore_ids)}")
+        test_pul = subset_pul[~subset_pul["ID"].isin(restore_ids)]
+        return test_pul, restore_ids
+
     def update_pulse(self):
         print("Calculating pulses")
         subset_pul = self.df[self.df["target"] == "PUL*"].copy()
-        updated_subset_pul = subset_pul.groupby("ID", group_keys=False).apply(
+        test_pul, restore_ids = calculation._filter_restore_pulses(subset_pul)
+
+        if restore_ids:
+            self.df.loc[self.df["ID"].isin(restore_ids), "target"] = "PUL*RES"
+
+        updated_subset_pul = test_pul.groupby("ID", group_keys=False).apply(
             lambda x: calculation.fetch_pulse(self, x, x.name), include_groups=False
         )
         self.df.update(updated_subset_pul)
