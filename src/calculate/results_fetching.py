@@ -17,7 +17,6 @@ class calculation:
         pulse_target_unit,
         df,
     ):
-
         self.qOCV_CRate = qOCV_CRate
         self.Nom_Capacity = Nom_Capacity
         self.target_pulse_duration = target_pulse_duration
@@ -25,23 +24,20 @@ class calculation:
         self.pulse_target_unit = pulse_target_unit
         self.df = df
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     def find_sign_changes(row):
-        # Convert row to numpy array and remove NaN values
         arr = np.array(row.dropna())
-        # Calculate the sign of each element
         signs = np.sign(arr)
-        # Find where the sign changes
         sign_changes = np.diff(signs)
-        # Get the indices where sign changes occur
         change_indices = np.where(sign_changes != 0)[0]
-        # If the first element is negative and there's a sign change, remove the first change
         if arr[0] < 0 and len(change_indices) > 0 and change_indices[0] == 0:
             change_indices = change_indices[1:]
-        # Add 1 to indices to match original DataFrame index (since we used diff)
         return change_indices
 
     def get_duration(self, df):
-        # in seconds
         time_h = df["Time"].diff().dt.total_seconds()
         time_h = np.cumsum(time_h).values
         time_h[0] = 0
@@ -58,169 +54,84 @@ class calculation:
         AhThroughput = AhThroughput - min(AhThroughput)
         return AhThroughput[-1]
 
-    def R_ct_calculation(self, group_df):
-        R_ct = abs(
-            (group_df["Voltage"].max() - group_df["Voltage"].min())
-            / group_df["Current"].mean()
-        )
-        return R_ct
+    def _row_at_time(self, group, t_elapsed, target_s):
+        idx = (t_elapsed - target_s).abs().idxmin()
+        return group.loc[idx]
 
-    def R_0_calculation(self, group_df):
-        pulse_idx = group_df.index[0]
-        pulse_voltage = group_df["Voltage"].iloc[0]
-        pulse_current = group_df[group_df["Current"] != 0]["Current"].iloc[
-            0
-        ]  # Get the first non-zero current
-        last_voltage_before = self.df.loc[self.df.index < pulse_idx, "Voltage"].iloc[-1]
+    def _build_pau_voltage_lookup(self):
+        """For each PAU stub, return the last-row voltage keyed by ID."""
+        pau_df = self.df[self.df["target"] == "PAU"]
+        return pau_df.groupby("ID")["Voltage"].last()
 
-        R_0 = (last_voltage_before - pulse_voltage) / pulse_current
-        return R_0
+    def _preceding_pau_voltage(self, pulse_id, pau_last_v):
+        """Return the relaxed voltage from the PAU stub immediately before pulse_id."""
+        prog, proc = pulse_id.rsplit("_", 1)
+        proc_num = int(proc)
+        candidates = [
+            (int(pid.rsplit("_", 1)[1]), v)
+            for pid, v in pau_last_v.items()
+            if pid.rsplit("_", 1)[0] == prog and int(pid.rsplit("_", 1)[1]) < proc_num
+        ]
+        if not candidates:
+            return None
+        _, v = max(candidates, key=lambda x: x[0])
+        return v
 
-    def fetch_qOCV(self, group, ID):
-        # when current mean is smaller than C/15, and the std is small, this must be a attempted qOCV measurement
-        if (
-            abs(group["Current"].mean()) < (self.qOCV_CRate * self.Nom_Capacity) + 0.01
-        ) & (abs(group["Current"].std()) < 1 / 1000):
-            calculated_capacity = self.Ah_calculation(group)
-            if calculated_capacity < self.Nom_Capacity / 3:
-                print("Outlier found at ID: ", ID)
-                group["target"] = "-1"
-            else:
+    # ------------------------------------------------------------------
+    # Pulse
+    # ------------------------------------------------------------------
 
-                if np.sign(group["Current"].iloc[-1]) == 1:
-                    if group["target"].iloc[-1] == "qOCV_CHA":
-                        print("qOCV already added at ID: ", ID)
-                    else:
-                        group["target"] = "qOCV_CHA"
-                        print("Added qOCV with Capacity: ", calculated_capacity)
-                else:
-                    if group["target"].iloc[-1] == "qOCV_DCH":
-                        print("qOCV already added at ID: ", ID)
-                    else:
-                        group["target"] = "qOCV_DCH"
-                        print(
-                            "Added qOCV at ID ",
-                            ID,
-                            " with Capacity: ",
-                            calculated_capacity,
-                        )
-        else:
+    def fetch_pulse(self, group, ID, v_before_override=None):
+        group = group.copy()
+        duration = self.get_duration(group)
+
+        if duration >= (self.pulse_type * self.target_pulse_duration) * 1.08:
+            print(f"Outlier found at ID: {ID} duration={duration:.1f}s")
             group["target"] = "-1"
-        return group
+            return group
 
-    def on_submit(self, group, b):
-        with self.output:
-            if self.text_input.value:
-                self.result = self.text_input.value
-                group["target"] = self.result
-                print(f"Target set to: {self.result}")
-            else:
-                print("Please enter a value")
-
-    def fetch_capacity(self, group, ID):
-        calculated_capacity = self.Ah_calculation(group)
-        print("Calculating Capacity at ID: ", ID, calculated_capacity)
-        if calculated_capacity < self.Nom_Capacity / 3:
-            group["Capacity_py"] = np.nan
-            print("Outlier found at ID: ", ID)
+        group["Time"] = pd.to_datetime(group["Time"])
+        active = group[group["Current"] != 0]
+        if active.empty:
             group["target"] = "-1"
+            return group
 
-        else:
-            group["Capacity_py"] = calculated_capacity
-            group["target"] = "CAP"
+        t_elapsed = (group["Time"] - active["Time"].iloc[0]).dt.total_seconds()
+        t_elapsed.index = group.index
+
+        # Use relaxed voltage from preceding PAU stub if available
+        v_before = v_before_override if v_before_override is not None else active["Voltage"].iloc[0]
+
+        row_1s  = self._row_at_time(group, t_elapsed, 1.0)
+        row_10s = self._row_at_time(group, t_elapsed, 10.0)
+        row_30s = self._row_at_time(group, t_elapsed, 30.0)
+
+        def resistance(row):
+            I = row["Current"]
+            if I == 0:
+                return np.nan
+            return abs((row["Voltage"] - v_before) / I)
+
+        R0  = resistance(row_1s)
+        R10 = resistance(row_10s)
+        R30 = resistance(row_30s)
+
+        list_R = [float(R0), float(R10), float(R30)]
+        group["Pulse_py"] = group["Pulse_py"].astype("object")
+        for idx in active.index:
+            group.at[idx, "Pulse_py"] = list_R
+
+        zustand = "Charge" if active["Current"].iloc[0] > 0 else "Discharge"
+        print(f"{zustand} Pulse added at ID: {ID}  R0={R0:.6f} Ω  R10={R10:.6f} Ω  R30={R30:.6f} Ω")
+        group["target"] = "PUL"
         return group
-
-    def fetch_pulse(self, group, ID):
-        sign_change_location = calculation.find_sign_changes(group["Current"])
-        duration = calculation.get_duration(self, group)
-        if (
-            duration < (self.pulse_type * self.target_pulse_duration) * 1.08
-        ):  # 1.08 is a safety factor
-            mask = group["Current"] > 0
-            if mask.any():
-                # now decide what unit should be calculated from the pulse
-                if self.pulse_target_unit == "Power":
-                    p_c = (
-                        group.iloc[-1]["Current"] * group.iloc[-1]["Voltage"]
-                    )  # power at chargepulse
-                elif self.pulse_target_unit == "Resistance":
-                    R_ct_c = self.R_ct_calculation(group)
-                    R_0_c = self.R_0_calculation(group)
-
-                list_R = [float(abs(R_ct_c)), float(abs(R_0_c))]
-                group["Pulse_py"] = group["Pulse_py"].astype("object")
-                for idx in group[mask].index:
-                    group.at[idx, "Pulse_py"] = list_R
-
-                print(
-                    "Charge Pulse added at ID: ",
-                    ID,
-                    " with",
-                    self.pulse_target_unit,
-                    ":",
-                    [abs(R_ct_c), abs(R_0_c)],
-                )
-                group["target"] = "PUL"
-
-            mask = group["Current"] < 0
-            if mask.any():
-                if self.pulse_target_unit == "Power":
-                    p_d = max(
-                        abs(
-                            (
-                                group.iloc[sign_change_location]["Current"]
-                                * group.iloc[sign_change_location]["Voltage"]
-                            )
-                        )
-                    )  # power at dischargepulse
-                elif self.pulse_target_unit == "Resistance":
-                    R_ct_d = self.R_ct_calculation(group)
-                    R_0_d = self.R_0_calculation(group)
-                # group_sum = group.sum()
-                list_R = [float(abs(R_ct_d)), float(abs(R_0_d))]
-                group["Pulse_py"] = group["Pulse_py"].astype("object")
-                for idx in group[mask].index:
-                    group.at[idx, "Pulse_py"] = list_R
-
-                print(
-                    "Discharge Pulse added at ID: ",
-                    ID,
-                    " with",
-                    self.pulse_target_unit,
-                    ":",
-                    [abs(R_ct_d), abs(R_0_d)],
-                )
-                group["target"] = "PUL"
-
-        else:
-            print("Outlier found at ID: ", ID, duration)
-            group["target"] = "-1"
-        return group
-
-    def update_qOCV(self):
-        print("Calculating qOCV")
-        subset_qocv = self.df[self.df["target"] == "QOCV*"].copy()
-        updated_subset = subset_qocv.groupby("ID", group_keys=False).apply(
-            lambda x: calculation.fetch_qOCV(self, x, x.name), include_groups=False
-        )
-        self.df.update(updated_subset)
-        return self.df
-
-    def update_capacity(self):
-        print("Calculating capacities")
-        subset_cap = self.df[self.df["target"] == "CAP*"].copy()
-        updated_subset_cap = subset_cap.groupby("ID", group_keys=False).apply(
-            lambda x: calculation.fetch_capacity(self, x, x.name), include_groups=False
-        )
-        self.df.update(updated_subset_cap)
-        return self.df
 
     @staticmethod
     def _filter_restore_pulses(subset_pul):
         """Split PUL* segments into test pulses and restore pulses.
 
         A restore pulse has the same |current| as the immediately preceding pulse
-        in the same BM_Programm but opposite sign. All restore pulses run at C/2.
+        in the same BM_Programm but opposite sign, with proc_num gap == 1.
 
         Returns:
             test_pul: DataFrame of test pulses (to be processed)
@@ -243,9 +154,6 @@ class calculation:
         for _, grp in id_stats.groupby("BM_Programm"):
             grp = grp.reset_index(drop=True)
             for i in range(1, len(grp)):
-                # Restores are always immediately after their test (proc_num gap = 1).
-                # A gap > 1 means a non-PUL* segment sits between them (e.g. an
-                # undetected 1C restore), so the pair are two tests, not test+restore.
                 if grp.loc[i, "proc_num"] - grp.loc[i - 1, "proc_num"] != 1:
                     continue
                 prev_I = grp.loc[i - 1, "Current_mean"]
@@ -268,8 +176,89 @@ class calculation:
         if restore_ids:
             self.df.loc[self.df["ID"].isin(restore_ids), "target"] = "PUL*RES"
 
+        pau_last_v = self._build_pau_voltage_lookup()
         updated_subset_pul = test_pul.groupby("ID", group_keys=False).apply(
-            lambda x: calculation.fetch_pulse(self, x, x.name), include_groups=False
+            lambda x: self.fetch_pulse(
+                x, x.name,
+                v_before_override=self._preceding_pau_voltage(x.name, pau_last_v),
+            ),
+            include_groups=False,
         )
         self.df.update(updated_subset_pul)
         return self.df
+
+    # ------------------------------------------------------------------
+    # Capacity
+    # ------------------------------------------------------------------
+
+    def fetch_capacity(self, group, ID):
+        calculated_capacity = self.Ah_calculation(group)
+        print("Calculating Capacity at ID: ", ID, calculated_capacity)
+        if calculated_capacity < self.Nom_Capacity / 3:
+            group["Capacity_py"] = np.nan
+            print("Outlier found at ID: ", ID)
+            group["target"] = "-1"
+        else:
+            group["Capacity_py"] = calculated_capacity
+            group["target"] = "CAP"
+        return group
+
+    def update_capacity(self):
+        print("Calculating capacities")
+        subset_cap = self.df[self.df["target"] == "CAP*"].copy()
+        updated_subset_cap = subset_cap.groupby("ID", group_keys=False).apply(
+            lambda x: calculation.fetch_capacity(self, x, x.name), include_groups=False
+        )
+        self.df.update(updated_subset_cap)
+        return self.df
+
+    # ------------------------------------------------------------------
+    # qOCV
+    # ------------------------------------------------------------------
+
+    def fetch_qOCV(self, group, ID):
+        if (
+            abs(group["Current"].mean()) < (self.qOCV_CRate * self.Nom_Capacity) + 0.01
+        ) & (abs(group["Current"].std()) < 1 / 1000):
+            calculated_capacity = self.Ah_calculation(group)
+            if calculated_capacity < self.Nom_Capacity / 3:
+                print("Outlier found at ID: ", ID)
+                group["target"] = "-1"
+            else:
+                if np.sign(group["Current"].iloc[-1]) == 1:
+                    if group["target"].iloc[-1] == "qOCV_CHA":
+                        print("qOCV already added at ID: ", ID)
+                    else:
+                        group["target"] = "qOCV_CHA"
+                        print("Added qOCV with Capacity: ", calculated_capacity)
+                else:
+                    if group["target"].iloc[-1] == "qOCV_DCH":
+                        print("qOCV already added at ID: ", ID)
+                    else:
+                        group["target"] = "qOCV_DCH"
+                        print("Added qOCV at ID ", ID, " with Capacity: ", calculated_capacity)
+        else:
+            group["target"] = "-1"
+        return group
+
+    def update_qOCV(self):
+        print("Calculating qOCV")
+        subset_qocv = self.df[self.df["target"] == "QOCV*"].copy()
+        updated_subset = subset_qocv.groupby("ID", group_keys=False).apply(
+            lambda x: calculation.fetch_qOCV(self, x, x.name), include_groups=False
+        )
+        self.df.update(updated_subset)
+        return self.df
+
+    # ------------------------------------------------------------------
+    # Interactive
+    # ------------------------------------------------------------------
+
+    def on_submit(self, group, b):
+        with self.output:
+            if self.text_input.value:
+                self.result = self.text_input.value
+                group["target"] = self.result
+                print(f"Target set to: {self.result}")
+            else:
+                print("Please enter a value")
