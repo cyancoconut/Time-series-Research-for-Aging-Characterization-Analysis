@@ -159,7 +159,6 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
         cfg["pulse_temp_step_threshold"],
     )
     df_gold = df_silver.copy()
-    df_gold.update(calc.update_pulse())
     df_gold.update(calc.update_capacity())
     df_gold.update(calc.update_qOCV())
 

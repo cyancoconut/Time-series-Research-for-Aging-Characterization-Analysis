@@ -89,13 +89,6 @@ class calculation:
 
     def fetch_pulse(self, group, ID, v_before_override=None):
         group = group.copy()
-        duration = self.get_duration(group)
-
-        if duration >= (self.pulse_type * self.target_pulse_duration) * 1.08:
-            print(f"Outlier found at ID: {ID} duration={duration:.1f}s")
-            group["target"] = "-1"
-            return group
-
         group["Time"] = pd.to_datetime(group["Time"])
         active = group[group["Current"] != 0]
         if active.empty:
