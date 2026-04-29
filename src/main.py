@@ -217,15 +217,11 @@ def _run_clustering(
         )
 
         X_clustered = model_and_supervise.merge_target(X_l1, X_l2)
-        df_clustered = df_l2.drop(columns=["target"]).merge(
-            X_clustered[["ID", "target"]], on="ID", how="left"
-        )
+        df_clustered = model_and_supervise.merge_target(df_l2, X_clustered)
     else:
         X_clustered = X_l1
         capacity_cluster = df_clustered_filtered
-        df_clustered = df_l1.drop(columns=["target"]).merge(
-            X_clustered[["ID", "target"]], on="ID", how="left"
-        )
+        df_clustered = model_and_supervise.merge_target(df_l1, X_clustered)
 
     X_final = model_and_supervise.add_pulse_qocv_and_concat(
         post_filter, cluster_means_l1, capacity_cluster, counter, X_clustered

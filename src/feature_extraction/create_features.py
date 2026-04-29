@@ -121,6 +121,7 @@ def create_features(
                 working_path, "with_features_pre_labeled", cell_name + ".csv"
             )
 
+            os.makedirs(os.path.dirname(savepath), exist_ok=True)
             X_unlabeled_features.to_csv(savepath, index=False)
 
             return (
