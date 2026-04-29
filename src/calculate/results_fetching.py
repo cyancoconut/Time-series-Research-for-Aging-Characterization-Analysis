@@ -16,13 +16,19 @@ class calculation:
         pulse_type,
         pulse_target_unit,
         df,
+        pulse_keep_per_group,
+        pulse_group_by,
+        pulse_temp_step_threshold,
     ):
         self.qOCV_CRate = qOCV_CRate
         self.Nom_Capacity = Nom_Capacity
         self.target_pulse_duration = target_pulse_duration
-        self.pulse_type = pulse_type  # 1 = single pulse, 2 = consecutive double pulse
+        self.pulse_type = pulse_type
         self.pulse_target_unit = pulse_target_unit
         self.df = df
+        self.pulse_keep_per_group = pulse_keep_per_group
+        self.pulse_group_by = pulse_group_by
+        self.pulse_temp_step_threshold = pulse_temp_step_threshold
 
     # ------------------------------------------------------------------
     # Helpers
@@ -126,58 +132,58 @@ class calculation:
         group["target"] = "PUL"
         return group
 
-    @staticmethod
-    def _filter_restore_pulses(subset_pul):
-        """Split PUL* segments into test pulses and restore pulses.
+    def _filter_pulse_group(self, subset_pul):
+        """Within each group, keep only the pulse indices in pulse_keep_per_group.
+        Skipped pulses are labelled PUL*RESTORE.
 
-        A restore pulse has the same |current| as the immediately preceding pulse
-        in the same BM_Programm but opposite sign, with proc_num gap == 1.
+        Grouping is determined by pulse_group_by:
+          "temperature"  — new group when Temperature changes > pulse_temp_step_threshold °C
+          "BM_Programm"  — each BM_Programm is one group
 
-        Returns:
-            test_pul: DataFrame of test pulses (to be processed)
-            restore_ids: set of IDs identified as restore pulses
+        Returns (keep_df, skip_ids).
         """
-        if subset_pul.empty:
+        if not self.pulse_keep_per_group or subset_pul.empty:
             return subset_pul, set()
 
-        id_stats = (
-            subset_pul.groupby("ID")["Current"]
-            .mean()
+        id_rep = (
+            subset_pul.groupby("ID", sort=False)
+            .first()
             .reset_index()
-            .rename(columns={"Current": "Current_mean"})
         )
-        id_stats["BM_Programm"] = id_stats["ID"].str.rsplit("_", n=1).str[0]
-        id_stats["proc_num"] = id_stats["ID"].str.rsplit("_", n=1).str[1].astype(int)
-        id_stats = id_stats.sort_values(["BM_Programm", "proc_num"])
+        id_rep["_proc_num"] = id_rep["ID"].str.rsplit("_", n=1).str[1].astype(int)
+        id_rep = id_rep.sort_values("_proc_num").reset_index(drop=True)
 
-        restore_ids = set()
-        for _, grp in id_stats.groupby("BM_Programm"):
-            grp = grp.reset_index(drop=True)
-            for i in range(1, len(grp)):
-                if grp.loc[i, "proc_num"] - grp.loc[i - 1, "proc_num"] != 1:
-                    continue
-                prev_I = grp.loc[i - 1, "Current_mean"]
-                curr_I = grp.loc[i, "Current_mean"]
-                same_magnitude = abs(abs(curr_I) - abs(prev_I)) / (abs(prev_I) + 1e-9) < 0.05
-                opposite_sign = np.sign(curr_I) != np.sign(prev_I)
-                if same_magnitude and opposite_sign:
-                    restore_ids.add(grp.loc[i, "ID"])
+        if self.pulse_group_by == "BM_Programm":
+            id_rep["_group"] = id_rep["BM_Programm"]
+        else:  # temperature
+            id_rep["_group"] = (
+                id_rep["Temperature"].diff().abs()
+                .gt(self.pulse_temp_step_threshold)
+                .fillna(False)
+                .cumsum()
+            )
 
-        if restore_ids:
-            print(f"Filtering {len(restore_ids)} restore pulse IDs: {sorted(restore_ids)}")
-        test_pul = subset_pul[~subset_pul["ID"].isin(restore_ids)]
-        return test_pul, restore_ids
+        id_rep["_pulse_num"] = id_rep.groupby("_group").cumcount() + 1
+
+        keep_ids = set(id_rep.loc[id_rep["_pulse_num"].isin(self.pulse_keep_per_group), "ID"])
+        skip_ids = set(id_rep["ID"]) - keep_ids
+
+        if skip_ids:
+            print(f"Skipping {len(skip_ids)} pulse IDs (PUL*RESTORE): {sorted(skip_ids)[:5]}{'...' if len(skip_ids) > 5 else ''}")
+
+        return subset_pul[subset_pul["ID"].isin(keep_ids)], skip_ids
 
     def update_pulse(self):
         print("Calculating pulses")
         subset_pul = self.df[self.df["target"] == "PUL*"].copy()
-        test_pul, restore_ids = calculation._filter_restore_pulses(subset_pul)
 
-        if restore_ids:
-            self.df.loc[self.df["ID"].isin(restore_ids), "target"] = "PUL*RES"
+        keep_pul, skip_ids = self._filter_pulse_group(subset_pul)
+
+        if skip_ids:
+            self.df.loc[self.df["ID"].isin(skip_ids), "target"] = "PUL*RESTORE"
 
         pau_last_v = self._build_pau_voltage_lookup()
-        updated_subset_pul = test_pul.groupby("ID", group_keys=False).apply(
+        updated_subset_pul = keep_pul.groupby("ID", group_keys=False).apply(
             lambda x: self.fetch_pulse(
                 x, x.name,
                 v_before_override=self._preceding_pau_voltage(x.name, pau_last_v),
