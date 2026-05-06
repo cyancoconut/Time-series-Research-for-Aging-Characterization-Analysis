@@ -1,0 +1,46 @@
+language: "en-US"
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  path_filters:
+    - "!**/*.parquet"
+    - "!**/*.csv"
+    - "!**/*.json"
+    - "!**/venv/**"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+
+  path_instructions:
+    - path: "src/**/*.py"
+      instructions: |
+        This is a battery test data pipeline (medallion architecture: BRONZE → preSILVER → SILVER → GOLD).
+        Focus on:
+        - Correctness of pandas operations (merges, groupby, fillna, type coercions)
+        - Data integrity across pipeline stages (no silent row drops, no NaN leakage)
+        - Correct handling of PAU stub segments (2-row stubs, exempt from min_rows, excluded from clustering)
+        - Restore pulse filtering logic in calculate/results_fetching.py (proc_num adjacency, same |current|, opposite sign)
+        - Integer vs float dtype preservation after merges (int cluster labels must not become floats)
+        - Parameter units: pau_duration in minutes, target_pulse_duration in seconds, CAP_Rate as C-rate fraction
+    - path: "src/cluster/**"
+      instructions: |
+        HDBSCAN clustering layer. Key invariants:
+        - cluster_selection_epsilon must be 0.3 (not 3.0) for correct qOCV separation
+        - merge_target() must use .where(notna, ...) to preserve integer label types
+        - Pre-labeled targets (PAU, EIS) must survive the cluster merge unchanged
+    - path: "src/dismember/**"
+      instructions: |
+        Segmentation layer. Key invariants:
+        - PAU segments > pau_duration → 2-row stubs with target="PAU"
+        - Short pauses and middle rows → BM_Programm_procedure=0 (discard)
+        - Segment IDs are strings: "<BM_Programm>_<procedure_number>"
+    - path: "src/**/*.ipynb"
+      instructions: "Notebooks are legacy/exploratory. Light review only — flag obvious bugs but skip style nits."
+
+chat:
+  auto_reply: true
