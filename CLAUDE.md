@@ -5,6 +5,19 @@ Always tell me what the plan is before changing code.
 Working data path is at /home/ann/Documents/Data_Metabatt.
 Update every changes made to the pipeline also here.
 
+## Git workflow
+
+Before making any code changes, always create a new branch:
+
+```bash
+git checkout -b feat/my-feature     # new feature
+git checkout -b fix/my-bugfix       # bug fix
+git checkout -b refactor/my-change  # refactor
+git checkout -b config/my-config    # config / parameters
+```
+
+Push the branch and open a PR into `J8005_BMWK_METABatt` on GitHub. CodeRabbit will auto-review the PR. Never commit directly to `J8005_BMWK_METABatt`.
+
 ## Running the pipeline
 
 All scripts and notebooks must be run from the `src/` directory (imports are relative to `src/`).
