@@ -16,6 +16,9 @@ class calculation:
         pulse_type,
         pulse_target_unit,
         df,
+        qocv_current_tolerance=0.01,
+        restore_current_tolerance=0.05,
+        pulse_duration_tolerance=1.08,
     ):
 
         self.qOCV_CRate = qOCV_CRate
@@ -24,6 +27,9 @@ class calculation:
         self.pulse_type = pulse_type  # 1 = single pulse, 2 = consecutive double pulse
         self.pulse_target_unit = pulse_target_unit
         self.df = df
+        self.qocv_current_tolerance = qocv_current_tolerance
+        self.restore_current_tolerance = restore_current_tolerance
+        self.pulse_duration_tolerance = pulse_duration_tolerance
 
     def find_sign_changes(row):
         # Convert row to numpy array and remove NaN values
@@ -79,7 +85,7 @@ class calculation:
     def fetch_qOCV(self, group, ID):
         # when current mean is smaller than C/15, and the std is small, this must be a attempted qOCV measurement
         if (
-            abs(group["Current"].mean()) < (self.qOCV_CRate * self.Nom_Capacity) + 0.01
+            abs(group["Current"].mean()) < (self.qOCV_CRate * self.Nom_Capacity) + self.qocv_current_tolerance
         ) & (abs(group["Current"].std()) < 1 / 1000):
             calculated_capacity = self.Ah_calculation(group)
             if calculated_capacity < self.Nom_Capacity / 3:
@@ -134,8 +140,8 @@ class calculation:
         sign_change_location = calculation.find_sign_changes(group["Current"])
         duration = calculation.get_duration(self, group)
         if (
-            duration < (self.pulse_type * self.target_pulse_duration) * 1.08
-        ):  # 1.08 is a safety factor
+            duration < (self.pulse_type * self.target_pulse_duration) * self.pulse_duration_tolerance
+        ):
             mask = group["Current"] > 0
             if mask.any():
                 # now decide what unit should be calculated from the pulse
@@ -216,7 +222,7 @@ class calculation:
         return self.df
 
     @staticmethod
-    def _filter_restore_pulses(subset_pul):
+    def _filter_restore_pulses(subset_pul, restore_current_tolerance=0.05):
         """Split PUL* segments into test pulses and restore pulses.
 
         A restore pulse has the same |current| as the immediately preceding pulse
@@ -250,7 +256,7 @@ class calculation:
                     continue
                 prev_I = grp.loc[i - 1, "Current_mean"]
                 curr_I = grp.loc[i, "Current_mean"]
-                same_magnitude = abs(abs(curr_I) - abs(prev_I)) / (abs(prev_I) + 1e-9) < 0.05
+                same_magnitude = abs(abs(curr_I) - abs(prev_I)) / (abs(prev_I) + 1e-9) < restore_current_tolerance
                 opposite_sign = np.sign(curr_I) != np.sign(prev_I)
                 if same_magnitude and opposite_sign:
                     restore_ids.add(grp.loc[i, "ID"])
@@ -263,7 +269,7 @@ class calculation:
     def update_pulse(self):
         print("Calculating pulses")
         subset_pul = self.df[self.df["target"] == "PUL*"].copy()
-        test_pul, restore_ids = calculation._filter_restore_pulses(subset_pul)
+        test_pul, restore_ids = calculation._filter_restore_pulses(subset_pul, self.restore_current_tolerance)
 
         if restore_ids:
             self.df.loc[self.df["ID"].isin(restore_ids), "target"] = "PUL*RES"
