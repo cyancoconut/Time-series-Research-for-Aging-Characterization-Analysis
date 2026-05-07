@@ -19,6 +19,9 @@ class calculation:
         pulse_keep_per_group=None,
         pulse_group_by="BM_Programm",
         pulse_step_threshold=None,
+        qocv_current_tolerance=0.01,
+        restore_current_tolerance=0.05,
+        pulse_duration_tolerance=1.08,
     ):
 
         self.qOCV_CRate = qOCV_CRate
@@ -30,6 +33,9 @@ class calculation:
         self.pulse_keep_per_group = pulse_keep_per_group or []
         self.pulse_group_by = pulse_group_by
         self.pulse_step_threshold = pulse_step_threshold
+        self.qocv_current_tolerance = qocv_current_tolerance
+        self.restore_current_tolerance = restore_current_tolerance
+        self.pulse_duration_tolerance = pulse_duration_tolerance
 
     def find_sign_changes(row):
         # Convert row to numpy array and remove NaN values
@@ -85,7 +91,7 @@ class calculation:
     def fetch_qOCV(self, group, ID):
         # when current mean is smaller than C/15, and the std is small, this must be a attempted qOCV measurement
         if (
-            abs(group["Current"].mean()) < (self.qOCV_CRate * self.Nom_Capacity) + 0.01
+            abs(group["Current"].mean()) < (self.qOCV_CRate * self.Nom_Capacity) + self.qocv_current_tolerance
         ) & (abs(group["Current"].std()) < 1 / 1000):
             calculated_capacity = self.Ah_calculation(group)
             if calculated_capacity < self.Nom_Capacity / 3:
@@ -140,8 +146,8 @@ class calculation:
         sign_change_location = calculation.find_sign_changes(group["Current"])
         duration = calculation.get_duration(self, group)
         if (
-            duration < (self.pulse_type * self.target_pulse_duration) * 1.08
-        ):  # 1.08 is a safety factor
+            duration < (self.pulse_type * self.target_pulse_duration) * self.pulse_duration_tolerance
+        ):
             mask = group["Current"] > 0
             if mask.any():
                 # now decide what unit should be calculated from the pulse

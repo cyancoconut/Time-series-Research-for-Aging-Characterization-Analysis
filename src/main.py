@@ -159,6 +159,9 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
         pulse_keep_per_group=cfg.get("pulse_keep_per_group"),
         pulse_group_by=cfg.get("pulse_group_by", "BM_Programm"),
         pulse_step_threshold=cfg.get("pulse_step_threshold"),
+        qocv_current_tolerance=cfg.get("tolerances", {}).get("qocv_current_tolerance", 0.01),
+        restore_current_tolerance=cfg.get("tolerances", {}).get("restore_current_tolerance", 0.05),
+        pulse_duration_tolerance=cfg.get("tolerances", {}).get("pulse_duration_tolerance", 1.08),
     )
     df_gold = df_silver.copy()
     df_gold.update(calc.update_pulse())
