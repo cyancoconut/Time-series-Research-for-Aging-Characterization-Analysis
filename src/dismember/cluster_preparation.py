@@ -93,6 +93,13 @@ class DismemblerFunctions:
             # Recompute after relabeling so EIS rows are excluded
             mask_pau = programm_df["Zustand"].isin(PAU_Columns)
 
+            # Fire a new procedure start when exiting a long PAU into the next Zustand group
+            prev_group_was_long_pau = (
+                (programm_df["ZUSTAND_group"] != programm_df["ZUSTAND_group"].shift())
+                & programm_df["Zustand"].shift().isin(PAU_Columns)
+                & (programm_df["ZUSTAND_Duration_minutes"].shift() > self.PAU_DURATION)
+            )
+
             # New procedure condition: PAU state + long duration + (group change OR first row)
             programm_df["new_procedure_start"] = (
                 (
@@ -106,6 +113,7 @@ class DismemblerFunctions:
                         | (programm_df.index == 0)
                     )
                 )
+                | prev_group_was_long_pau
                 |
                 # OR procedure change
                 (programm_df["Prozedur"] != programm_df["Prozedur"].shift())
