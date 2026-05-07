@@ -128,6 +128,7 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
         cfg["pulse_type"],
         cfg["pulse_target_unit"],
         cfg["tolerances"]["pulse_cluster_tolerance"],
+        cfg["v_max"],
     )
 
     df_silver, X_silver = _run_clustering(
@@ -225,7 +226,7 @@ def _run_clustering(
         df_clustered = model_and_supervise.merge_target(df_l1, X_clustered)
 
     X_final = model_and_supervise.add_pulse_qocv_and_concat(
-        post_filter, cluster_means_l1, capacity_cluster, counter, X_clustered
+        post_filter, cluster_means_l1, capacity_cluster, counter, X_clustered, dismembered_df
     )
     df_final = model_and_supervise.merge_target(df_clustered, X_final)
 
