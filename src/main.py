@@ -127,6 +127,7 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
         cfg["target_pulse_duration"],
         cfg["pulse_type"],
         cfg["pulse_target_unit"],
+        cfg["tolerances"]["pulse_cluster_tolerance"],
     )
 
     df_silver, X_silver = _run_clustering(

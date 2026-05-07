@@ -24,6 +24,7 @@ class cluster_filter:
         target_pulse_duration,
         pulse_type,
         pulse_target_unit,
+        pulse_cluster_tolerance,
     ):
         self.number_programms = number_programms
         self.qOCV_CRate = qOCV_CRate
@@ -35,6 +36,7 @@ class cluster_filter:
         self.target_pulse_duration = target_pulse_duration
         self.pulse_type = pulse_type  # 1 = single pulse, 2 = consecutive double pulse
         self.pulse_target_unit = pulse_target_unit
+        self.pulse_cluster_tolerance = pulse_cluster_tolerance
 
     ## Filter the clusters
     def find_capacity(self, cluster_means, cluster_size, layer):
@@ -159,10 +161,16 @@ class cluster_filter:
                 raise ClusterNotFoundException("No potential capacity clusters found")
 
     def find_pulses(self, cluster_means):
-        # getting the pulses through Duration Time
         possible_cluster = cluster_means[cluster_means.index >= 0]
-        pulse_clusters = [possible_cluster["Duration_minutes"].idxmin().tolist()]
-
+        # Threshold: target_pulse_duration (seconds) scaled to minutes, times tolerance.
+        # Catches all pulse-like clusters (e.g. 0.5C and 1C) while staying far below
+        # CAP (~120 min) and qOCV (~1200 min) durations.
+        pulse_threshold_min = (self.target_pulse_duration / 60) * self.pulse_cluster_tolerance
+        pulse_clusters = possible_cluster[
+            possible_cluster["Duration_minutes"] < pulse_threshold_min
+        ].index.tolist()
+        if not pulse_clusters:
+            pulse_clusters = [possible_cluster["Duration_minutes"].idxmin()]
         return pulse_clusters
 
     def find_qocv(self, cluster_means):
