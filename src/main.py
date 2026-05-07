@@ -156,6 +156,9 @@ def _process_cell(cell: str, working_path: str, cfg: dict, exceptions: dict):
         cfg["pulse_type"],
         cfg["pulse_target_unit"],
         df_silver,
+        pulse_keep_per_group=cfg.get("pulse_keep_per_group"),
+        pulse_group_by=cfg.get("pulse_group_by", "BM_Programm"),
+        pulse_step_threshold=cfg.get("pulse_step_threshold"),
     )
     df_gold = df_silver.copy()
     df_gold.update(calc.update_pulse())

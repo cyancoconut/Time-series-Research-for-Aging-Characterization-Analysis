@@ -16,6 +16,9 @@ class calculation:
         pulse_type,
         pulse_target_unit,
         df,
+        pulse_keep_per_group=None,
+        pulse_group_by="BM_Programm",
+        pulse_step_threshold=None,
     ):
 
         self.qOCV_CRate = qOCV_CRate
@@ -24,6 +27,9 @@ class calculation:
         self.pulse_type = pulse_type  # 1 = single pulse, 2 = consecutive double pulse
         self.pulse_target_unit = pulse_target_unit
         self.df = df
+        self.pulse_keep_per_group = pulse_keep_per_group or []
+        self.pulse_group_by = pulse_group_by
+        self.pulse_step_threshold = pulse_step_threshold
 
     def find_sign_changes(row):
         # Convert row to numpy array and remove NaN values
@@ -215,55 +221,55 @@ class calculation:
         self.df.update(updated_subset_cap)
         return self.df
 
-    @staticmethod
-    def _filter_restore_pulses(subset_pul):
-        """Split PUL* segments into test pulses and restore pulses.
+    def _filter_pulse_group(self, subset_pul):
+        """Keep only pulse positions listed in pulse_keep_per_group within each group.
 
-        A restore pulse has the same |current| as the immediately preceding pulse
-        in the same BM_Programm but opposite sign. All restore pulses run at C/2.
+        Pulses are sorted by proc_num within each BM_Programm and assigned a
+        1-based position. Positions not in pulse_keep_per_group are labelled PUL*RES.
 
-        Returns:
-            test_pul: DataFrame of test pulses (to be processed)
-            restore_ids: set of IDs identified as restore pulses
+        If pulse_step_threshold is set and pulse_group_by is a numeric column,
+        a new sub-group starts whenever consecutive pulses differ by more than
+        the threshold (reserved for future use; ignored when pulse_group_by="BM_Programm").
+
+        Returns (keep_df, skip_ids).
         """
-        if subset_pul.empty:
+        if not self.pulse_keep_per_group or subset_pul.empty:
             return subset_pul, set()
 
-        id_stats = (
-            subset_pul.groupby("ID")["Current"]
-            .mean()
+        id_rep = (
+            subset_pul.groupby("ID", sort=False)
+            .first()
             .reset_index()
-            .rename(columns={"Current": "Current_mean"})
         )
-        id_stats["BM_Programm"] = id_stats["ID"].str.rsplit("_", n=1).str[0]
-        id_stats["proc_num"] = id_stats["ID"].str.rsplit("_", n=1).str[1].astype(int)
-        id_stats = id_stats.sort_values(["BM_Programm", "proc_num"])
+        id_rep["_proc_num"] = id_rep["ID"].str.rsplit("_", n=1).str[1].astype(int)
+        id_rep["_bm"] = id_rep["ID"].str.rsplit("_", n=1).str[0]
+        id_rep = id_rep.sort_values(["_bm", "_proc_num"]).reset_index(drop=True)
 
-        restore_ids = set()
-        for _, grp in id_stats.groupby("BM_Programm"):
-            grp = grp.reset_index(drop=True)
-            for i in range(1, len(grp)):
-                # Restores are always immediately after their test (proc_num gap = 1).
-                # A gap > 1 means a non-PUL* segment sits between them (e.g. an
-                # undetected 1C restore), so the pair are two tests, not test+restore.
-                if grp.loc[i, "proc_num"] - grp.loc[i - 1, "proc_num"] != 1:
-                    continue
-                prev_I = grp.loc[i - 1, "Current_mean"]
-                curr_I = grp.loc[i, "Current_mean"]
-                same_magnitude = abs(abs(curr_I) - abs(prev_I)) / (abs(prev_I) + 1e-9) < 0.05
-                opposite_sign = np.sign(curr_I) != np.sign(prev_I)
-                if same_magnitude and opposite_sign:
-                    restore_ids.add(grp.loc[i, "ID"])
+        if self.pulse_group_by == "BM_Programm":
+            id_rep["_group"] = id_rep["_bm"]
+        elif self.pulse_step_threshold is not None and self.pulse_group_by in id_rep.columns:
+            id_rep["_group"] = (
+                id_rep.groupby("_bm")[self.pulse_group_by]
+                .transform(lambda s: s.diff().abs().gt(self.pulse_step_threshold).fillna(False).cumsum())
+                .astype(str) + "_" + id_rep["_bm"]
+            )
+        else:
+            id_rep["_group"] = id_rep["_bm"]
 
-        if restore_ids:
-            print(f"Filtering {len(restore_ids)} restore pulse IDs: {sorted(restore_ids)}")
-        test_pul = subset_pul[~subset_pul["ID"].isin(restore_ids)]
-        return test_pul, restore_ids
+        id_rep["_pulse_num"] = id_rep.groupby("_group").cumcount() + 1
+
+        keep_ids = set(id_rep.loc[id_rep["_pulse_num"].isin(self.pulse_keep_per_group), "ID"])
+        skip_ids = set(id_rep["ID"]) - keep_ids
+
+        if skip_ids:
+            print(f"Filtering {len(skip_ids)} restore pulse IDs: {sorted(skip_ids)[:5]}{'...' if len(skip_ids) > 5 else ''}")
+
+        return subset_pul[subset_pul["ID"].isin(keep_ids)], skip_ids
 
     def update_pulse(self):
         print("Calculating pulses")
         subset_pul = self.df[self.df["target"] == "PUL*"].copy()
-        test_pul, restore_ids = calculation._filter_restore_pulses(subset_pul)
+        test_pul, restore_ids = self._filter_pulse_group(subset_pul)
 
         if restore_ids:
             self.df.loc[self.df["ID"].isin(restore_ids), "target"] = "PUL*RES"
