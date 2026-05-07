@@ -180,12 +180,12 @@ def supervised_capacity_filter(
 
 
 def add_pulse_qocv_and_concat(
-    post_filter, cluster_means, capacity_cluster, layer, df_clustered
+    post_filter, cluster_means, capacity_cluster, layer, df_clustered, dismembered_df
 ):
     pulse_cluster = post_filter.find_pulses(cluster_means)
     qocv_cluster = post_filter.find_qocv(cluster_means)
 
     df_clustered_filtered = post_filter.concat_clusters(
-        capacity_cluster, pulse_cluster, qocv_cluster, layer, df_clustered
+        capacity_cluster, pulse_cluster, qocv_cluster, layer, df_clustered, dismembered_df
     )
     return df_clustered_filtered

@@ -25,6 +25,7 @@ class cluster_filter:
         pulse_type,
         pulse_target_unit,
         pulse_cluster_tolerance,
+        V_max,
     ):
         self.number_programms = number_programms
         self.qOCV_CRate = qOCV_CRate
@@ -37,6 +38,7 @@ class cluster_filter:
         self.pulse_type = pulse_type  # 1 = single pulse, 2 = consecutive double pulse
         self.pulse_target_unit = pulse_target_unit
         self.pulse_cluster_tolerance = pulse_cluster_tolerance
+        self.V_max = V_max
 
     ## Filter the clusters
     def find_capacity(self, cluster_means, cluster_size, layer):
@@ -187,64 +189,43 @@ class cluster_filter:
 
         return qocv_clusters
 
-    def previous_voltage(self, x, original_df):
+    def previous_voltage(self, x, dismembered_df):
         """
-        Check if the previous voltage is greater than 0.99
-        Returns:
-        - True if previous voltage > 0.99
-        - False if previous voltage <= 0.99 or previous ID not found
+        Check if the first row of the preceding segment has a fully charged voltage.
+        Uses raw time-series (dismembered_df) so PAU stubs are visible.
+        Returns True if first-row voltage of the previous ID > V_max * 0.99.
         """
         try:
             current_group_cu = x.split("_")[0]
-            current_group_cu_procedure = x.split("_")[1]
+            current_group_cu_procedure = int(x.split("_")[1])
 
-            previous_ID = (
-                current_group_cu + "_" + str(int(current_group_cu_procedure) - 1)
-            )
-            # Check if previous ID exists in the dataframe
-            prev_voltage_data = original_df[original_df["ID"] == previous_ID]
+            for step in range(1, 3):
+                previous_ID = f"{current_group_cu}_{current_group_cu_procedure - step}"
+                prev_data = dismembered_df[dismembered_df["ID"] == previous_ID]
+                if len(prev_data) > 0:
+                    return bool(prev_data["Voltage"].iloc[0] > self.V_max * 0.95)
 
-            if len(prev_voltage_data) == 0:
-                # print(f"Previous ID {previous_ID} not found. Trying with ID-2...")
-                previous_ID = (
-                    current_group_cu + "_" + str(int(current_group_cu_procedure) - 2)
-                )
-                # Check if previous ID exists in the dataframe
-                prev_voltage_data = original_df[original_df["ID"] == previous_ID]
-
-                if len(prev_voltage_data) == 0:
-                    # print(f"No previous ID found for {x}")
-                    return False
-
-                result = bool(prev_voltage_data["Voltage_max"].iloc[0] > 0.99)
-                # print(f"Previous ID {previous_ID} found. Voltage check result: {result}")
-                return result
-            else:
-                result = bool(prev_voltage_data["Voltage_max"].iloc[0] > 0.99)
-                # print(f"Previous ID {previous_ID} found. Voltage check result: {result}")
-                return result
+            return False
         except Exception as e:
             print(f"Error processing {x}: {e}")
             return False
 
-    def check_previous_voltage(self, df_capacity, df):
+    def check_previous_voltage(self, df_capacity, dismembered_df):
         """
-        Filter the capacity dataframe to include only rows where the previous voltage was > 0.99
+        Filter capacity candidates to those where the preceding segment starts
+        at a fully charged voltage, checked against raw time-series data.
         """
         print("Checking previous voltage for all capacity measurements...")
 
-        # Create an explicit filter function to ensure proper filtering
         def filter_function(row):
             id_value = row["ID"]
-            has_valid_voltage = self.previous_voltage(id_value, df)
-            # Explicitly log what's being kept/filtered
+            has_valid_voltage = self.previous_voltage(id_value, dismembered_df)
             if has_valid_voltage:
                 print(f"Keeping row with ID {id_value}")
             else:
                 print(f"Filtering out row with ID {id_value}")
             return has_valid_voltage
 
-        # Apply the filter directly to rows
         df_capacity_filtered = df_capacity[df_capacity.apply(filter_function, axis=1)]
 
         print(
@@ -298,7 +279,7 @@ class cluster_filter:
         return df_capacity_filtered
 
     def concat_clusters(
-        self, capacity_cluster, pulse_clusters, qocv_clusters, counter, df_final
+        self, capacity_cluster, pulse_clusters, qocv_clusters, counter, df_final, dismembered_df
     ):
         ## filter again the capacity and then concat with pulses
         df_final.loc[df_final["target"].isin(capacity_cluster), "target"] = "CAP*"
@@ -319,7 +300,7 @@ class cluster_filter:
                 df_capacity_filtered, df_pulse
             )
         df_capacity_filtered = self.check_previous_voltage(
-            df_capacity_filtered, df_final
+            df_capacity_filtered, dismembered_df
         )
 
         df_result_filtered = pd.concat(
