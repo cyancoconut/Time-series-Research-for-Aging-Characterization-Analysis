@@ -54,6 +54,12 @@ pip install -r requirements.txt         # other platforms
 | `pau_duration` | Pause threshold in minutes for procedure boundary detection |
 | `min_rows` | Minimum rows to keep a procedure segment |
 | `target_pulse_duration` | Expected pulse duration in seconds |
+| `pulse_keep_per_group` | 1-based positions of test pulses to keep within each group (e.g. `[1,3,5,7,9,11,13,15,17,19,21,23]`); all others are labelled `PUL*RES` |
+| `pulse_group_by` | How to group pulses: `"BM_Programm"` (one group per program) or a column name (e.g. `"Temperature"`) combined with `pulse_step_threshold` to split by metric steps |
+| `pulse_step_threshold` | Numeric threshold for sub-group detection when `pulse_group_by` is a column name; a new group starts when consecutive pulses differ by more than this value |
+| `tolerances.pulse_duration_tolerance` | Safety factor on expected pulse duration for outlier rejection (default `1.08`) |
+| `tolerances.restore_current_tolerance` | Fractional current tolerance for restore pulse detection (default `0.05`) |
+| `tolerances.qocv_current_tolerance` | Fractional current tolerance for qOCV detection (default `0.01`) |
 
 **Credentials** — `config.json` at project root (gitignored). Copy structure from `config_SE_example.json`. Also accepts env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`.
 
