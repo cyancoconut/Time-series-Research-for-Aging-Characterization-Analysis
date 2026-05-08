@@ -70,7 +70,7 @@ def _combine_tests(dfs: list) -> pd.DataFrame:
 
     col = combined.pop("Zeit")
     combined.insert(0, "Zeit", col)
-    combined.drop(columns=zeit_columns, inplace=True)
+    combined.drop(columns=[c for c in zeit_columns if c != "Zeit"], inplace=True)
     combined.sort_values("Zeit", inplace=True)
     combined = combined.rename(columns=lambda x: x.split("#")[0] if "#" in x else x)
     combined.reset_index(drop=True, inplace=True)
@@ -78,21 +78,56 @@ def _combine_tests(dfs: list) -> pd.DataFrame:
     return combined
 
 
+def save_parquet(df: pd.DataFrame, local_path: str | None, object_name: str | None = None, s3_dest: Minio | None = None) -> None:
+    """Write df to local_path and/or upload to S3.
+
+    object_name: full "bucket/path/to/file.parquet" — bucket is the first path segment.
+    s3_dest: Minio client instance.
+    At least one of local_path or (object_name + s3_dest) must be provided.
+    """
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False)
+
+    if local_path:
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(buf.getvalue())
+        print(f"  Saved locally:    {local_path}")
+
+    if object_name and s3_dest:
+        bucket, key = object_name.split("/", 1)
+        buf.seek(0)
+        try:
+            s3_dest.put_object(
+                bucket_name=bucket,
+                object_name=key,
+                data=buf,
+                length=len(buf.getvalue()),
+            )
+            print(f"  Uploaded to S3:   {object_name}")
+        except S3Error as e:
+            print(f"  Upload error for {object_name}: {e}")
+
+
 def process_cell(
     minio_client: Minio,
     bucket_name: str,
     prefix: str,
-    type_cell: str,
     cell: str,
     out_bronze_cu: str,
     out_ah_sidecar: str,
     overwrite: bool = False,
+    s3_dest: Minio | None = None,
 ) -> None:
-    if not overwrite and os.path.exists(out_bronze_cu) and os.path.exists(out_ah_sidecar):
+    local_exists = (
+        out_bronze_cu and os.path.exists(out_bronze_cu) and
+        out_ah_sidecar and os.path.exists(out_ah_sidecar)
+    )
+    if not overwrite and local_exists:
         print(f"{cell} - already exists, skipping.")
         return
 
-    objects = minio_client.list_objects(bucket_name, prefix=f"{prefix}/{type_cell}/{cell}/", recursive=True)
+    objects = minio_client.list_objects(bucket_name, prefix=f"{prefix}/{cell}/", recursive=True)
     cell_tests = [obj.object_name for obj in objects if obj.object_name.endswith(".parquet")]
 
     if not cell_tests:
@@ -127,18 +162,18 @@ def process_cell(
             ah_frames.append(df[["Zeit", "Strom"]].copy())
             tests.append(df)
         else:
-            # stub: first row only, all columns
+            # stub: first row only, all columns; reuse table for Ah extraction
             try:
-                stub = pq.read_table(io.BytesIO(data)).slice(0, 1).to_pandas()
+                table = pq.read_table(io.BytesIO(data))
+                stub = table.slice(0, 1).to_pandas()
             except Exception as e:
                 print(f"  Error reading stub from {object_name}: {e}")
                 continue
             stub["Prozedur"] = _programme_name(object_name)
             tests.append(stub)
 
-            # Ah: all rows, two columns only
             try:
-                ah_frames.append(pd.read_parquet(io.BytesIO(data), columns=["Zeit", "Strom"]))
+                ah_frames.append(table.select(["Zeit", "Strom"]).to_pandas())
             except Exception as e:
                 print(f"  Error reading Zeit/Strom from {object_name}: {e}")
 
@@ -147,9 +182,12 @@ def process_cell(
         return
 
     # --- BRONZE_CU ---
-    os.makedirs(os.path.dirname(out_bronze_cu), exist_ok=True)
-    _combine_tests(tests).to_parquet(out_bronze_cu, index=False)
-    print(f"  Saved BRONZE_CU:  {out_bronze_cu}")
+    save_parquet(
+        _combine_tests(tests),
+        out_bronze_cu,
+        object_name=f"{bucket_name}/{prefix}/BRONZE_CU/{cell}.parquet",
+        s3_dest=s3_dest,
+    )
 
     # --- Ah throughput sidecar ---
     if not ah_frames:
@@ -168,9 +206,12 @@ def process_cell(
         df_all["Time_UTC"] = df_all["Time_UTC"].dt.tz_convert("UTC")
     df_all = add_ah_throughput(df_all)
 
-    os.makedirs(os.path.dirname(out_ah_sidecar), exist_ok=True)
-    df_all[["Time_UTC", "Ah_throughput"]].to_parquet(out_ah_sidecar, index=False)
-    print(f"  Saved Ah sidecar: {out_ah_sidecar}")
+    save_parquet(
+        df_all[["Time_UTC", "Ah_throughput"]],
+        out_ah_sidecar,
+        object_name=f"{bucket_name}/{prefix}/Ah_throughput/{cell}.parquet",
+        s3_dest=s3_dest,
+    )
 
 
 def _list_cells(minio_client: Minio, bucket_name: str, prefix: str) -> list:
@@ -188,24 +229,23 @@ def run(cfg: dict, target_cells: list = None, overwrite: bool = False) -> None:
     minio_client = _connect_minio(cfg)
     bucket_name = cfg["bucket_name"]
     prefix = cfg["minio_prefix"]
-    working_path = cfg["working_path"]
-    type_cell = cfg.get("type_cell", "")
+    working_path = cfg.get("working_path")
+    save_local = cfg.get("save_local", True)
+    s3_dest = minio_client if cfg.get("upload_s3", False) else None
 
     cells = target_cells if target_cells else _list_cells(minio_client, bucket_name, prefix)
 
     for cell in cells:
-        if type_cell and type_cell not in cell:
-            continue
         print(f"Processing {cell}...")
         process_cell(
             minio_client=minio_client,
             bucket_name=bucket_name,
             prefix=prefix,
             cell=cell,
-            type_cell=type_cell,
-            out_bronze_cu=os.path.join(working_path, "BRONZE_CU", f"{cell}.parquet"),
-            out_ah_sidecar=os.path.join(working_path, "Ah_throughput", f"{cell}.parquet"),
+            out_bronze_cu=os.path.join(working_path, "BRONZE_CU", f"{cell}.parquet") if save_local else None,
+            out_ah_sidecar=os.path.join(working_path, "Ah_throughput", f"{cell}.parquet") if save_local else None,
             overwrite=overwrite,
+            s3_dest=s3_dest,
         )
 
 
@@ -218,8 +258,5 @@ if __name__ == "__main__":
 
     with open(args.config) as f:
         cfg = json.load(f)
-
-    cfg["minio_access_key"] = os.environ.get("MINIO_ACCESS_KEY", "")
-    cfg["minio_secret_key"] = os.environ.get("MINIO_SECRET_KEY", "")
 
     run(cfg, target_cells=args.cells, overwrite=args.overwrite)

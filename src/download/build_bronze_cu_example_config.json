@@ -1,0 +1,21 @@
+{
+    "minio_endpoint": "optimusprime.isea.rwth-aachen.de:9000",
+    "minio_access_key": "your_access_key",
+    "minio_secret_key": "your_secret_key",
+    "bucket_name": "zho",
+    "minio_prefix": "j8005-metabatt/Metabatt/VTC",
+
+    "working_path": "/home/user/Documents/Data_Metabatt",
+    "save_local": true,
+    "upload_s3": false,
+
+    "V_max": 4.2,
+    "V_min": 2.5,
+    "V_nom": 3.6,
+    "Nom_Capacity": 3.0,
+    "CAP_Rate": 0.5,
+    "qOCV_CRate": 0.05,
+    "pau_duration": 9.9,
+    "min_rows": 20,
+    "target_pulse_duration": 20
+}
