@@ -70,7 +70,7 @@ def _combine_tests(dfs: list) -> pd.DataFrame:
 
     col = combined.pop("Zeit")
     combined.insert(0, "Zeit", col)
-    combined.drop(columns=zeit_columns, inplace=True)
+    combined.drop(columns=[c for c in zeit_columns if c != "Zeit"], inplace=True)
     combined.sort_values("Zeit", inplace=True)
     combined = combined.rename(columns=lambda x: x.split("#")[0] if "#" in x else x)
     combined.reset_index(drop=True, inplace=True)
@@ -263,8 +263,5 @@ if __name__ == "__main__":
 
     with open(args.config) as f:
         cfg = json.load(f)
-
-    cfg["minio_access_key"] = os.environ.get("MINIO_ACCESS_KEY", "")
-    cfg["minio_secret_key"] = os.environ.get("MINIO_SECRET_KEY", "")
 
     run(cfg, target_cells=args.cells, overwrite=args.overwrite)

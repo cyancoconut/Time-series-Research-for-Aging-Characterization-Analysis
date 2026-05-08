@@ -1,5 +1,7 @@
 {
     "minio_endpoint": "optimusprime.isea.rwth-aachen.de:9000",
+    "minio_access_key": "your_access_key",
+    "minio_secret_key": "your_secret_key",
     "bucket_name": "zho",
     "minio_prefix": "j8005-metabatt/Metabatt/VTC",
     "type_cell": "VTC",
