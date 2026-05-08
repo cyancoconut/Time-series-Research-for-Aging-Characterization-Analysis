@@ -163,18 +163,18 @@ def process_cell(
             ah_frames.append(df[["Zeit", "Strom"]].copy())
             tests.append(df)
         else:
-            # stub: first row only, all columns
+            # stub: first row only, all columns; reuse table for Ah extraction
             try:
-                stub = pq.read_table(io.BytesIO(data)).slice(0, 1).to_pandas()
+                table = pq.read_table(io.BytesIO(data))
+                stub = table.slice(0, 1).to_pandas()
             except Exception as e:
                 print(f"  Error reading stub from {object_name}: {e}")
                 continue
             stub["Prozedur"] = _programme_name(object_name)
             tests.append(stub)
 
-            # Ah: all rows, two columns only
             try:
-                ah_frames.append(pd.read_parquet(io.BytesIO(data), columns=["Zeit", "Strom"]))
+                ah_frames.append(table.select(["Zeit", "Strom"]).to_pandas())
             except Exception as e:
                 print(f"  Error reading Zeit/Strom from {object_name}: {e}")
 
