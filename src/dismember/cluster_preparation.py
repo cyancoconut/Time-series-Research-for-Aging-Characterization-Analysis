@@ -17,7 +17,9 @@ class DismemblerFunctions:
         return df_cell
 
     def add_ah_throughput(self, df_cell):
-        if hasattr(df_cell, "Ah_throughput"):
+        # BRONZE_CU now carries Ah_throughput from the build step (full timeline).
+        # Only recompute if it's missing (e.g. legacy parquet without the column).
+        if "Ah_throughput" in df_cell.columns:
             return df_cell
         else:
             # Calculate time difference in hours
