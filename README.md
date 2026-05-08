@@ -46,7 +46,10 @@ pip install -r requirements.txt         # other platforms
 
 | Key | Description |
 |-----|-------------|
-| `working_path` | Root data directory; BRONZE_CU parquet files must be under `<working_path>/BRONZE_CU/` |
+| `working_path` | Root data directory; required when reading or writing locally. BRONZE_CU parquet files must be under `<working_path>/BRONZE_CU/` |
+| `download_from` | `"local"` (default) reads BRONZE_CU from `working_path`; `"minio"` streams from `<bucket>/<minio_prefix>/BRONZE_CU/` |
+| `upload_to` | `"local"` (default) writes GOLD/X_silver to `working_path`; `"minio"` uploads them to `<bucket>/<minio_prefix>/10_TRACY/`; `"both"` does both |
+| `minio_endpoint`, `bucket_name`, `minio_prefix` | Required when `download_from="minio"` or `upload_to` includes `"minio"` |
 | `V_max`, `V_min`, `V_nom` | Voltage limits and nominal voltage |
 | `Nom_Capacity` | Nominal capacity in Ah |
 | `CAP_Rate` | C-rate for capacity identification |
@@ -61,7 +64,7 @@ pip install -r requirements.txt         # other platforms
 | `tolerances.restore_current_tolerance` | Fractional current tolerance for restore pulse detection (default `0.05`) |
 | `tolerances.qocv_current_tolerance` | Fractional current tolerance for qOCV detection (default `0.01`) |
 
-**Credentials** — `config.json` at project root (gitignored). Copy structure from `config_SE_example.json`. Also accepts env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`.
+**Credentials** — `config.json` at project root (gitignored). Copy structure from `config_SE_example.json`. Also accepts env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`. The MinIO endpoint, bucket and prefix live in the **battery config** alongside the routing keys above.
 
 ## Running the pipeline
 
