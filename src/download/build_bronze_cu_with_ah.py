@@ -29,6 +29,7 @@ import argparse
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import urllib3
 from minio import Minio
 from minio.error import S3Error
@@ -115,23 +116,31 @@ def process_cell(
             print(f"  Error fetching {object_name}: {e}")
             continue
 
-        try:
-            df = pd.read_parquet(io.BytesIO(data))
-        except Exception as e:
-            print(f"  Error reading {object_name}: {e}")
-            continue
+        is_cu = _is_cu(object_name)
 
-        # Ah throughput accumulator: all rows, Zeit + Strom only
-        if "Zeit" in df.columns and "Strom" in df.columns:
+        if is_cu:
+            try:
+                df = pd.read_parquet(io.BytesIO(data))
+            except Exception as e:
+                print(f"  Error reading {object_name}: {e}")
+                continue
             ah_frames.append(df[["Zeit", "Strom"]].copy())
-
-        # BRONZE_CU contribution
-        if _is_cu(object_name):
             tests.append(df)
         else:
-            stub = df.head(1).copy()
+            # stub: first row only, all columns
+            try:
+                stub = pq.read_table(io.BytesIO(data)).slice(0, 1).to_pandas()
+            except Exception as e:
+                print(f"  Error reading stub from {object_name}: {e}")
+                continue
             stub["Prozedur"] = _programme_name(object_name)
             tests.append(stub)
+
+            # Ah: all rows, two columns only
+            try:
+                ah_frames.append(pd.read_parquet(io.BytesIO(data), columns=["Zeit", "Strom"]))
+            except Exception as e:
+                print(f"  Error reading Zeit/Strom from {object_name}: {e}")
 
     if not tests:
         print(f"{cell} - no data loaded.")
