@@ -185,7 +185,7 @@ def process_cell(
     save_parquet(
         _combine_tests(tests),
         out_bronze_cu,
-        object_name=f"{bucket_name}/BRONZE_CU/{cell}.parquet",
+        object_name=f"{bucket_name}/{prefix}/BRONZE_CU/{cell}.parquet",
         s3_dest=s3_dest,
     )
 
@@ -209,7 +209,7 @@ def process_cell(
     save_parquet(
         df_all[["Time_UTC", "Ah_throughput"]],
         out_ah_sidecar,
-        object_name=f"{bucket_name}/Ah_throughput/{cell}.parquet",
+        object_name=f"{bucket_name}/{prefix}/Ah_throughput/{cell}.parquet",
         s3_dest=s3_dest,
     )
 
