@@ -4,7 +4,6 @@
     "minio_secret_key": "your_secret_key",
     "bucket_name": "zho",
     "minio_prefix": "j8005-metabatt/Metabatt/VTC",
-    "type_cell": "VTC",
 
     "working_path": "/home/user/Documents/Data_Metabatt",
     "save_local": true,

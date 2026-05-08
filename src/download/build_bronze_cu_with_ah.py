@@ -113,7 +113,6 @@ def process_cell(
     minio_client: Minio,
     bucket_name: str,
     prefix: str,
-    type_cell: str,
     cell: str,
     out_bronze_cu: str,
     out_ah_sidecar: str,
@@ -128,7 +127,7 @@ def process_cell(
         print(f"{cell} - already exists, skipping.")
         return
 
-    objects = minio_client.list_objects(bucket_name, prefix=f"{prefix}/{type_cell}/{cell}/", recursive=True)
+    objects = minio_client.list_objects(bucket_name, prefix=f"{prefix}/{cell}/", recursive=True)
     cell_tests = [obj.object_name for obj in objects if obj.object_name.endswith(".parquet")]
 
     if not cell_tests:
@@ -231,22 +230,18 @@ def run(cfg: dict, target_cells: list = None, overwrite: bool = False) -> None:
     bucket_name = cfg["bucket_name"]
     prefix = cfg["minio_prefix"]
     working_path = cfg.get("working_path")
-    type_cell = cfg.get("type_cell", "")
     save_local = cfg.get("save_local", True)
     s3_dest = minio_client if cfg.get("upload_s3", False) else None
 
     cells = target_cells if target_cells else _list_cells(minio_client, bucket_name, prefix)
 
     for cell in cells:
-        if type_cell and type_cell not in cell:
-            continue
         print(f"Processing {cell}...")
         process_cell(
             minio_client=minio_client,
             bucket_name=bucket_name,
             prefix=prefix,
             cell=cell,
-            type_cell=type_cell,
             out_bronze_cu=os.path.join(working_path, "BRONZE_CU", f"{cell}.parquet") if save_local else None,
             out_ah_sidecar=os.path.join(working_path, "Ah_throughput", f"{cell}.parquet") if save_local else None,
             overwrite=overwrite,
