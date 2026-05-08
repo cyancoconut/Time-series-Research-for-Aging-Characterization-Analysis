@@ -1,11 +1,14 @@
 """
-Single-pass MinIO fetch: builds BRONZE_CU and an Ah-throughput sidecar
+Single-pass MinIO fetch: builds BRONZE_CU (with Ah_throughput column)
 for each cell by downloading each test file exactly once.
 
 For each file:
-  - All rows, Zeit + Strom  -> Ah throughput accumulator
+  - All rows, Zeit + Strom  -> Ah throughput accumulator (full timeline)
   - CU file: all rows, all columns -> BRONZE_CU
   - Non-CU file: first row only, all columns + Prozedur name -> BRONZE_CU stub
+
+Ah_throughput is computed over the full timeline (all files) and merged
+into BRONZE_CU by Zeit, so stubs receive the Ah value at their first row.
 
 Usage:
     cd src
@@ -115,15 +118,10 @@ def process_cell(
     prefix: str,
     cell: str,
     out_bronze_cu: str,
-    out_ah_sidecar: str,
     overwrite: bool = False,
     s3_dest: Minio | None = None,
 ) -> None:
-    local_exists = (
-        out_bronze_cu and os.path.exists(out_bronze_cu) and
-        out_ah_sidecar and os.path.exists(out_ah_sidecar)
-    )
-    if not overwrite and local_exists:
+    if not overwrite and out_bronze_cu and os.path.exists(out_bronze_cu):
         print(f"{cell} - already exists, skipping.")
         return
 
@@ -181,35 +179,32 @@ def process_cell(
         print(f"{cell} - no data loaded.")
         return
 
-    # --- BRONZE_CU ---
+    bronze = _combine_tests(tests)
+
+    # --- Ah throughput computed over full timeline, merged into BRONZE_CU ---
+    if ah_frames:
+        df_all = pd.concat(ah_frames, ignore_index=True)
+        df_all = df_all.drop_duplicates("Zeit").sort_values("Zeit").reset_index(drop=True)
+        df_all[df_all.select_dtypes(np.float64).columns] = (
+            df_all.select_dtypes(np.float64).astype(np.float32)
+        )
+        # add_ah_throughput needs Time_UTC + Current; keep original Zeit for merge key
+        df_ah = df_all.rename(columns={"Strom": "Current"})
+        df_ah["Time_UTC"] = df_ah["Zeit"]
+        if df_ah["Time_UTC"].dt.tz is None:
+            df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_localize("UTC")
+        else:
+            df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_convert("UTC")
+        df_ah = add_ah_throughput(df_ah)
+
+        bronze = bronze.merge(df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left")
+    else:
+        print(f"{cell} - no Zeit/Strom data for Ah throughput; column omitted.")
+
     save_parquet(
-        _combine_tests(tests),
+        bronze,
         out_bronze_cu,
         object_name=f"{bucket_name}/{prefix}/BRONZE_CU/{cell}.parquet",
-        s3_dest=s3_dest,
-    )
-
-    # --- Ah throughput sidecar ---
-    if not ah_frames:
-        print(f"{cell} - no Zeit/Strom data for Ah throughput.")
-        return
-
-    df_all = pd.concat(ah_frames, ignore_index=True)
-    df_all = df_all.drop_duplicates("Zeit").sort_values("Zeit").reset_index(drop=True)
-    df_all[df_all.select_dtypes(np.float64).columns] = (
-        df_all.select_dtypes(np.float64).astype(np.float32)
-    )
-    df_all = df_all.rename(columns={"Strom": "Current", "Zeit": "Time_UTC"})
-    if df_all["Time_UTC"].dt.tz is None:
-        df_all["Time_UTC"] = df_all["Time_UTC"].dt.tz_localize("UTC")
-    else:
-        df_all["Time_UTC"] = df_all["Time_UTC"].dt.tz_convert("UTC")
-    df_all = add_ah_throughput(df_all)
-
-    save_parquet(
-        df_all[["Time_UTC", "Ah_throughput"]],
-        out_ah_sidecar,
-        object_name=f"{bucket_name}/{prefix}/Ah_throughput/{cell}.parquet",
         s3_dest=s3_dest,
     )
 
@@ -243,7 +238,6 @@ def run(cfg: dict, target_cells: list = None, overwrite: bool = False) -> None:
             prefix=prefix,
             cell=cell,
             out_bronze_cu=os.path.join(working_path, "BRONZE_CU", f"{cell}.parquet") if save_local else None,
-            out_ah_sidecar=os.path.join(working_path, "Ah_throughput", f"{cell}.parquet") if save_local else None,
             overwrite=overwrite,
             s3_dest=s3_dest,
         )
