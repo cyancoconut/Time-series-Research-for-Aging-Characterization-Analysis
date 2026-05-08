@@ -3,7 +3,7 @@ from scipy import integrate
 
 
 def add_ah_throughput(df_cell):
-    if hasattr(df_cell, "Ah_throughput"):
+    if "Ah_throughput" in df_cell.columns:
         return df_cell
     else:
         # Calculate time difference in hours
