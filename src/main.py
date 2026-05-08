@@ -99,6 +99,7 @@ def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
 
 
 def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions):
+    working_path = cfg.get("working_path")
     # --- preSILVER ---
     logging.info(f"{cell}: dismembering")
     procedure_filter = cfg.get("procedure_filter", None)
