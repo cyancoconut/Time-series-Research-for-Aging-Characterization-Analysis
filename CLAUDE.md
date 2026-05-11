@@ -74,7 +74,7 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
 
 5. **`output/`** — uploads to InfluxDB. **`util/connect_minio.py`** — uploads parquet to MinIO.
 
-6. **`output/export_pulse.py`, `output/export_qocv.py`** — optional per-`BM_Programm` exports of PUL / qOCV segments from GOLD. Gated by `export_pulse` and `export_qocv` flags in the battery config (both default off). For each BM_Programm, capacity is looked up from the same program's CAP segment (`Capacity_py`) and SOH is computed as `round(Capacity_py / nom_capacity * 100, 1)`; if no valid CAP capacity exists for a program, `SOH=NA` is used and a warning is logged. Files:
+6. **`output/export_pulse.py`, `output/export_qocv.py`** — optional per-`BM_Programm` exports of PUL / qOCV segments from GOLD. Gated by `export_pulse` and `export_qocv` flags in the battery config (both default off). For each BM_Programm, capacity is looked up from the same program's CAP segment (`Capacity_py`) and SOH is computed as `round(Capacity_py / nom_capacity * 100, 1)`; if no valid CAP capacity exists for a program, `SOH=NA` is used and a warning is logged. The pulse export also includes the adjacent PAU stubs (proc_num ±1 within the same BM_Programm) so the relaxation voltage before and after each pulse is preserved. Files:
    - `20_export_pulse/<cell_stem>/<cell_stem>_pulse_BM<BM_Programm>_<SOH>SOH.parquet`
    - `30_export_qocv/<cell_stem>/<cell_stem>_qocv_dch_BM<BM_Programm>_<SOH>SOH.parquet`, `..._qocv_cha_BM<BM_Programm>_<SOH>SOH.parquet`
 
