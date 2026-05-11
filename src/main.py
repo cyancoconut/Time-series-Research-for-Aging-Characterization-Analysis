@@ -77,7 +77,7 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
 
         # Local skip-check only applies when we'd write a local GOLD file
         if io_router.writes_local(cfg) and working_path and not overwrite:
-            gold_path = _build_paths(cell, working_path, type_cell)["gold"]
+            gold_path = _build_paths(cell, working_path)["gold"]
             if os.path.exists(gold_path):
                 logging.info(f"Skipping {cell} — local GOLD already exists")
                 continue
@@ -98,10 +98,9 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
 
 def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
     working_path = cfg.get("working_path")
-    type_cell = cfg["type_cell"]
     download_from = cfg.get("download_from", "local")
 
-    paths = _build_paths(cell, working_path, type_cell) if working_path else None
+    paths = _build_paths(cell, working_path) if working_path else None
     if paths and io_router.writes_local(cfg):
         os.makedirs(os.path.dirname(paths["gold"]), exist_ok=True)
 
@@ -341,14 +340,14 @@ def _run_clustering(
     return df_final, X_final
 
 
-def _build_paths(cell: str, working_path: str, type_cell: str) -> dict:
+def _build_paths(cell: str, working_path: str) -> dict:
     stem = cell.split(".")[0]
     return {
         "bronze": os.path.join(working_path, "BRONZE_CU", cell),
         "X_silver": os.path.join(
             working_path, "with_features_post_labeled", stem + ".csv"
         ),
-        "gold": os.path.join(working_path, "GOLD", type_cell, cell),
+        "gold": os.path.join(working_path, "GOLD", cell),
     }
 
 
