@@ -32,7 +32,7 @@ python main.py /path/to/battery_config_VTC_linux.json --cells VTC_cell01 VTC_cel
 
 The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` also works but `main.py` is the current entry point.
 
-**Venv (Linux)**: `source venv/bin/activate` from project root.
+**Venv (Linux)**: `source .venv/bin/activate` from project root.
 
 ## Architecture
 
