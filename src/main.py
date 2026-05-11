@@ -249,7 +249,7 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
 
     if cfg.get("export_pulse") or cfg.get("export_qocv"):
         df_export = df_gold[
-            df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA"])
+            df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA", "PAU"])
         ]
         soh = _build_soh_map(df_export, cfg["nom_capacity"])
         if cfg.get("export_pulse"):
