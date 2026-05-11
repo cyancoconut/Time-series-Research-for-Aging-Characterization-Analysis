@@ -78,33 +78,36 @@ def create_features(
     count = 0
 
     try:
-        savepath = os.path.join(
-            working_path, "with_features_pre_labeled", cell.split(".")[0] + ".csv"
+        # working_path is optional: when None (pure-MinIO run), skip the
+        # with_features_pre_labeled CSV cache entirely.
+        savepath = (
+            os.path.join(working_path, "with_features_pre_labeled", cell.split(".")[0] + ".csv")
+            if working_path
+            else None
         )
 
-        if overwrite == 0:
-            if os.path.exists(savepath):
-                print(
-                    f"Skipping {cell} - with_features_pre_labeled file already processed"
+        if overwrite == 0 and savepath and os.path.exists(savepath):
+            print(
+                f"Skipping {cell} - with_features_pre_labeled file already processed"
+            )
+            try:
+                df = pd.read_csv(savepath)
+            except Exception as e:
+                print(f"Error reading {savepath}: {e}. Removing file.")
+                os.remove(savepath)
+                return create_features(
+                    dismembered_df,
+                    cell,
+                    working_path,
+                    exception_dict,
+                    V_max,
+                    V_min,
+                    V_nom,
+                    Nom_Capacity,
+                    feature_columns,
+                    overwrite=overwrite,
                 )
-                try:
-                    df = pd.read_csv(savepath)
-                except Exception as e:
-                    print(f"Error reading {savepath}: {e}. Removing file.")
-                    os.remove(savepath)
-                    create_features(
-                        dismembered_df,
-                        cell,
-                        working_path,
-                        exception_dict,
-                        V_max,
-                        V_min,
-                        V_nom,
-                        Nom_Capacity,
-                        feature_columns,
-                        overwrite=overwrite,
-                    )
-                return df, count
+            return df, count
 
         print(f"Creating features for cell {cell}...")
 
@@ -117,12 +120,9 @@ def create_features(
 
             count = count + 1
 
-            savepath = os.path.join(
-                working_path, "with_features_pre_labeled", cell_name + ".csv"
-            )
-
-            os.makedirs(os.path.dirname(savepath), exist_ok=True)
-            X_unlabeled_features.to_csv(savepath, index=False)
+            if savepath:
+                os.makedirs(os.path.dirname(savepath), exist_ok=True)
+                X_unlabeled_features.to_csv(savepath, index=False)
 
             return (
                 X_unlabeled_features,
