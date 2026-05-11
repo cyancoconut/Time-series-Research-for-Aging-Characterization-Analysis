@@ -81,9 +81,14 @@ def fetch_bronze(client: Minio, cfg: dict, cell: str):
             pass
 
 
-def _upload_bytes(client: Minio, cfg: dict, key: str, payload: bytes) -> None:
+def _upload_bytes(
+    client: Minio, cfg: dict, key: str, payload: bytes, include_tag: bool = True
+) -> None:
     bucket = cfg["bucket_name"]
-    full_key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/{key}"
+    if include_tag:
+        full_key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/{key}"
+    else:
+        full_key = f"{cfg['minio_prefix']}/{key}"
     try:
         client.put_object(
             bucket_name=bucket,
@@ -96,10 +101,12 @@ def _upload_bytes(client: Minio, cfg: dict, key: str, payload: bytes) -> None:
         print(f"  Upload error for {bucket}/{full_key}: {e}")
 
 
-def upload_parquet(client: Minio, cfg: dict, df, key: str) -> None:
+def upload_parquet(
+    client: Minio, cfg: dict, df, key: str, include_tag: bool = True
+) -> None:
     buf = io.BytesIO()
     df.to_parquet(buf, index=False)
-    _upload_bytes(client, cfg, key, buf.getvalue())
+    _upload_bytes(client, cfg, key, buf.getvalue(), include_tag=include_tag)
 
 
 def upload_csv(client: Minio, cfg: dict, df, key: str) -> None:
@@ -114,3 +121,13 @@ def gold_object_key(cell: str) -> str:
 def x_silver_object_key(cell: str) -> str:
     stem = cell.split(".")[0]
     return f"with_features_post_labeled/{stem}.csv"
+
+
+def export_pulse_object_key(cell: str, filename: str) -> str:
+    stem = cell.split(".")[0]
+    return f"20_export_pulse/{stem}/{filename}"
+
+
+def export_qocv_object_key(cell: str, filename: str) -> str:
+    stem = cell.split(".")[0]
+    return f"30_export_qocv/{stem}/{filename}"

@@ -26,6 +26,7 @@ BRONZE_CU → preSILVER → SILVER → GOLD
 3. **clustering** — two-layer HDBSCAN assigns procedure types (CAP, PUL, QOCV, PAU)
 4. **calculate** — trapezoidal capacity integration, pulse resistance (R₀, R_ct), qOCV labeling
 5. **output** — uploads GOLD to InfluxDB and MinIO
+6. **export (optional)** — writes per-`BM_Programm` PUL and qOCV slices of GOLD as standalone parquet files named with the cell's SOH at that aging point. Gated by the `export_pulse` / `export_qocv` flags in the battery config.
 
 For full details see [`METAbatt_Pipeline_Report.md`](METAbatt_Pipeline_Report.md) and [`METAbatt_Pipeline_Flowchart.svg`](METAbatt_Pipeline_Flowchart.svg).
 
@@ -63,6 +64,8 @@ pip install -r requirements.txt         # other platforms
 | `tolerances.pulse_duration_tolerance` | Safety factor on expected pulse duration for outlier rejection (default `1.08`) |
 | `tolerances.restore_current_tolerance` | Fractional current tolerance for restore pulse detection (default `0.05`) |
 | `tolerances.qocv_current_tolerance` | Fractional current tolerance for qOCV detection (default `0.01`) |
+| `export_pulse` | If `true`, write per-`BM_Programm` PUL parquet files to `<working_path>/20_export_pulse/<cell_stem>/` (and to MinIO under `<minio_prefix>/20_export_pulse/<cell_stem>/` when `upload_to` includes `"minio"`). Default `false`. |
+| `export_qocv` | If `true`, write per-`BM_Programm` qOCV_DCH / qOCV_CHA parquet files to `<working_path>/30_export_qocv/<cell_stem>/` (and the matching MinIO path). Default `false`. |
 
 **Credentials** — `config.json` at project root (gitignored). Copy structure from `config_SE_example.json`. Also accepts env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`. The MinIO endpoint, bucket and prefix live in the **battery config** alongside the routing keys above.
 
@@ -92,6 +95,6 @@ src/
 ├── feature_extraction/      # per-segment statistical features
 ├── cluster/                 # HDBSCAN clustering and post-cluster filtering
 ├── calculate/               # capacity, pulse resistance, qOCV
-├── output/                  # InfluxDB upload
+├── output/                  # InfluxDB upload + optional per-program PUL / qOCV exports
 └── util/                    # MinIO connection, shared helpers
 ```
