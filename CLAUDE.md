@@ -32,7 +32,7 @@ python main.py /path/to/battery_config_VTC_linux.json --cells VTC_cell01 VTC_cel
 
 The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` also works but `main.py` is the current entry point.
 
-**Venv (Linux)**: `source venv/bin/activate` from project root.
+**Venv (Linux)**: `source .venv/bin/activate` from project root.
 
 ## Architecture
 
@@ -74,6 +74,12 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
 
 5. **`output/`** — uploads to InfluxDB. **`util/connect_minio.py`** — uploads parquet to MinIO.
 
+6. **`output/export_pulse.py`, `output/export_qocv.py`** — optional per-`BM_Programm` exports of PUL / qOCV segments from GOLD. Gated by `export_pulse` and `export_qocv` flags in the battery config (both default off). For each BM_Programm, capacity is looked up from the same program's CAP segment (`Capacity_py`) and SOH is computed as `round(Capacity_py / nom_capacity * 100, 1)`; if no valid CAP capacity exists for a program, `SOH=NA` is used and a warning is logged. The pulse export also includes the adjacent PAU stubs (proc_num ±1 within the same BM_Programm) so the relaxation voltage before and after each pulse is preserved. Files:
+   - `20_export_pulse/<cell_stem>/<cell_stem>_pulse_BM<BM_Programm>_<SOH>SOH.parquet`
+   - `30_export_qocv/<cell_stem>/<cell_stem>_qocv_dch_BM<BM_Programm>_<SOH>SOH.parquet`, `..._qocv_cha_BM<BM_Programm>_<SOH>SOH.parquet`
+
+   Routing follows `download_from` / `upload_to` like GOLD. MinIO keys for exports do **not** include the `10_TRACY` tag — they sit directly under `<minio_prefix>/`.
+
 ## Key parameters
 
 | Parameter | Meaning |
@@ -85,6 +91,8 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
 | `pau_duration` | Pause threshold in minutes for procedure boundary detection (default 9.9) |
 | `min_rows` | Minimum rows to keep a procedure segment (default 20) |
 | `target_pulse_duration` | Expected pulse duration in seconds (default 20 s) |
+| `export_pulse` | If true, write per-BM_Programm PUL parquet files to `20_export_pulse/` (default false) |
+| `export_qocv` | If true, write per-BM_Programm qOCV_DCH / qOCV_CHA parquet files to `30_export_qocv/` (default false) |
 
 `hdbscan_para_layer_1["min_cluster_size"]` defaults to `max(2, n_programs − 1)` at runtime. If `min_cluster_size` is explicitly set in the config JSON, that value takes precedence (config key is merged last via `{defaults, **cfg["hdbscan_para_layer_1"]}`).
 `hdbscan_para_layer_1["cluster_selection_epsilon"]` must be **0.3** (not 3.0) for correct qOCV separation.
