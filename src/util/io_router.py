@@ -17,12 +17,14 @@ import urllib3
 from minio import Minio
 from minio.error import S3Error
 
-
 UPLOAD_PREFIX_TAG = "10_TRACY"
 
 
 def needs_minio(cfg: dict) -> bool:
-    return cfg.get("download_from") == "minio" or cfg.get("upload_to") in ("minio", "both")
+    return cfg.get("download_from") == "minio" or cfg.get("upload_to") in (
+        "minio",
+        "both",
+    )
 
 
 def writes_local(cfg: dict) -> bool:
@@ -105,8 +107,8 @@ def upload_csv(client: Minio, cfg: dict, df, key: str) -> None:
     _upload_bytes(client, cfg, key, payload)
 
 
-def gold_object_key(cell: str, type_cell: str) -> str:
-    return f"GOLD/{type_cell}/{cell}"
+def gold_object_key(cell: str) -> str:
+    return f"GOLD/{cell}"
 
 
 def x_silver_object_key(cell: str) -> str:

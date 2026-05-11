@@ -16,9 +16,25 @@ from util import io_router
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 _REQUIRED_COLS = {
-    "preSILVER": {"Voltage", "Current", "Time", "Temperature", "ID", "BM_Programm", "target"},
-    "features":  {"Duration_quartile", "abs_Current_mean", "Current_mean", "ID"},
-    "silver":    {"Voltage", "Current", "Time", "Temperature", "ID", "BM_Programm", "target"},
+    "preSILVER": {
+        "Voltage",
+        "Current",
+        "Time",
+        "Temperature",
+        "ID",
+        "BM_Programm",
+        "target",
+    },
+    "features": {"Duration_quartile", "abs_Current_mean", "Current_mean", "ID"},
+    "silver": {
+        "Voltage",
+        "Current",
+        "Time",
+        "Temperature",
+        "ID",
+        "BM_Programm",
+        "target",
+    },
 }
 
 
@@ -38,7 +54,9 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
     download_from = cfg.get("download_from", "local")
     upload_to = cfg.get("upload_to", "local")
 
-    minio_client = io_router.make_minio_client(cfg) if io_router.needs_minio(cfg) else None
+    minio_client = (
+        io_router.make_minio_client(cfg) if io_router.needs_minio(cfg) else None
+    )
 
     if download_from == "minio":
         cells = io_router.list_bronze_cells(minio_client, cfg)
@@ -194,9 +212,15 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         pulse_keep_per_group=cfg.get("pulse_keep_per_group"),
         pulse_group_by=cfg.get("pulse_group_by", "BM_Programm"),
         pulse_step_threshold=cfg.get("pulse_step_threshold"),
-        qocv_current_tolerance=cfg.get("tolerances", {}).get("qocv_current_tolerance", 0.01),
-        restore_current_tolerance=cfg.get("tolerances", {}).get("restore_current_tolerance", 0.05),
-        pulse_duration_tolerance=cfg.get("tolerances", {}).get("pulse_duration_tolerance", 1.08),
+        qocv_current_tolerance=cfg.get("tolerances", {}).get(
+            "qocv_current_tolerance", 0.01
+        ),
+        restore_current_tolerance=cfg.get("tolerances", {}).get(
+            "restore_current_tolerance", 0.05
+        ),
+        pulse_duration_tolerance=cfg.get("tolerances", {}).get(
+            "pulse_duration_tolerance", 1.08
+        ),
     )
     df_gold = df_silver.copy()
     df_gold.update(calc.update_pulse())
@@ -208,11 +232,13 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     X_silver["target"] = X_silver["ID"].map(target_map).fillna(X_silver["target"])
     _write_x_silver(X_silver, cell, cfg, paths, minio_client)
 
-    try:
-        from visualize import add_test_schedule
-        add_test_schedule.add_aging_labels(df_gold)
-    except Exception as e:
-        logging.warning(f"{cell}: add_aging_labels failed ({e}), skipping label step")
+    # TODO: consider moving the labeling and schedule preparation steps to a separate visualization module that takes the GOLD output as input, to keep the core pipeline focused on data processing and calculation. For now, we'll include it here for simplicity.
+    # try:
+    #     from visualize import add_test_schedule
+
+    #     add_test_schedule.add_aging_labels(df_gold)
+    # except Exception as e:
+    #     logging.warning(f"{cell}: add_aging_labels failed ({e}), skipping label step")
 
     for col in df_gold.columns:
         if df_gold[col].dtype == "object":
@@ -236,20 +262,31 @@ def _write_gold(df, cell, cfg, paths, minio_client):
         df.to_parquet(paths["gold"], index=False)
         logging.info(f"{cell}: GOLD -> {paths['gold']}")
     if io_router.writes_minio(cfg):
-        io_router.upload_parquet(
-            minio_client, cfg, df, io_router.gold_object_key(cell, cfg["type_cell"])
-        )
+        io_router.upload_parquet(minio_client, cfg, df, io_router.gold_object_key(cell))
 
 
 def _run_clustering(
-    dismembered_df, X_features, cell, exceptions, count, hdbscan_l1, hdbscan_l2, post_filter
+    dismembered_df,
+    X_features,
+    cell,
+    exceptions,
+    count,
+    hdbscan_l1,
+    hdbscan_l2,
+    post_filter,
 ):
     first_layer_cols = ["Duration_quartile", "abs_Current_mean", "ID"]
     second_layer_cols = ["Current_mean", "ID"]
 
     df_l1, X_l1, cluster_means_l1, cluster_size_l1, exceptions, count = (
         model_and_supervise.first_layer_HDBSCANModel(
-            X_features, dismembered_df, cell, exceptions, count, first_layer_cols, hdbscan_l1
+            X_features,
+            dismembered_df,
+            cell,
+            exceptions,
+            count,
+            first_layer_cols,
+            hdbscan_l1,
         )
     )
 
@@ -287,7 +324,12 @@ def _run_clustering(
         df_clustered = model_and_supervise.merge_target(df_l1, X_clustered)
 
     X_final = model_and_supervise.add_pulse_qocv_and_concat(
-        post_filter, cluster_means_l1, capacity_cluster, counter, X_clustered, dismembered_df
+        post_filter,
+        cluster_means_l1,
+        capacity_cluster,
+        counter,
+        X_clustered,
+        dismembered_df,
     )
     df_final = model_and_supervise.merge_target(df_clustered, X_final)
 
@@ -302,9 +344,11 @@ def _run_clustering(
 def _build_paths(cell: str, working_path: str, type_cell: str) -> dict:
     stem = cell.split(".")[0]
     return {
-        "bronze":   os.path.join(working_path, "BRONZE_CU", cell),
-        "X_silver": os.path.join(working_path, "with_features_post_labeled", stem + ".csv"),
-        "gold":     os.path.join(working_path, "GOLD", type_cell, cell),
+        "bronze": os.path.join(working_path, "BRONZE_CU", cell),
+        "X_silver": os.path.join(
+            working_path, "with_features_post_labeled", stem + ".csv"
+        ),
+        "gold": os.path.join(working_path, "GOLD", type_cell, cell),
     }
 
 
@@ -313,15 +357,16 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="METAbatt pipeline")
     parser.add_argument("config", help="Path to battery config JSON")
-    parser.add_argument("--cells", nargs="*", help="Optional subset of cell names to process")
-    parser.add_argument("--overwrite", action="store_true", help="Reprocess cells even if GOLD already exists")
+    parser.add_argument(
+        "--cells", nargs="*", help="Optional subset of cell names to process"
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Reprocess cells even if GOLD already exists",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-
-    # Secrets from environment — never hardcode
-    cfg["minio_access_key"] = os.environ.get("MINIO_ACCESS_KEY", "")
-    cfg["minio_secret_key"] = os.environ.get("MINIO_SECRET_KEY", "")
-    cfg["influx_token"] = os.environ.get("INFLUX_TOKEN", "")
 
     run_pipeline(cfg, target_specimen=args.cells, overwrite=args.overwrite)
