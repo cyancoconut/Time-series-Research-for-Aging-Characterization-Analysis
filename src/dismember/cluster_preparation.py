@@ -136,6 +136,17 @@ class DismemblerFunctions:
                 else:
                     programm_df.loc[pau_group.index[1:-1], "BM_Programm_procedure"] = 0
 
+            # Pre-label PAU procedures NOW, before the too-short discard sweep below
+            # contaminates the discard bucket (BM_Programm_procedure == 0) with non-PAU
+            # rows from procedures that fail the min_rows check. At this moment bucket-0
+            # holds only PAU/PAUO rows.
+            pure_pau_proc = programm_df.groupby("BM_Programm_procedure")[
+                "Zustand"
+            ].transform(lambda x: x.isin(PAU_Columns).all())
+            if "pre_target" not in programm_df.columns:
+                programm_df["pre_target"] = pd.NA
+            programm_df.loc[pure_pau_proc, "pre_target"] = "PAU"
+
             # Check if the procedure is too short (PAU stubs are exempt)
             for df_name, df_procedure in programm_df.groupby("BM_Programm_procedure"):
                 if df_procedure["Zustand"].isin(PAU_Columns).all():
@@ -194,12 +205,17 @@ def allocate_IDs(result_df, start_date=None, end_date=None):
         lambda x: "EIS" if x.isna().any() else -1
     )
 
-    # Tag PAU stubs (procedures where every row is a PAU/PAUO/... state)
-    PAU_Columns = ["PAU", "PAUO", "..."]
-    pau_stub_mask = result_df.groupby("ID")["Zustand"].transform(
-        lambda x: x.isin(PAU_Columns).all()
-    )
-    result_df.loc[pau_stub_mask, "target"] = "PAU"
+    # Propagate the dismember-time PAU pre-label to every row of the affected IDs.
+    # `pre_target == "PAU"` is set in DismembererFunctions.dismember() right after the
+    # PAU group handling and before the too-short discard sweep. Promoting per-ID here
+    # ensures contaminating rows later dumped into the same ID (typically <BM>_0) still
+    # carry target="PAU" so the discard bucket is excluded from clustering wholesale.
+    if "pre_target" in result_df.columns:
+        pau_id_mask = result_df.groupby("ID")["pre_target"].transform(
+            lambda x: (x == "PAU").any()
+        )
+        result_df.loc[pau_id_mask, "target"] = "PAU"
+        result_df = result_df.drop(columns=["pre_target"])
 
     # Calculate the duration of each ID
     durations = (
