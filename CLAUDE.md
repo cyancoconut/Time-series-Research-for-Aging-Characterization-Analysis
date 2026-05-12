@@ -67,10 +67,10 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
    - Layer 2 (only if Layer 1 fails to identify a capacity cluster): re-clusters capacity candidates on `["Current_mean", "ID"]` with stricter masks.
    - `cluster/post_cluster_filter.py` (`cluster_filter`) — rule-based masks to label CAP* / PUL* / QOCV* / −1.
 
-4. **`calculate/results_fetching.py`** — `calculation` class:
-   - `update_capacity()` — trapezoidal Ah integration
-   - `update_pulse()` — R_ct and R_0 pulse resistance. Calls `_filter_restore_pulses()` first to exclude restore pulses (same |current|, opposite sign, consecutive ID within BM_Programm).
-   - `update_qOCV()` — labels qOCV_DCH / qOCV_CHA
+4. **`calculate/results_fetching.py`** — `calculation` class (labeling + capacity only; pulse/qOCV numeric results live downstream, recomputed from the per-BM_Programm exports):
+   - `update_capacity()` — trapezoidal Ah integration → `Capacity_py` column, refines `CAP*` → `CAP`.
+   - `update_pulse()` — labels only. Calls `_filter_pulse_group()` to tag restore pulses as `PUL*RES`, then `fetch_pulse` labels remaining `PUL*` as `PUL` (passes duration check) or `-1` (outlier). No `R_ct` / `R_0` / `Pulse_py` columns are written.
+   - `update_qOCV()` — labels `QOCV*` → `qOCV_DCH` / `qOCV_CHA` based on sign; outlier-size sanity check uses Ah but doesn't store it.
 
 5. **`output/`** — uploads to InfluxDB. **`util/connect_minio.py`** — uploads parquet to MinIO.
 
@@ -114,7 +114,7 @@ After each test pulse a restore pulse returns the cell to its original SoC. All 
 
 The proc_num gap check (condition 1) is critical: if the true 1C restore (C/2 current, ~40 s) is not labeled PUL* by HDBSCAN, consecutive test pulses of opposite sign would otherwise be wrongly flagged as restores. A gap > 1 between consecutive PUL* segments means a non-PUL* segment sits between them, so the pair are two tests, not a test+restore. 1C restores (~40 s at C/2) that do reach `fetch_pulse` are rejected by the duration check there.
 
-Restore pulses are **not dropped** — they are labelled `PUL*RES` in both the GOLD parquet and the `with_features_post_labeled` CSV. Test pulses proceed to `fetch_pulse` and are labelled `PUL` after calculation.
+Restore pulses are **not dropped** — they are labelled `PUL*RES` in both the GOLD parquet and the `with_features_post_labeled` CSV. Test pulses proceed to `fetch_pulse` and are labelled `PUL` after passing the duration check (no numeric resistance is computed in GOLD).
 
 ## Configuration
 

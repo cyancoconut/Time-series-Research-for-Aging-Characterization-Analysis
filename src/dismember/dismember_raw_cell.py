@@ -74,7 +74,6 @@ def read_and_fix_format(loadpath, V_max):
     df_cell["Power"] = df_cell["Current"] * df_cell["Voltage"]
     df_cell["Label_Procedure"] = np.nan
     df_cell["Capacity_py"] = np.nan
-    df_cell["Pulse_py"] = pd.array([None] * len(df_cell), dtype=object)
     # BM_Programm identification
     if "Ahjo_Test_ID" in df_cell.columns:
         df_cell["BM_Programm"] = df_cell.groupby("Ahjo_Test_ID").ngroup()
@@ -148,7 +147,6 @@ def dismember_raw_cell(
         "Ah_throughput",
         "Label_Procedure",
         "Capacity_py",
-        "Pulse_py",
         "target",
     ]
 
