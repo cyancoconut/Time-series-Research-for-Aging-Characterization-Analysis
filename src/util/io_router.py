@@ -57,6 +57,41 @@ def list_bronze_cells(client: Minio, cfg: dict) -> list:
     )
 
 
+def list_gold_cells(client: Minio, cfg: dict) -> list:
+    bucket = cfg["bucket_name"]
+    base = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/GOLD/"
+    objs = client.list_objects(bucket, prefix=base, recursive=False)
+    return sorted(
+        os.path.basename(o.object_name)
+        for o in objs
+        if o.object_name.endswith(".parquet")
+    )
+
+
+def list_gold_cells_local(working_path: str) -> list:
+    import glob as _glob
+
+    gold_dir = os.path.join(working_path, "GOLD")
+    return sorted(
+        os.path.basename(p) for p in _glob.glob(os.path.join(gold_dir, "*.parquet"))
+    )
+
+
+def fetch_gold_bytes(client: Minio, cfg: dict, cell: str) -> bytes:
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/GOLD/{cell}"
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def gold_local_path(working_path: str, cell: str) -> str:
+    return os.path.join(working_path, "GOLD", cell)
+
+
 @contextmanager
 def fetch_bronze(client: Minio, cfg: dict, cell: str):
     """Stream a BRONZE_CU object from MinIO into a tempfile; yield its path."""
