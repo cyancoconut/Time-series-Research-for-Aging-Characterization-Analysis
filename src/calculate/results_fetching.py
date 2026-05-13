@@ -61,8 +61,11 @@ class calculation:
             abs(group["Current"].mean()) < (self.qOCV_CRate * self.Nom_Capacity) + self.qocv_current_tolerance
         ) & (abs(group["Current"].std()) < 1 / 1000):
             calculated_capacity = self.Ah_calculation(group)
-            if calculated_capacity < self.Nom_Capacity / 3:
-                print("Outlier found at ID: ", ID)
+            if (
+                calculated_capacity < self.Nom_Capacity * 0.5
+                or calculated_capacity > self.Nom_Capacity * 1.05
+            ):
+                print("Outlier found at ID: ", ID, "Ah:", calculated_capacity)
                 group["target"] = "-1"
             else:
 
@@ -99,9 +102,12 @@ class calculation:
     def fetch_capacity(self, group, ID):
         calculated_capacity = self.Ah_calculation(group)
         print("Calculating Capacity at ID: ", ID, calculated_capacity)
-        if calculated_capacity < self.Nom_Capacity / 3:
+        if (
+            calculated_capacity < self.Nom_Capacity * 0.5
+            or calculated_capacity > self.Nom_Capacity * 1.05
+        ):
             group["Capacity_py"] = np.nan
-            print("Outlier found at ID: ", ID)
+            print("Outlier found at ID: ", ID, "Ah:", calculated_capacity)
             group["target"] = "-1"
 
         else:
