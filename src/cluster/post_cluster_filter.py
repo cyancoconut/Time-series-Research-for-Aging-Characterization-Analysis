@@ -52,10 +52,10 @@ class cluster_filter:
                 abs(cluster_means["Current_mean"]) > self.CAP_Rate * 0.9
             )  # and the mean of current should be around cap_rate
             mask_CRate_strict = (
-                abs(cluster_means["Current_mean"]) < self.CAP_Rate * 1.02
+                abs(cluster_means["Current_mean"]) < self.CAP_Rate * 1.05
             ) & (
-                abs(cluster_means["Current_mean"]) > self.CAP_Rate * 0.98
-            )  # strict mask for second layer
+                abs(cluster_means["Current_mean"]) > self.CAP_Rate * 0.95
+            )  # layer-2 mask; ±5% absorbs cycler current inaccuracy (e.g. 1.55 A vs 1.50 A at C/2)
             mask_discharge = (
                 cluster_means["Current_mean"] < 0
             )  # the current should be negative (When capacity is measured at discharging)
@@ -97,22 +97,34 @@ class cluster_filter:
                 return capacity_cluster, counter
 
             elif cluster_means_CAP.shape[0] == 0:
-                # First filter to only consider values that are smaller than 60/CAP_Rate
-                valid_clusters = cluster_means
-                # valid_clusters = cluster_means[
-                #     cluster_means["Duration_minutes"] <= 60 / self.CAP_Rate
-                # ]
+                # Layer 1 clusters on abs_Current_mean so charge/discharge of the
+                # same |I| share a cluster — discharge sign at cluster level is
+                # unreliable. Gate the fallback on duration first (CAP ~60/CAP_Rate
+                # min, ±30%), then pick the duration-passing cluster whose
+                # |Current_mean| is closest to CAP_Rate. Layer 2 re-clusters on
+                # signed current and applies the strict CRate mask.
+                mask_duration_loose = (
+                    (cluster_means["Duration_minutes"] > 0.7 * 60 / self.CAP_Rate) &
+                    (cluster_means["Duration_minutes"] < 1.3 * 60 / self.CAP_Rate)
+                )
+                valid_clusters = cluster_means[mask_duration_loose]
+                valid_clusters = valid_clusters[valid_clusters.index >= 0]
 
-                # Find index with duration closest to 60/self.CAP_Rate
+                if valid_clusters.empty:
+                    raise ClusterNotFoundException(
+                        "No layer-1 CAP candidates in the CAP duration window"
+                    )
+
                 closest_idx = (
-                    (valid_clusters["Duration_minutes"] - 60 / self.CAP_Rate)
+                    (abs(valid_clusters["Current_mean"]) - self.CAP_Rate)
                     .abs()
                     .idxmin()
                 )
                 capacity_cluster = [closest_idx]
                 counter = 1  # counter move to 1, we need another layer of clustering
                 print(
-                    "Failed to find the capacity cluster. Attempting using a second layer. The closest cluster was:",
+                    "Failed to find a clean capacity cluster in layer 1. "
+                    "Forwarding closest-|I|-to-CAP_Rate candidate to layer 2:",
                     capacity_cluster,
                 )
 
