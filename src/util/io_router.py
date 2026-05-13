@@ -144,9 +144,9 @@ def upload_parquet(
     _upload_bytes(client, cfg, key, buf.getvalue(), include_tag=include_tag)
 
 
-def upload_csv(client: Minio, cfg: dict, df, key: str) -> None:
+def upload_csv(client: Minio, cfg: dict, df, key: str, include_tag: bool = True) -> None:
     payload = df.to_csv(index=False).encode("utf-8")
-    _upload_bytes(client, cfg, key, payload)
+    _upload_bytes(client, cfg, key, payload, include_tag=include_tag)
 
 
 def gold_object_key(cell: str) -> str:
@@ -166,3 +166,7 @@ def export_pulse_object_key(cell: str, filename: str) -> str:
 def export_qocv_object_key(cell: str, filename: str) -> str:
     stem = cell.split(".")[0]
     return f"30_export_qocv/{stem}/{filename}"
+
+
+def export_capacity_object_key(cell: str, filename: str) -> str:
+    return f"40_capacity_monitore/{filename}"

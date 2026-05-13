@@ -13,6 +13,7 @@ from cluster import model_and_supervise, post_cluster_filter
 from calculate import results_fetching
 from output.export_pulse import export_pulse
 from output.export_qocv import export_qocv
+from output.export_capacity import export_capacity
 from util import io_router
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -247,15 +248,15 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
 
     _write_gold(df_gold, cell, cfg, paths, minio_client)
 
-    if cfg.get("export_pulse") or cfg.get("export_qocv"):
-        df_export = df_gold[
-            df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA", "PAU"])
-        ]
-        soh = _build_soh_map(df_export, cfg["nom_capacity"])
-        if cfg.get("export_pulse"):
-            export_pulse(df_export, soh, cell, cfg, paths, minio_client)
-        if cfg.get("export_qocv"):
-            export_qocv(df_export, soh, cell, cfg, paths, minio_client)
+    df_export = df_gold[
+        df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA", "PAU"])
+    ]
+    soh = _build_soh_map(df_export, cfg["nom_capacity"])
+    export_capacity(df_export, soh, cell, cfg, paths, minio_client)
+    if cfg.get("export_pulse"):
+        export_pulse(df_export, soh, cell, cfg, paths, minio_client)
+    if cfg.get("export_qocv"):
+        export_qocv(df_export, soh, cell, cfg, paths, minio_client)
 
 
 def _build_soh_map(df_export, nom_capacity):
@@ -371,6 +372,7 @@ def _build_paths(cell: str, working_path: str) -> dict:
         "gold": os.path.join(working_path, "GOLD", cell),
         "export_pulse_dir": os.path.join(working_path, "20_export_pulse", stem),
         "export_qocv_dir": os.path.join(working_path, "30_export_qocv", stem),
+        "export_capacity_dir": os.path.join(working_path, "40_capacity_monitore"),
     }
 
 

@@ -1,4 +1,7 @@
-"""Aging-status monitor: build a sortable HTML table of cell SOH from MinIO GOLD.
+"""Aging-status monitor: build a sortable HTML table of cell SOH.
+
+Reads per-cell capacity CSVs from `40_capacity_monitore/` (local or MinIO,
+chosen by cfg["download_from"]).
 
 Usage (from src/):
     python -m monitor.aging_status /path/to/battery_config.json
@@ -14,6 +17,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from util import io_router
 
@@ -24,96 +28,119 @@ YELLOW_THRESHOLD = 70.0
 RED_THRESHOLD = 60.0
 
 
-def _make_reader(cfg, source):
+def _make_readers(cfg, source):
+    """Return (cells, fetch_capacity, fetch_gold_tail).
+
+    fetch_gold_tail(stem) returns a 1-row DataFrame with Time + Prozedur of the
+    last row in the cell's GOLD parquet, or None if GOLD is missing.
+    """
     if source == "local":
         wp = cfg["working_path"]
-        return (
-            io_router.list_gold_cells_local(wp),
-            lambda cell: pd.read_parquet(io_router.gold_local_path(wp, cell)),
-        )
+        cap_dir = os.path.join(wp, "40_capacity_monitore")
+        files = sorted(glob.glob(os.path.join(cap_dir, "*_capacity.csv")))
+        cells = [os.path.basename(p) for p in files]
+
+        def fetch_capacity(name):
+            return pd.read_csv(os.path.join(cap_dir, name))
+
+        def fetch_gold_tail(stem):
+            path = os.path.join(wp, "GOLD", f"{stem}.parquet")
+            if not os.path.exists(path):
+                return None
+            return _read_gold_tail(path)
+
+        return cells, fetch_capacity, fetch_gold_tail
+
     client = io_router.make_minio_client(cfg)
-    return (
-        io_router.list_gold_cells(client, cfg),
-        lambda cell: pd.read_parquet(io.BytesIO(io_router.fetch_gold_bytes(client, cfg, cell))),
+    bucket = cfg["bucket_name"]
+    base = f"{cfg['minio_prefix']}/40_capacity_monitore/"
+    objs = client.list_objects(bucket, prefix=base, recursive=False)
+    cells = sorted(
+        os.path.basename(o.object_name)
+        for o in objs
+        if o.object_name.endswith("_capacity.csv")
     )
 
+    def fetch_capacity(name):
+        key = f"{base}{name}"
+        response = client.get_object(bucket, key)
+        try:
+            data = response.read()
+        finally:
+            response.close()
+            response.release_conn()
+        return pd.read_csv(io.BytesIO(data))
 
-def _cell_summary(df, nom_capacity):
-    if "Time" in df.columns and not df["Time"].empty:
-        times = pd.to_datetime(df["Time"], errors="coerce")
-        last_row_time = times.max()
-        if "Prozedur" in df.columns and pd.notna(last_row_time):
-            last_prozedur = df.loc[times.idxmax(), "Prozedur"]
-        else:
-            last_prozedur = None
-    else:
-        last_row_time = pd.NaT
-        last_prozedur = None
+    def fetch_gold_tail(stem):
+        try:
+            raw = io_router.fetch_gold_bytes(client, cfg, f"{stem}.parquet")
+        except Exception:
+            return None
+        return _read_gold_tail(io.BytesIO(raw))
 
-    cap = df[df["target"] == "CAP"]
-    if cap.empty or "Capacity_py" not in cap.columns:
-        return {
-            "latest_soh": None,
-            "delta_soh_per_cu": None,
-            "n_cu": 0,
-            "last_row_time": last_row_time,
-            "last_prozedur": last_prozedur,
-        }
+    return cells, fetch_capacity, fetch_gold_tail
 
-    cap_by_prog = (
-        cap.groupby("BM_Programm")["Capacity_py"]
-        .first()
-        .dropna()
-        .sort_index()
-    )
-    if cap_by_prog.empty:
-        return {
-            "latest_soh": None,
-            "delta_soh_per_cu": None,
-            "n_cu": 0,
-            "last_row_time": last_row_time,
-            "last_prozedur": last_prozedur,
-        }
 
-    soh_series = cap_by_prog / nom_capacity * 100.0
-    latest = float(soh_series.iloc[-1])
+def _read_gold_tail(source):
+    """Read Time + Prozedur of the last row from a parquet path or BytesIO,
+    using only the last row group to avoid loading the full file."""
+    pf = pq.ParquetFile(source)
+    available = pf.schema_arrow.names
+    cols = [c for c in ("Time", "Prozedur") if c in available]
+    if not cols or pf.num_row_groups == 0:
+        return None
+    last_rg = pf.read_row_group(pf.num_row_groups - 1, columns=cols).to_pandas()
+    return last_rg.tail(1) if not last_rg.empty else None
+
+
+def _cell_summary(df):
+    if df.empty or "SOH" not in df.columns:
+        return {"latest_soh": None, "delta_soh_per_cu": None, "n_cu": 0}
+
+    df = df.sort_values("BM_Programm")
+    soh_series = pd.to_numeric(df["SOH"], errors="coerce").dropna()
     n_cu = int(len(soh_series))
+    latest = float(soh_series.iloc[-1]) if n_cu else None
 
-    # Slope per CU using the last up-to-5 points
     if n_cu >= 2:
-        tail = soh_series.tail(5)
-        x = pd.Series(range(len(tail)), index=tail.index, dtype=float)
+        tail = soh_series.tail(5).reset_index(drop=True)
+        x = pd.Series(range(len(tail)), dtype=float)
         slope = float(((x - x.mean()) * (tail - tail.mean())).sum() / ((x - x.mean()) ** 2).sum())
     else:
         slope = None
 
-    return {
-        "latest_soh": latest,
-        "delta_soh_per_cu": slope,
-        "n_cu": n_cu,
-        "last_row_time": last_row_time,
-        "last_prozedur": last_prozedur,
-    }
+    return {"latest_soh": latest, "delta_soh_per_cu": slope, "n_cu": n_cu}
 
 
 def build_status_table(cfg, source="minio"):
-    nom_capacity = cfg["nom_capacity"]
-    cells, fetch = _make_reader(cfg, source)
-    logging.info(f"Found {len(cells)} GOLD parquets ({source})")
+    cells, fetch_capacity, fetch_gold_tail = _make_readers(cfg, source)
+    logging.info(f"Found {len(cells)} capacity CSVs ({source})")
 
     now = datetime.now(timezone.utc)
     running_cutoff = now - timedelta(days=RUNNING_WINDOW_DAYS)
 
     rows = []
     for cell in cells:
+        cell_stem = cell.replace("_capacity.csv", "")
         try:
-            df = fetch(cell)
-            s = _cell_summary(df, nom_capacity)
+            df = fetch_capacity(cell)
+            s = _cell_summary(df)
         except Exception as e:
             logging.warning(f"{cell}: {type(e).__name__}: {e}")
             continue
 
-        last_t = s["last_row_time"]
+        last_t = pd.NaT
+        last_prozedur = None
+        try:
+            tail = fetch_gold_tail(cell_stem)
+            if tail is not None and not tail.empty:
+                if "Time" in tail.columns:
+                    last_t = pd.to_datetime(tail["Time"].iloc[0], errors="coerce")
+                if "Prozedur" in tail.columns:
+                    last_prozedur = tail["Prozedur"].iloc[0]
+        except Exception as e:
+            logging.warning(f"{cell_stem}: GOLD tail read failed: {type(e).__name__}: {e}")
+
         if pd.notna(last_t):
             last_t_aware = last_t.tz_localize("UTC") if last_t.tzinfo is None else last_t
             is_running = last_t_aware >= running_cutoff
@@ -121,12 +148,12 @@ def build_status_table(cfg, source="minio"):
             is_running = False
 
         rows.append({
-            "cell": cell,
+            "cell": cell_stem,
             "latest_SOH_%": s["latest_soh"],
             "dSOH_per_CU": s["delta_soh_per_cu"],
             "n_CU": s["n_cu"],
             "last_row_time": last_t,
-            "last_Prozedur": s["last_prozedur"],
+            "last_Prozedur": last_prozedur,
             "status": "running" if is_running else "finished",
         })
 
