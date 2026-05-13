@@ -19,7 +19,6 @@ def bronze_column_filter(path, cell):
         "Ah_throughput",
         "Label_Procedure",
         "Capacity_py",
-        "Pulse_py",
         "target",
     ]
 

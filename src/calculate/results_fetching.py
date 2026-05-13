@@ -37,21 +37,6 @@ class calculation:
         self.restore_current_tolerance = restore_current_tolerance
         self.pulse_duration_tolerance = pulse_duration_tolerance
 
-    def find_sign_changes(row):
-        # Convert row to numpy array and remove NaN values
-        arr = np.array(row.dropna())
-        # Calculate the sign of each element
-        signs = np.sign(arr)
-        # Find where the sign changes
-        sign_changes = np.diff(signs)
-        # Get the indices where sign changes occur
-        change_indices = np.where(sign_changes != 0)[0]
-        # If the first element is negative and there's a sign change, remove the first change
-        if arr[0] < 0 and len(change_indices) > 0 and change_indices[0] == 0:
-            change_indices = change_indices[1:]
-        # Add 1 to indices to match original DataFrame index (since we used diff)
-        return change_indices
-
     def get_duration(self, df):
         # in seconds
         time_h = df["Time"].diff().dt.total_seconds()
@@ -69,24 +54,6 @@ class calculation:
         )
         AhThroughput = AhThroughput - min(AhThroughput)
         return AhThroughput[-1]
-
-    def R_ct_calculation(self, group_df):
-        R_ct = abs(
-            (group_df["Voltage"].max() - group_df["Voltage"].min())
-            / group_df["Current"].mean()
-        )
-        return R_ct
-
-    def R_0_calculation(self, group_df):
-        pulse_idx = group_df.index[0]
-        pulse_voltage = group_df["Voltage"].iloc[0]
-        pulse_current = group_df[group_df["Current"] != 0]["Current"].iloc[
-            0
-        ]  # Get the first non-zero current
-        last_voltage_before = self.df.loc[self.df.index < pulse_idx, "Voltage"].iloc[-1]
-
-        R_0 = (last_voltage_before - pulse_voltage) / pulse_current
-        return R_0
 
     def fetch_qOCV(self, group, ID):
         # when current mean is smaller than C/15, and the std is small, this must be a attempted qOCV measurement
@@ -143,67 +110,12 @@ class calculation:
         return group
 
     def fetch_pulse(self, group, ID):
-        sign_change_location = calculation.find_sign_changes(group["Current"])
         duration = calculation.get_duration(self, group)
         if (
             duration < (self.pulse_type * self.target_pulse_duration) * self.pulse_duration_tolerance
         ):
-            mask = group["Current"] > 0
-            if mask.any():
-                # now decide what unit should be calculated from the pulse
-                if self.pulse_target_unit == "Power":
-                    p_c = (
-                        group.iloc[-1]["Current"] * group.iloc[-1]["Voltage"]
-                    )  # power at chargepulse
-                elif self.pulse_target_unit == "Resistance":
-                    R_ct_c = self.R_ct_calculation(group)
-                    R_0_c = self.R_0_calculation(group)
-
-                list_R = [float(abs(R_ct_c)), float(abs(R_0_c))]
-                group["Pulse_py"] = group["Pulse_py"].astype("object")
-                for idx in group[mask].index:
-                    group.at[idx, "Pulse_py"] = list_R
-
-                print(
-                    "Charge Pulse added at ID: ",
-                    ID,
-                    " with",
-                    self.pulse_target_unit,
-                    ":",
-                    [abs(R_ct_c), abs(R_0_c)],
-                )
-                group["target"] = "PUL"
-
-            mask = group["Current"] < 0
-            if mask.any():
-                if self.pulse_target_unit == "Power":
-                    p_d = max(
-                        abs(
-                            (
-                                group.iloc[sign_change_location]["Current"]
-                                * group.iloc[sign_change_location]["Voltage"]
-                            )
-                        )
-                    )  # power at dischargepulse
-                elif self.pulse_target_unit == "Resistance":
-                    R_ct_d = self.R_ct_calculation(group)
-                    R_0_d = self.R_0_calculation(group)
-                # group_sum = group.sum()
-                list_R = [float(abs(R_ct_d)), float(abs(R_0_d))]
-                group["Pulse_py"] = group["Pulse_py"].astype("object")
-                for idx in group[mask].index:
-                    group.at[idx, "Pulse_py"] = list_R
-
-                print(
-                    "Discharge Pulse added at ID: ",
-                    ID,
-                    " with",
-                    self.pulse_target_unit,
-                    ":",
-                    [abs(R_ct_d), abs(R_0_d)],
-                )
-                group["target"] = "PUL"
-
+            print("Pulse labeled at ID: ", ID)
+            group["target"] = "PUL"
         else:
             print("Outlier found at ID: ", ID, duration)
             group["target"] = "-1"
