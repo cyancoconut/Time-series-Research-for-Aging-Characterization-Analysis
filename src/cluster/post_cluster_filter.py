@@ -164,6 +164,9 @@ class cluster_filter:
 
     def find_pulses(self, cluster_means):
         possible_cluster = cluster_means[cluster_means.index >= 0]
+        if possible_cluster.empty:
+            print("No non-noise clusters found; no pulse clusters to label.")
+            return []
         # Threshold: target_pulse_duration (seconds) scaled to minutes, times tolerance.
         # Catches all pulse-like clusters (e.g. 0.5C and 1C) while staying far below
         # CAP (~120 min) and qOCV (~1200 min) durations.
@@ -172,7 +175,7 @@ class cluster_filter:
             possible_cluster["Duration_minutes"] < pulse_threshold_min
         ].index.tolist()
         if not pulse_clusters:
-            pulse_clusters = [possible_cluster["Duration_minutes"].idxmin()]
+            print("No cluster falls under the pulse-duration threshold; treating as no pulses present.")
         return pulse_clusters
 
     def find_qocv(self, cluster_means):
@@ -181,13 +184,14 @@ class cluster_filter:
         valid_clusters = possible_cluster[
             possible_cluster["Duration_minutes"] <= (60 / self.qOCV_CRate) + 100
         ]
+        if valid_clusters.empty:
+            print("No cluster matches qOCV duration window; treating as no qOCV present.")
+            return []
         # Find index with duration closest to 60/self.qOCV_CRate
         closest_idx = (
             (valid_clusters["Duration_minutes"] - 60 / self.qOCV_CRate).abs().idxmin()
         )
-        qocv_clusters = [closest_idx]
-
-        return qocv_clusters
+        return [closest_idx]
 
     def previous_voltage(self, x, dismembered_df):
         """
