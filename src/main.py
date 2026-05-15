@@ -11,6 +11,7 @@ from dismember.dismember_raw_cell import dismember_raw_cell
 from feature_extraction.create_features import create_features
 from cluster import model_and_supervise, post_cluster_filter
 from cluster.post_cluster_filter import ClusterNotFoundException
+from cluster.predict_classifier import predict_targets
 from calculate import results_fetching
 from output.export_pulse import export_pulse
 from output.export_qocv import export_qocv
@@ -188,22 +189,35 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         cfg["v_max"],
     )
 
-    try:
-        df_silver, X_silver = _run_clustering(
-            dismembered_df,
-            X_features,
-            cell,
-            exceptions,
-            count,
-            hdbscan_l1,
-            cfg["hdbscan_para_layer_2"],
-            post_filter,
+    classifier_path = cfg.get("classifier_model_path")
+    if classifier_path:
+        meta_path = cfg.get(
+            "classifier_meta_path",
+            os.path.splitext(classifier_path)[0] + "_meta.json",
         )
-    except ClusterNotFoundException as e:
-        logging.warning(
-            f"{cell}: no proper checkup detected (no CAP cluster: {e}) — skipping GOLD"
-        )
-        return
+        logging.info(f"{cell}: classifying segments via {classifier_path}")
+        X_silver = predict_targets(X_features, classifier_path, meta_path)
+        df_silver = model_and_supervise.merge_target(dismembered_df, X_silver)
+        for col in df_silver.columns:
+            if df_silver[col].dtype == "object":
+                df_silver[col] = df_silver[col].astype(str)
+    else:
+        try:
+            df_silver, X_silver = _run_clustering(
+                dismembered_df,
+                X_features,
+                cell,
+                exceptions,
+                count,
+                hdbscan_l1,
+                cfg["hdbscan_para_layer_2"],
+                post_filter,
+            )
+        except ClusterNotFoundException as e:
+            logging.warning(
+                f"{cell}: no proper checkup detected (no CAP cluster: {e}) — skipping GOLD"
+            )
+            return
 
     _validate(df_silver, "silver")
 

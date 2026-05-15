@@ -64,10 +64,12 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
 
 2. **`feature_extraction/create_features.py`** + **`feature_extraction/classification.py`** — per-segment statistical features (mean, std, min, max of Voltage/Current/Temperature). Normalization: Voltage by `(V_max - V_min)`, Current/Power by `Nom_Capacity`. Adds `Duration_quartile = log1p(Duration_minutes)` and `abs_Current_mean = |Current_mean|`. Saves to `with_features_pre_labeled/<cell>.csv`.
 
-3. **`cluster/model_and_supervise.py`** — two-layer HDBSCAN clustering:
+3. **`cluster/model_and_supervise.py`** — two-layer HDBSCAN clustering (default path):
    - Layer 1: clusters on `["Duration_quartile", "abs_Current_mean", "ID"]` via `TabularAutoencoderHDBSCAN.fit_cluster_only()`. `min_cluster_size = max(2, n_programs − 1)`.
    - Layer 2 (only if Layer 1 fails to identify a capacity cluster): re-clusters capacity candidates on `["Current_mean", "ID"]` with stricter masks.
    - `cluster/post_cluster_filter.py` (`cluster_filter`) — rule-based masks to label CAP* / PUL* / QOCV* / −1.
+
+   **Classifier alternative** (set `classifier_model_path` in the battery config to enable): a RandomForest trained on per-segment features from `with_features_post_labeled/*.csv` predicts the final target directly, then `predict_classifier.predict_targets` translates predictions back to the cluster-tagged form (`CAP*` / `PUL*` / `QOCV*`) the downstream `calculate/` step expects. The HDBSCAN+filter step is skipped entirely. Match HDBSCAN's results on cells HDBSCAN handles, and rescues single-CAP edge cases (e.g. cell 600) where HDBSCAN would raise `ClusterNotFoundException`. Train with `python -m cluster.train_classifier <config>` from `src/`; the script does leave-one-cell-out CV, refits on all data, and writes `models/vtc_classifier.joblib` + sidecar `_meta.json`. The chemistry is baked into the labels — retrain per chemistry.
 
 4. **`calculate/results_fetching.py`** — `calculation` class (labeling + capacity only; pulse/qOCV numeric results live downstream, recomputed from the per-BM_Programm exports):
    - `update_capacity()` — trapezoidal Ah integration → `Capacity_py` column, refines `CAP*` → `CAP`.
