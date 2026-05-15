@@ -88,6 +88,82 @@ def fetch_gold_bytes(client: Minio, cfg: dict, cell: str) -> bytes:
         response.release_conn()
 
 
+class _MinioRangeFile:
+    """Seekable, read-only file-like over a MinIO object using HTTP range GETs.
+
+    pyarrow.ParquetFile only needs read/seek/tell, so this lets the parquet
+    reader fetch just the footer + the row groups it actually wants — orders
+    of magnitude less network I/O than downloading the whole object.
+    """
+
+    def __init__(self, client: Minio, bucket: str, key: str):
+        self._client = client
+        self._bucket = bucket
+        self._key = key
+        self._size = client.stat_object(bucket, key).size
+        self._pos = 0
+        self.closed = False
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def writable(self):
+        return False
+
+    def tell(self):
+        return self._pos
+
+    def seek(self, offset, whence=0):
+        if whence == 0:
+            self._pos = offset
+        elif whence == 1:
+            self._pos += offset
+        elif whence == 2:
+            self._pos = self._size + offset
+        else:
+            raise ValueError(f"invalid whence: {whence}")
+        return self._pos
+
+    def read(self, n=-1):
+        if self._pos >= self._size:
+            return b""
+        if n is None or n < 0:
+            length = self._size - self._pos
+        else:
+            length = min(n, self._size - self._pos)
+        if length <= 0:
+            return b""
+        response = self._client.get_object(
+            self._bucket, self._key, offset=self._pos, length=length
+        )
+        try:
+            data = response.read()
+        finally:
+            response.close()
+            response.release_conn()
+        self._pos += len(data)
+        return data
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+
+def open_gold_range(client: Minio, cfg: dict, cell: str) -> _MinioRangeFile:
+    """Open a GOLD parquet on MinIO as a range-read file-like object."""
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/GOLD/{cell}"
+    return _MinioRangeFile(client, bucket, key)
+
+
 def gold_local_path(working_path: str, cell: str) -> str:
     return os.path.join(working_path, "GOLD", cell)
 

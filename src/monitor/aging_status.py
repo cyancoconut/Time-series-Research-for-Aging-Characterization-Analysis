@@ -73,10 +73,13 @@ def _make_readers(cfg, source):
 
     def fetch_gold_tail(stem):
         try:
-            raw = io_router.fetch_gold_bytes(client, cfg, f"{stem}.parquet")
+            f = io_router.open_gold_range(client, cfg, f"{stem}.parquet")
         except Exception:
             return None
-        return _read_gold_tail(io.BytesIO(raw))
+        try:
+            return _read_gold_tail(f)
+        finally:
+            f.close()
 
     return cells, fetch_capacity, fetch_gold_tail
 
