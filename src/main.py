@@ -18,7 +18,33 @@ from output.export_qocv import export_qocv
 from output.export_capacity import export_capacity
 from util import io_router
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+def _setup_logging(working_path: str | None) -> None:
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    has_stream = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in root.handlers
+    )
+    if not has_stream:
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+
+    if working_path:
+        log_path = os.path.join(working_path, "pipeline.log")
+        os.makedirs(working_path, exist_ok=True)
+        already = any(
+            isinstance(h, logging.FileHandler)
+            and os.path.abspath(h.baseFilename) == os.path.abspath(log_path)
+            for h in root.handlers
+        )
+        if not already:
+            fh = logging.FileHandler(log_path)
+            fh.setFormatter(fmt)
+            root.addHandler(fh)
+            logging.info(f"Logging to {log_path}")
 
 _REQUIRED_COLS = {
     "preSILVER": {
@@ -58,6 +84,8 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
     working_path = cfg.get("working_path")
     download_from = cfg.get("download_from", "local")
     upload_to = cfg.get("upload_to", "local")
+
+    _setup_logging(working_path)
 
     minio_client = (
         io_router.make_minio_client(cfg) if io_router.needs_minio(cfg) else None
