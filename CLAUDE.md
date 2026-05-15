@@ -55,6 +55,8 @@ with_features_pre_labeled → [HDBSCAN clustering] → with_features_post_labele
 
 These are a per-segment projection of preSILVER. Labels from `with_features_post_labeled` are merged back into the time-series to produce SILVER.
 
+**Cells without a proper checkup**: if clustering cannot identify a CAP cluster (raised as `ClusterNotFoundException` from `post_cluster_filter.find_capacity` — either no layer-1 candidate in the CAP duration window, or no layer-2 capacity cluster), `_process_cell_inner` in `main.py` catches it and logs a single warning (`no proper checkup detected (no CAP cluster: …) — skipping GOLD`). The cell is skipped cleanly — no GOLD, no exports, no traceback — and the run continues. It is **not** counted as a failure in the exceptions dict.
+
 **Pipeline stages and their modules:**
 
 1. **`dismember/dismember_raw_cell.py`** — reads BRONZE_CU parquet, renames German columns (`Spannung→Voltage`, `Strom→Current`, `Zeit→Time`, `T1→Temperature`), segments into discrete procedures. Groups by `Ahjo_Test_ID` → `BM_Programm`, splits by `Prozedur` changes and PAU pauses > `pau_duration` minutes. Drops segments with < `min_rows` rows. Assigns string ID: `<BM_Programm>_<procedure_number>` (e.g. `13_16`). Core logic: `dismember/cluster_preparation.py` (`DismembererFunctions`, `allocate_IDs`).
