@@ -23,7 +23,7 @@ from util import io_router
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-RUNNING_WINDOW_DAYS = 14
+RUNNING_WINDOW_DAYS = 2
 YELLOW_THRESHOLD = 70.0
 RED_THRESHOLD = 60.0
 
