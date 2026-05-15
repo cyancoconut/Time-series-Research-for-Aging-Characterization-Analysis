@@ -10,6 +10,7 @@ import pandas as pd
 from dismember.dismember_raw_cell import dismember_raw_cell
 from feature_extraction.create_features import create_features
 from cluster import model_and_supervise, post_cluster_filter
+from cluster.post_cluster_filter import ClusterNotFoundException
 from calculate import results_fetching
 from output.export_pulse import export_pulse
 from output.export_qocv import export_qocv
@@ -187,16 +188,22 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         cfg["v_max"],
     )
 
-    df_silver, X_silver = _run_clustering(
-        dismembered_df,
-        X_features,
-        cell,
-        exceptions,
-        count,
-        hdbscan_l1,
-        cfg["hdbscan_para_layer_2"],
-        post_filter,
-    )
+    try:
+        df_silver, X_silver = _run_clustering(
+            dismembered_df,
+            X_features,
+            cell,
+            exceptions,
+            count,
+            hdbscan_l1,
+            cfg["hdbscan_para_layer_2"],
+            post_filter,
+        )
+    except ClusterNotFoundException as e:
+        logging.warning(
+            f"{cell}: no proper checkup detected (no CAP cluster: {e}) — skipping GOLD"
+        )
+        return
 
     _validate(df_silver, "silver")
 
