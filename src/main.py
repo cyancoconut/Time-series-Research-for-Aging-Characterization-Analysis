@@ -20,7 +20,7 @@ from util import io_router
 
 def _setup_logging(working_path: str | None) -> None:
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.WARNING)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 
     has_stream = any(
