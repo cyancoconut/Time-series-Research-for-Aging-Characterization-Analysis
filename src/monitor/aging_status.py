@@ -23,7 +23,7 @@ from util import io_router
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-RUNNING_WINDOW_DAYS = 2
+DEFAULT_RUNNING_WINDOW_DAYS = 2
 YELLOW_THRESHOLD = 70.0
 RED_THRESHOLD = 60.0
 
@@ -119,8 +119,9 @@ def build_status_table(cfg, source="minio"):
     cells, fetch_capacity, fetch_gold_tail = _make_readers(cfg, source)
     logging.info(f"Found {len(cells)} capacity CSVs ({source})")
 
+    running_window_days = cfg.get("running_window_days", DEFAULT_RUNNING_WINDOW_DAYS)
     now = datetime.now(timezone.utc)
-    running_cutoff = now - timedelta(days=RUNNING_WINDOW_DAYS)
+    running_cutoff = now - timedelta(days=running_window_days)
 
     rows = []
     for cell in cells:
@@ -215,7 +216,7 @@ def _render_table(df, headers, table_id, title):
 </tbody></table>"""
 
 
-def render_html(df, out_path):
+def render_html(df, out_path, running_window_days=DEFAULT_RUNNING_WINDOW_DAYS):
     headers = ["cell", "latest_SOH_%", "dSOH_per_CU", "n_CU", "last_row_time", "last_Prozedur", "status"]
     df_running = df[df["status"] == "running"]
     df_finished = df[df["status"] == "finished"]
@@ -241,7 +242,7 @@ def render_html(df, out_path):
 </style>
 </head><body>
 <h1>Cell aging status</h1>
-<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; running = last row within {RUNNING_WINDOW_DAYS} days</div>
+<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; running = last row within {running_window_days} days</div>
 {tables}
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
@@ -267,6 +268,7 @@ def main():
         cfg = json.load(f)
 
     source = cfg.get("download_from", "local")
+    running_window_days = cfg.get("running_window_days", DEFAULT_RUNNING_WINDOW_DAYS)
     df = build_status_table(cfg, source=source)
     if df.empty:
         logging.warning("No cells found")
@@ -277,13 +279,13 @@ def main():
     )
     if io_router.writes_local(cfg):
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-        render_html(df, out)
+        render_html(df, out, running_window_days=running_window_days)
     else:
         # Need a local temp render to get the HTML payload
         import tempfile
         tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w")
         tmp.close()
-        render_html(df, tmp.name)
+        render_html(df, tmp.name, running_window_days=running_window_days)
         out = tmp.name
 
     if io_router.writes_minio(cfg):
