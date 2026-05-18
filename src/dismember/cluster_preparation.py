@@ -200,10 +200,13 @@ def allocate_IDs(result_df, start_date=None, end_date=None):
         + result_df["BM_Programm_procedure"].astype(str)
     )
 
-    # Add target and prelabel the EIS-Parts
+    # Add target and prelabel the EIS-Parts.
+    # Cast to object so later string assignments (e.g. "PAU") don't trip the
+    # pandas FutureWarning about setting incompatible dtypes when the lambda
+    # only returns ints and the column is inferred as int64.
     result_df["target"] = result_df.groupby("ID")["Prozedur"].transform(
         lambda x: "EIS" if x.isna().any() else -1
-    )
+    ).astype(object)
 
     # Propagate the dismember-time PAU pre-label to every row of the affected IDs.
     # `pre_target == "PAU"` is set in DismembererFunctions.dismember() right after the
