@@ -101,8 +101,13 @@ python -m monitor.aging_status /path/to/battery_config.json
 - **Source** (driven by `download_from`): reads `<...>/40_capacity_monitore/*_capacity.csv` for SOH/CU history, then loads only the **last row group** of each cell's GOLD parquet (via `pyarrow.ParquetFile.read_row_group`) to get the most recent `Time` and `Prozedur`. For MinIO, the parquet is opened through `io_router.open_gold_range`, a seekable file-like wrapper around `Minio.get_object(..., offset, length)` so pyarrow can HTTP-range-read just the footer + last row group instead of downloading the full file (per-cell network I/O drops from tens of MB to tens of KB, critical at fleet scale).
 - **Output**: `<working_path>/40_capacity_monitore/aging_status.html` locally; uploaded to `<minio_prefix>/40_capacity_monitore/aging_status.html` when `upload_to` includes `minio` (untagged).
 - **Columns**: `cell · latest_SOH_% · dSOH_per_CU · n_CU · last_row_time · last_Prozedur · status`.
-- **Status**: `running` if last GOLD row's Time is within `running_window_days` (default 2), else `finished`. Running and finished cells are rendered as two separate DataTables.
-- **Coloring**: SOH `< 70%` row → yellow; SOH `< 60%` → red. Sort within "running" is SOH ascending so the most-aged cell sits on top.
+- **Status** (three-valued, evaluated in this order):
+  1. `unfinished` if the cell stem ends with `=unfinished` — the downloader (`download/download_from_specimen.py`) writes BRONZE_CU filenames as `…=filesize-XXX=<status>.parquet` where `<status>` is `finished`/`unfinished` from Ahjo's `test.finished`. The unfinished tag is authoritative and wins over the time heuristic.
+  2. else `running` if last GOLD row's Time is within `running_window_days` (default 2).
+  3. else `finished`.
+
+  Unfinished / running / finished cells are rendered as three separate DataTables.
+- **Coloring**: SOH `< 70%` row → yellow; SOH `< 60%` → red. Sort within each table is SOH ascending so the most-aged cell sits on top.
 - SOH thresholds are constants at the top of `aging_status.py` (`YELLOW_THRESHOLD`, `RED_THRESHOLD`). The running window is read from the battery config key `running_window_days` (default `DEFAULT_RUNNING_WINDOW_DAYS = 2`).
 
 ## Key parameters

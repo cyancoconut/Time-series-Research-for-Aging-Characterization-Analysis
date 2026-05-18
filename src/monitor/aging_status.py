@@ -96,6 +96,11 @@ def _read_gold_tail(source):
     return last_rg.tail(1) if not last_rg.empty else None
 
 
+def _is_unfinished(cell_stem):
+    """True if the BRONZE_CU stem ends with `=unfinished` (download status tag)."""
+    return cell_stem.endswith("=unfinished")
+
+
 def _cell_summary(df):
     if df.empty or "SOH" not in df.columns:
         return {"latest_soh": None, "delta_soh_per_cu": None, "n_cu": 0}
@@ -145,11 +150,15 @@ def build_status_table(cfg, source="minio"):
         except Exception as e:
             logging.warning(f"{cell_stem}: GOLD tail read failed: {type(e).__name__}: {e}")
 
-        if pd.notna(last_t):
-            last_t_aware = last_t.tz_localize("UTC") if last_t.tzinfo is None else last_t
-            is_running = last_t_aware >= running_cutoff
+        if _is_unfinished(cell_stem):
+            status = "unfinished"
         else:
-            is_running = False
+            if pd.notna(last_t):
+                last_t_aware = last_t.tz_localize("UTC") if last_t.tzinfo is None else last_t
+                is_running = last_t_aware >= running_cutoff
+            else:
+                is_running = False
+            status = "running" if is_running else "finished"
 
         rows.append({
             "cell": cell_stem,
@@ -158,14 +167,16 @@ def build_status_table(cfg, source="minio"):
             "n_CU": s["n_cu"],
             "last_row_time": last_t,
             "last_Prozedur": last_prozedur,
-            "status": "running" if is_running else "finished",
+            "status": status,
         })
 
     df_status = pd.DataFrame(rows)
     if df_status.empty:
         return df_status
 
-    df_status["_status_order"] = df_status["status"].map({"running": 0, "finished": 1})
+    df_status["_status_order"] = df_status["status"].map(
+        {"unfinished": 0, "running": 1, "finished": 2}
+    )
     df_status["_soh_sort"] = df_status["latest_SOH_%"].fillna(float("inf"))
     df_status = df_status.sort_values(
         by=["_status_order", "_soh_sort"], ascending=[True, True]
@@ -218,12 +229,15 @@ def _render_table(df, headers, table_id, title):
 
 def render_html(df, out_path, running_window_days=DEFAULT_RUNNING_WINDOW_DAYS):
     headers = ["cell", "latest_SOH_%", "dSOH_per_CU", "n_CU", "last_row_time", "last_Prozedur", "status"]
+    df_unfinished = df[df["status"] == "unfinished"]
     df_running = df[df["status"] == "running"]
     df_finished = df[df["status"] == "finished"]
 
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
     tables = (
-        _render_table(df_running, headers, "t_running", "Running")
+        _render_table(df_unfinished, headers, "t_unfinished", "Unfinished")
+        + "\n"
+        + _render_table(df_running, headers, "t_running", "Running")
         + "\n"
         + _render_table(df_finished, headers, "t_finished", "Finished")
     )
@@ -242,12 +256,13 @@ def render_html(df, out_path, running_window_days=DEFAULT_RUNNING_WINDOW_DAYS):
 </style>
 </head><body>
 <h1>Cell aging status</h1>
-<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; running = last row within {running_window_days} days</div>
+<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; unfinished = BRONZE_CU stem ends with `=unfinished` &middot; running = BRONZE finished but last GOLD row within {running_window_days} days</div>
 {tables}
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
 <script>
 $(function() {{
+  $('#t_unfinished').DataTable({{ paging: false, order: [], info: true, searching: true }});
   $('#t_running').DataTable({{ paging: false, order: [], info: true, searching: true }});
   $('#t_finished').DataTable({{ paging: false, order: [], info: true, searching: true }});
 }});
