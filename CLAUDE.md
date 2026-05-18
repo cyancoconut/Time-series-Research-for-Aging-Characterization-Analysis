@@ -55,6 +55,8 @@ with_features_pre_labeled → [HDBSCAN clustering] → with_features_post_labele
 
 These are a per-segment projection of preSILVER. Labels from `with_features_post_labeled` are merged back into the time-series to produce SILVER.
 
+**Procedure-filter gate**: `_process_cell` in `main.py` peeks at the BRONZE `Prozedur` column before pulling the full payload. If `procedure_filter` is set in the config and no `Prozedur` matches, the cell is skipped immediately with `INFO {cell}: no Prozedur matches filter '<filter>', skipping` — dismember is never entered and, on MinIO, `fetch_bronze` is never called. The check uses `processing_procedure_filter` (pyarrow, reads only `Prozedur` row-group by row-group, short-circuits on first match). On MinIO it runs against `io_router.open_bronze_range`, a seekable HTTP-range-read file-like, so a filtered-out cell only fetches the parquet footer + one column.
+
 **Cells without a proper checkup**: if clustering cannot identify a CAP cluster (raised as `ClusterNotFoundException` from `post_cluster_filter.find_capacity` — either no layer-1 candidate in the CAP duration window, or no layer-2 capacity cluster), `_process_cell_inner` in `main.py` catches it and logs a single warning (`no proper checkup detected (no CAP cluster: …) — skipping GOLD`). The cell is skipped cleanly — no GOLD, no exports, no traceback — and the run continues. It is **not** counted as a failure in the exceptions dict.
 
 **Pipeline stages and their modules:**

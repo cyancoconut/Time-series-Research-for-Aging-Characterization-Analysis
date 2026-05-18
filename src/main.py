@@ -7,7 +7,7 @@ from contextlib import nullcontext
 
 import pandas as pd
 
-from dismember.dismember_raw_cell import dismember_raw_cell
+from dismember.dismember_raw_cell import dismember_raw_cell, processing_procedure_filter
 from feature_extraction.create_features import create_features
 from cluster import model_and_supervise, post_cluster_filter
 from cluster.post_cluster_filter import ClusterNotFoundException
@@ -107,6 +107,22 @@ def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
     paths = _build_paths(cell, working_path) if working_path else None
     if paths and io_router.writes_local(cfg):
         os.makedirs(os.path.dirname(paths["gold"]), exist_ok=True)
+
+    # Procedure-filter gate: peek at just the Prozedur column before pulling
+    # the full bronze payload. On MinIO this uses an HTTP range-read so a
+    # filtered-out cell never triggers fetch_bronze's full-file download.
+    procedure_filter = cfg.get("procedure_filter", None)
+    if procedure_filter is not None:
+        if download_from == "minio":
+            with io_router.open_bronze_range(minio_client, cfg, cell) as src:
+                matched = processing_procedure_filter(src, procedure_filter)
+        else:
+            matched = processing_procedure_filter(paths["bronze"], procedure_filter)
+        if not matched:
+            logging.info(
+                f"{cell}: no Prozedur matches filter {procedure_filter!r}, skipping"
+            )
+            return
 
     if download_from == "minio":
         bronze_ctx = io_router.fetch_bronze(minio_client, cfg, cell)
