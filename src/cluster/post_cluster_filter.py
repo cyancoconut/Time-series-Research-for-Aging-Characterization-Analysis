@@ -98,11 +98,12 @@ class cluster_filter:
 
             elif cluster_means_CAP.shape[0] == 0:
                 # Layer 1 clusters on abs_Current_mean so charge/discharge of the
-                # same |I| share a cluster — discharge sign at cluster level is
-                # unreliable. Gate the fallback on duration first (CAP ~60/CAP_Rate
-                # min, ±30%), then pick the duration-passing cluster whose
-                # |Current_mean| is closest to CAP_Rate. Layer 2 re-clusters on
-                # signed current and applies the strict CRate mask.
+                # same |I| share a cluster — the signed Current_mean cancels at
+                # the cluster level and is unreliable. Gate the fallback on
+                # duration first (CAP ~60/CAP_Rate min, ±30%), then pick the
+                # duration-passing cluster whose abs_Current_mean is closest to
+                # CAP_Rate. Layer 2 re-clusters on signed current and applies
+                # the strict CRate mask.
                 mask_duration_loose = (
                     (cluster_means["Duration_minutes"] > 0.7 * 60 / self.CAP_Rate) &
                     (cluster_means["Duration_minutes"] < 1.3 * 60 / self.CAP_Rate)
@@ -116,7 +117,7 @@ class cluster_filter:
                     )
 
                 closest_idx = (
-                    (abs(valid_clusters["Current_mean"]) - self.CAP_Rate)
+                    (valid_clusters["abs_Current_mean"] - self.CAP_Rate)
                     .abs()
                     .idxmin()
                 )
