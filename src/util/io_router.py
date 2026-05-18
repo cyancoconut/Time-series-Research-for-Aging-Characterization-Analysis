@@ -164,6 +164,18 @@ def open_gold_range(client: Minio, cfg: dict, cell: str) -> _MinioRangeFile:
     return _MinioRangeFile(client, bucket, key)
 
 
+def open_bronze_range(client: Minio, cfg: dict, cell: str) -> _MinioRangeFile:
+    """Open a BRONZE_CU parquet on MinIO as a range-read file-like object.
+
+    Used to peek at a single column (e.g. Prozedur) without downloading the
+    whole bronze file — the procedure-filter gate can then skip cells that
+    don't match before fetch_bronze pulls the full payload.
+    """
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/BRONZE_CU/{cell}"
+    return _MinioRangeFile(client, bucket, key)
+
+
 def gold_local_path(working_path: str, cell: str) -> str:
     return os.path.join(working_path, "GOLD", cell)
 

@@ -3,33 +3,33 @@ from .cluster_preparation import allocate_IDs
 from util import bronze_column_filter
 
 import os
-import duckdb
 import pandas as pd
 import numpy as np
+import pyarrow.parquet as pq
+import pyarrow.compute as pc
 
 
-def processing_procedure_filter(loadpath, procedure_filter):
+def processing_procedure_filter(source, procedure_filter):
+    """Check whether any Prozedur value in the BRONZE parquet matches the filter.
+
+    ``source`` may be either a local file path or a seekable file-like object
+    (e.g. ``io_router.open_bronze_range``). Only the ``Prozedur`` column is
+    read, row group by row group, and the scan short-circuits on the first
+    substring match — so on MinIO this fetches only the parquet footer plus
+    one column's data, not the full file.
+    """
     # If no filter is provided, allow all cells
     if procedure_filter is None:
         return True
 
-    # filters out the whole cell if result is False
-    filter_param = (
-        "%" + procedure_filter + "%" if procedure_filter is not None else None
-    )
-    con = duckdb.connect()
-    query = """
-        SELECT 
-            EXISTS (
-                SELECT 1
-                FROM read_parquet(?)
-                WHERE ? IS NULL OR Prozedur LIKE ?
-            ) AS contains_procedure_filter
-    """
-    # result will be True if any Prozedur contains the filter, False otherwise
-    result = con.execute(query, [loadpath, filter_param, filter_param]).fetchone()
-
-    return result[0]
+    pf = pq.ParquetFile(source)
+    if "Prozedur" not in pf.schema_arrow.names:
+        return False
+    for i in range(pf.num_row_groups):
+        col = pf.read_row_group(i, columns=["Prozedur"]).column("Prozedur")
+        if pc.any(pc.match_substring(col, procedure_filter)).as_py():
+            return True
+    return False
 
 
 def read_and_fix_format(loadpath, V_max):
