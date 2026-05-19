@@ -96,9 +96,26 @@ def _read_gold_tail(source):
     return last_rg.tail(1) if not last_rg.empty else None
 
 
-def _is_unfinished(cell_stem):
-    """True if the BRONZE_CU stem ends with `=unfinished` (download status tag)."""
-    return cell_stem.endswith("=unfinished")
+def _has_unfinished_pertest(cell_stem, cfg, source, client=None):
+    """True if any raw per-test parquet in <prefix>/<cell_stem>/ has '=unfinished' in
+    its filename. The per-test files are written by download_single_tests with a
+    '=<status>.parquet' suffix; a cell is unfinished if any of its tests is."""
+    if source == "local":
+        cell_dir = os.path.join(cfg["working_path"], cell_stem)
+        if not os.path.isdir(cell_dir):
+            return False
+        for name in os.listdir(cell_dir):
+            if name.endswith(".parquet") and "=unfinished" in name:
+                return True
+        return False
+
+    bucket = cfg["bucket_name"]
+    prefix = f"{cfg['minio_prefix']}/{cell_stem}/"
+    for o in client.list_objects(bucket, prefix=prefix, recursive=False):
+        name = os.path.basename(o.object_name)
+        if name.endswith(".parquet") and "=unfinished" in name:
+            return True
+    return False
 
 
 def _cell_summary(df):
@@ -124,6 +141,7 @@ def build_status_table(cfg, source="minio"):
     cells, fetch_capacity, fetch_gold_tail = _make_readers(cfg, source)
     logging.info(f"Found {len(cells)} capacity CSVs ({source})")
 
+    client = io_router.make_minio_client(cfg) if source == "minio" else None
     running_window_days = cfg.get("running_window_days", DEFAULT_RUNNING_WINDOW_DAYS)
     now = datetime.now(timezone.utc)
     running_cutoff = now - timedelta(days=running_window_days)
@@ -150,7 +168,7 @@ def build_status_table(cfg, source="minio"):
         except Exception as e:
             logging.warning(f"{cell_stem}: GOLD tail read failed: {type(e).__name__}: {e}")
 
-        if _is_unfinished(cell_stem):
+        if _has_unfinished_pertest(cell_stem, cfg, source, client):
             status = "unfinished"
         else:
             if pd.notna(last_t):
@@ -256,7 +274,7 @@ def render_html(df, out_path, running_window_days=DEFAULT_RUNNING_WINDOW_DAYS):
 </style>
 </head><body>
 <h1>Cell aging status</h1>
-<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; unfinished = BRONZE_CU stem ends with `=unfinished` &middot; running = BRONZE finished but last GOLD row within {running_window_days} days</div>
+<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; unfinished = any per-test parquet under the cell folder ends with `=unfinished` &middot; running = BRONZE finished but last GOLD row within {running_window_days} days</div>
 {tables}
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>

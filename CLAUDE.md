@@ -102,7 +102,7 @@ python -m monitor.aging_status /path/to/battery_config.json
 - **Output**: `<working_path>/40_capacity_monitore/aging_status.html` locally; uploaded to `<minio_prefix>/40_capacity_monitore/aging_status.html` when `upload_to` includes `minio` (untagged).
 - **Columns**: `cell · latest_SOH_% · dSOH_per_CU · n_CU · last_row_time · last_Prozedur · status`.
 - **Status** (three-valued, evaluated in this order):
-  1. `unfinished` if the cell stem ends with `=unfinished` — the downloader (`download/download_from_specimen.py`) writes BRONZE_CU filenames as `…=filesize-XXX=<status>.parquet` where `<status>` is `finished`/`unfinished` from Ahjo's `test.finished`. The unfinished tag is authoritative and wins over the time heuristic.
+  1. `unfinished` if any raw per-test parquet under `<prefix>/<cell_stem>/` has `=unfinished` in its filename. The downloader (`download/download_from_specimen.py` → `download_single_tests`) writes per-test files as `…=filesize-XXX=<status>.parquet` where `<status>` is `finished`/`unfinished` from Ahjo's `test.finished`. BRONZE_CU (the concatenated per-cell parquet) cannot itself carry the suffix, so the monitor inspects the per-test folder directly. The unfinished tag is authoritative and wins over the time heuristic.
   2. else `running` if last GOLD row's Time is within `running_window_days` (default 2).
   3. else `finished`.
 
