@@ -53,9 +53,11 @@ def run(cfg: dict) -> None:
     ahjo_project = ahjo.get_project(project)
 
     specimens = list(ahjo.list_specimens(ahjo_project))
+    name_fragments = [t for t in (target_cell or []) if t]
     target_subset = [
         s for s in specimens
-        if not target_cell or any(t in s.name for t in target_cell)
+        if cell_type in s.name
+        and (not name_fragments or any(t in s.name for t in name_fragments))
     ]
 
     print(f"Project: {project}")
