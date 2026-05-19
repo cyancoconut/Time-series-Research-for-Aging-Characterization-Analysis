@@ -40,6 +40,8 @@ DEFAULT_DOWNLOAD_CFG = {
     "bucket_name": "",
     "export_type": "local",
     "export_path": "",
+    "include_unfinished": False,
+    "update_unfinished": True,
 }
 
 
@@ -290,6 +292,12 @@ class PipelineUI(ctk.CTk):
         export.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
         self.dl_export_type = export.add_entry("Export type:", placeholder="local")
         self.dl_export_path = export.add_path("Export path:", is_dir=True)
+        self.dl_include_unfinished = export.add_checkbox(
+            "Include unfinished tests"
+        )
+        self.dl_update_unfinished = export.add_checkbox(
+            "Update unfinished tests (re-fetch previously unfinished ones)"
+        )
 
         # Buttons
         btns = ctk.CTkFrame(parent, fg_color="transparent")
@@ -429,6 +437,8 @@ class PipelineUI(ctk.CTk):
             "bucket_name": self.dl_bucket.get(),
             "export_type": self.dl_export_type.get(),
             "export_path": self.dl_export_path.get(),
+            "include_unfinished": bool(self.dl_include_unfinished.get()),
+            "update_unfinished": bool(self.dl_update_unfinished.get()),
         }
 
     def _apply_download_cfg(self, cfg: dict) -> None:
@@ -448,6 +458,15 @@ class PipelineUI(ctk.CTk):
         _set(self.dl_bucket, cfg.get("bucket_name", ""))
         _set(self.dl_export_type, cfg.get("export_type", ""))
         _set(self.dl_export_path, cfg.get("export_path", ""))
+
+        if cfg.get("include_unfinished", False):
+            self.dl_include_unfinished.select()
+        else:
+            self.dl_include_unfinished.deselect()
+        if cfg.get("update_unfinished", True):
+            self.dl_update_unfinished.select()
+        else:
+            self.dl_update_unfinished.deselect()
 
     def _dl_save(self) -> None:
         path = filedialog.asksaveasfilename(

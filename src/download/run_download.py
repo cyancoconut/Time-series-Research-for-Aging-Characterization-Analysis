@@ -37,6 +37,8 @@ def run(cfg: dict) -> None:
     bucket_name = cfg["bucket_name"]
     export_type = cfg["export_type"]
     export_path = cfg["export_path"]
+    include_unfinished = bool(cfg.get("include_unfinished", False))
+    update_unfinished = bool(cfg.get("update_unfinished", True))
 
     ahjo = AhjoSource(ahjo_endpoint, ahjo_key)
     ahjo_project = ahjo.get_project(project)
@@ -50,6 +52,7 @@ def run(cfg: dict) -> None:
     print(f"Project: {project}")
     print(f"Target specimen filter: {target_specimen}")
     print(f"Matched {len(target_subset)} / {len(specimens)} specimens")
+    print(f"include_unfinished={include_unfinished}, update_unfinished={update_unfinished}")
 
     downloader = SpecimenDownloader(
         ahjo,
@@ -73,8 +76,8 @@ def run(cfg: dict) -> None:
                 specimen,
                 export_type,
                 prefix=prefix,
-                include_unfinished=False,
-                update_unfinished=True,
+                include_unfinished=include_unfinished,
+                update_unfinished=update_unfinished,
             )
         except Exception as e:
             print(f"Download failed for {specimen}: {e}")
