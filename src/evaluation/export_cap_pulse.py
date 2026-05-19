@@ -92,15 +92,20 @@ def _make_readers(cfg, source):
 
 
 def _read_unique_prozedur(source):
-    """Read the unique non-null `Prozedur` values from a GOLD parquet."""
-    pf = pq.ParquetFile(source)
+    """Read the unique non-null `Prozedur` values from a GOLD parquet.
+
+    Reads the whole column in a single pass so pyarrow can coalesce range
+    reads — much faster over MinIO than per-row-group reads, which each
+    trigger their own HTTP GET.
+    """
+    pf = pq.ParquetFile(source, pre_buffer=True)
     if "Prozedur" not in pf.schema_arrow.names or pf.num_row_groups == 0:
         return []
+    col = pf.read(columns=["Prozedur"]).column("Prozedur")
     seen = []
     seen_set = set()
-    for i in range(pf.num_row_groups):
-        rg = pf.read_row_group(i, columns=["Prozedur"]).to_pandas()
-        for v in rg["Prozedur"].dropna().unique():
+    for chunk in col.chunks:
+        for v in chunk.drop_null().unique().to_pylist():
             if v not in seen_set:
                 seen_set.add(v)
                 seen.append(v)
