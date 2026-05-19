@@ -6,6 +6,7 @@ import glob
 # import reload
 import io
 import os
+import sys
 
 from ahjo_dl.entities.test import TestFormat
 import duckdb
@@ -14,6 +15,19 @@ from minio import Minio
 from minio.error import S3Error
 
 import urllib3
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from util import io_router  # noqa: E402
+
+
+def _normalize_export_type(value: str | None) -> str:
+    """Map UI / legacy export_type values to io_router's upload_to vocabulary."""
+    v = (value or "").lower().strip()
+    if v == "server":
+        return "minio"
+    if v in ("local", "minio", "both"):
+        return v
+    return "local"
 
 
 class SpecimenDownloader:
@@ -37,12 +51,12 @@ class SpecimenDownloader:
         self.minio_client = None
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         if access_key and secret_key and minio_endpoint:
-            self.minio_client = Minio(
-                minio_endpoint,
-                access_key=access_key,
-                secret_key=secret_key,
-                secure=True,
-                cert_check=False,
+            self.minio_client = io_router.make_minio_client(
+                {
+                    "minio_endpoint": minio_endpoint,
+                    "minio_access_key": access_key,
+                    "minio_secret_key": secret_key,
+                }
             )
 
     def load_tests(self, filtered_tests_name):
@@ -176,6 +190,49 @@ class SpecimenDownloader:
         except S3Error as err:
             print("Upload error:", err)
 
+    def _export_test(
+        self,
+        df,
+        *,
+        specimen_name: str,
+        filename: str,
+        prefix: str,
+        writes_local: bool,
+        writes_minio: bool,
+    ) -> None:
+        """Write a single test file to local disk, MinIO, or both.
+
+        Mirrors the routing logic of io_router.writes_local / writes_minio.
+        ``prefix`` is the MinIO-side bucket-relative prefix (e.g.
+        ``j8005-metabatt/Metabatt/VTC/``); ``self.export_path`` is the local
+        ``<export_path>/BRONZE`` root configured in ``__init__``.
+        """
+        if writes_local:
+            local_dir = f"{self.export_path}/{specimen_name}"
+            os.makedirs(local_dir, exist_ok=True)
+            local_path = f"{local_dir}/{filename}"
+            df.to_parquet(local_path, index=False)
+            print(f"  Saved locally:    {local_path}")
+
+        if writes_minio:
+            if self.minio_client is None:
+                print("  Skipping S3 upload: no MinIO client configured.")
+                return
+            buf = io.BytesIO()
+            df.to_parquet(buf, index=False)
+            buf.seek(0)
+            object_name = f"{prefix}{specimen_name}/{filename}"
+            try:
+                self.minio_client.put_object(
+                    bucket_name=self.bucket_name,
+                    object_name=object_name,
+                    data=buf,
+                    length=len(buf.getvalue()),
+                )
+                print(f"  Uploaded to S3:   {self.bucket_name}/{object_name}")
+            except S3Error as err:
+                print(f"  Upload error for {object_name}: {err}")
+
     def download_tests(
         self, specimen, initial_download, check_up_only, export_type="local"
     ):
@@ -260,24 +317,36 @@ class SpecimenDownloader:
     ):
         print(f"Processing {specimen.name}")
 
-        if export_type == "local":
-            existing_files = glob.glob(
-                f"{self.export_path}/{specimen.name}/**/*.parquet", recursive=True
-            )
-            existing_test = [
-                existing_file.split("=")[4] for existing_file in existing_files
-            ]
+        # Map export_type to io_router's upload_to vocabulary, then drive
+        # which location(s) we read existing files from and upload to.
+        cfg = {"upload_to": _normalize_export_type(export_type)}
+        writes_local = io_router.writes_local(cfg)
+        writes_minio = io_router.writes_minio(cfg)
 
-            for file in existing_test:
-                if "unfinished" in file:
-                    os.remove(file)
-                    self.download_single_tests(
-                        self, specimen, export_type, include_unfinished
-                    )
+        # Replacement only happens when *both* flags are set — the UI prevents
+        # update_unfinished from being checked unless include_unfinished is on,
+        # but we belt-and-suspenders the check here too.
+        replace_unfinished = bool(update_unfinished and include_unfinished)
 
-        elif export_type == "server":
-            existing_test = []
-            existing_files = []
+        existing_test: list[str] = []
+
+        if writes_local:
+            specimen_dir = f"{self.export_path}/{specimen.name}"
+            for path in glob.glob(f"{specimen_dir}/**/*.parquet", recursive=True):
+                file_name = os.path.basename(path)
+                segs = file_name.split("=")
+                if len(segs) < 5:
+                    continue
+                if replace_unfinished and file_name.endswith("=unfinished.parquet"):
+                    try:
+                        os.remove(path)
+                        print(f"  removed local unfinished file: {path}")
+                    except OSError as e:
+                        print(f"  could not remove {path}: {e}")
+                    continue
+                existing_test.append(segs[4])
+
+        if writes_minio:
             objects = self.minio_client.list_objects(
                 bucket_name=self.bucket_name,
                 prefix=f"{prefix}{specimen.name}/",
@@ -285,20 +354,20 @@ class SpecimenDownloader:
             )
             for obj in objects:
                 file_name = os.path.basename(obj.object_name)
-                test_name = file_name.split("=")[4]
-                existing_test.append(test_name)
-                existing_files.append(file_name)
-
-            # Update unfinished files on flag
-            if update_unfinished:
-                for file in existing_files:
-                    if "unfinished" in file:
-                        print(f"unfinished file found: {file}")
+                segs = file_name.split("=")
+                if len(segs) < 5:
+                    continue
+                if replace_unfinished and file_name.endswith("=unfinished.parquet"):
+                    print(f"  removing MinIO unfinished file: {obj.object_name}")
+                    try:
                         self.minio_client.remove_object(
                             bucket_name=self.bucket_name,
-                            object_name=f"{prefix}{specimen.name}/{file}",
+                            object_name=obj.object_name,
                         )
-                        existing_test.remove(file.split("=")[4])
+                    except S3Error as e:
+                        print(f"  remove_object error for {obj.object_name}: {e}")
+                    continue
+                existing_test.append(segs[4])
 
         # get all tests from one specimen
         for test in self.ahjo.get_tests_from_specimen(specimen.id):
@@ -351,7 +420,11 @@ class SpecimenDownloader:
                     status = "finished" if test.finished else "unfinished"
                     object_name = f"{self.project}={specimen.name}={datetime.fromtimestamp(test.startDate).strftime('%Y-%m-%d_%H%M%S')}={test.parent}={sanitized_test_name}={test.equipment.name}=filesize-{file_size}={status}.parquet"
 
-                    os.makedirs(f"{self.export_path}/{specimen.name}", exist_ok=True)
-
-                    self.export_to_server(df, f"{prefix}{specimen.name}/{object_name}")
-                    # df.to_parquet(f"{self.export_path}/{specimen.name}/{object_name}")
+                    self._export_test(
+                        df,
+                        specimen_name=specimen.name,
+                        filename=object_name,
+                        prefix=prefix,
+                        writes_local=writes_local,
+                        writes_minio=writes_minio,
+                    )

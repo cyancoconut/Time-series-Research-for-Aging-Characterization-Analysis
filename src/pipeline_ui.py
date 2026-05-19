@@ -290,7 +290,20 @@ class PipelineUI(ctk.CTk):
 
         export = _Section(parent, "Export")
         export.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
-        self.dl_export_type = export.add_entry("Export type:", placeholder="local")
+
+        # Export type as a dropdown: local | minio | both
+        ctk.CTkLabel(export, text="Export type:").grid(
+            row=export._row, column=0, sticky="w", padx=(15, 8), pady=3
+        )
+        self.dl_export_type = ctk.CTkOptionMenu(
+            export, values=["local", "minio", "both"], width=160,
+        )
+        self.dl_export_type.set("local")
+        self.dl_export_type.grid(
+            row=export._row, column=1, sticky="w", padx=(0, 10), pady=3
+        )
+        export._row += 1
+
         self.dl_export_path = export.add_path("Export path:", is_dir=True)
         self.dl_include_unfinished = export.add_checkbox(
             "Include unfinished tests"
@@ -298,6 +311,9 @@ class PipelineUI(ctk.CTk):
         self.dl_update_unfinished = export.add_checkbox(
             "Update unfinished tests (re-fetch previously unfinished ones)"
         )
+        self.dl_include_unfinished.configure(command=self._on_include_unfinished_toggle)
+        # Initial state: update_unfinished is locked until include_unfinished is checked.
+        self._on_include_unfinished_toggle()
 
         # Buttons
         btns = ctk.CTkFrame(parent, fg_color="transparent")
@@ -456,7 +472,15 @@ class PipelineUI(ctk.CTk):
         _set(self.dl_access_key, cfg.get("access_key", ""))
         _set(self.dl_secret_key, cfg.get("secret_key", ""))
         _set(self.dl_bucket, cfg.get("bucket_name", ""))
-        _set(self.dl_export_type, cfg.get("export_type", ""))
+
+        # export_type: accept legacy "server" as alias for "minio".
+        et = (cfg.get("export_type") or "local").lower().strip()
+        if et == "server":
+            et = "minio"
+        if et not in ("local", "minio", "both"):
+            et = "local"
+        self.dl_export_type.set(et)
+
         _set(self.dl_export_path, cfg.get("export_path", ""))
 
         if cfg.get("include_unfinished", False):
@@ -467,6 +491,17 @@ class PipelineUI(ctk.CTk):
             self.dl_update_unfinished.select()
         else:
             self.dl_update_unfinished.deselect()
+        # Re-apply the dependency: update_unfinished is only enabled when
+        # include_unfinished is checked.
+        self._on_include_unfinished_toggle()
+
+    def _on_include_unfinished_toggle(self) -> None:
+        """Enable update_unfinished only while include_unfinished is checked."""
+        if self.dl_include_unfinished.get():
+            self.dl_update_unfinished.configure(state="normal")
+        else:
+            self.dl_update_unfinished.deselect()
+            self.dl_update_unfinished.configure(state="disabled")
 
     def _dl_save(self) -> None:
         path = filedialog.asksaveasfilename(
