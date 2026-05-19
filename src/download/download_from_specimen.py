@@ -138,57 +138,64 @@ class SpecimenDownloader:
                     continue
                 existing_test.append(segs[4])
 
-        for test in self.ahjo.get_tests_from_specimen(specimen.id):
+        print(f"  Listing tests for {specimen.name} ...")
+        all_tests = list(self.ahjo.get_tests_from_specimen(specimen.id))
+        candidates = [
+            t
+            for t in all_tests
+            if (t.name.replace("|", "_") not in existing_test)
+            and (include_unfinished or t.finished)
+            and ("TS" in t.name)
+            and (self.test_format in t.name.split("|"))
+        ]
+        print(
+            f"  {len(all_tests)} tests returned, "
+            f"{len(candidates)} new candidates to fetch"
+        )
+
+        for i, test in enumerate(candidates, 1):
             sanitized_test_name = test.name.replace("|", "_")
+            print(f"  [{i}/{len(candidates)}] Fetching {test.name} ...")
+            file, file_size = self.ahjo.get_test(test, TestFormat.PARQUET)
+            if file is None:
+                continue
+            df = pd.read_parquet(file)
 
-            if (
-                (sanitized_test_name not in existing_test)
-                and (include_unfinished or test.finished)
-                and ("TS" in test.name)
-                and (self.test_format in test.name.split("|"))
-            ):
+            zeit_columns = df.filter(like="Zeit").columns
+            if len(zeit_columns) > 1:
+                df["Zeit"] = df[zeit_columns[0]].fillna(df[zeit_columns[1]])
+            else:
+                df["Zeit"] = df[zeit_columns[0]]
 
-                file, file_size = self.ahjo.get_test(test, TestFormat.PARQUET)
-                if file is not None:
-                    df = pd.read_parquet(file)
+            df["Ahjo_Test_ID"] = test.id
+            column_to_move = df.pop("Zeit")
+            df.insert(0, "Zeit", column_to_move)
+            df.drop(columns=zeit_columns, inplace=True)
+            df.sort_values("Zeit", inplace=True)
+            df = df.rename(columns=lambda x: x.split("#")[0] if "#" in x else x)
+            desired_columns = [
+                "Zeit",
+                "Spannung",
+                "Strom",
+                "T1",
+                "Prozedur",
+                "Zustand",
+                "AhAkku",
+                "Ahjo_Test_ID",
+            ]
 
-                    zeit_columns = df.filter(like="Zeit").columns
-                    if len(zeit_columns) > 1:
-                        df["Zeit"] = df[zeit_columns[0]].fillna(df[zeit_columns[1]])
-                    else:
-                        df["Zeit"] = df[zeit_columns[0]]
+            existing_columns = [col for col in desired_columns if col in df.columns]
+            df = df[existing_columns]
+            df.reset_index(inplace=True, drop=True)
 
-                    df["Ahjo_Test_ID"] = test.id
-                    column_to_move = df.pop("Zeit")
-                    df.insert(0, "Zeit", column_to_move)
-                    df.drop(columns=zeit_columns, inplace=True)
-                    df.sort_values("Zeit", inplace=True)
-                    df = df.rename(columns=lambda x: x.split("#")[0] if "#" in x else x)
-                    desired_columns = [
-                        "Zeit",
-                        "Spannung",
-                        "Strom",
-                        "T1",
-                        "Prozedur",
-                        "Zustand",
-                        "AhAkku",
-                        "Ahjo_Test_ID",
-                    ]
+            status = "finished" if test.finished else "unfinished"
+            object_name = f"{self.project}={specimen.name}={datetime.fromtimestamp(test.startDate).strftime('%Y-%m-%d_%H%M%S')}={test.parent}={sanitized_test_name}={test.equipment.name}=filesize-{file_size}={status}.parquet"
 
-                    existing_columns = [
-                        col for col in desired_columns if col in df.columns
-                    ]
-                    df = df[existing_columns]
-                    df.reset_index(inplace=True, drop=True)
-
-                    status = "finished" if test.finished else "unfinished"
-                    object_name = f"{self.project}={specimen.name}={datetime.fromtimestamp(test.startDate).strftime('%Y-%m-%d_%H%M%S')}={test.parent}={sanitized_test_name}={test.equipment.name}=filesize-{file_size}={status}.parquet"
-
-                    self._export_test(
-                        df,
-                        specimen_name=specimen.name,
-                        filename=object_name,
-                        prefix=prefix,
-                        writes_local=writes_local,
-                        writes_minio=writes_minio,
-                    )
+            self._export_test(
+                df,
+                specimen_name=specimen.name,
+                filename=object_name,
+                prefix=prefix,
+                writes_local=writes_local,
+                writes_minio=writes_minio,
+            )
