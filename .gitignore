@@ -10,3 +10,5 @@ dig2mat.log
 /eval.py
 /download.py
 /ahjo-dl
+/.metabatt_ui_download.json
+/.claude/
