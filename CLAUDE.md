@@ -103,6 +103,24 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
    - Local: `<working_path>/40_capacity_monitore/<cell_stem>_capacity.csv`
    - MinIO: `<minio_prefix>/40_capacity_monitore/<cell_stem>_capacity.csv` (untagged)
 
+## Evaluation: fleet-wide capacity aggregation
+
+`evaluation/export_cap_pulse.py` aggregates the per-cell `40_capacity_monitore/*_capacity.csv` files into one fleet-wide table for cross-cell analysis. Capacity-only port of the legacy `Export_cap_pulse.ipynb` notebook; pulse aggregation will be a separate script.
+
+```bash
+cd src
+python -m evaluation.export_cap_pulse /path/to/battery_config.json
+# optional: -o /custom/path.csv
+```
+
+- **Source** (driven by `download_from`): reads `40_capacity_monitore/*_capacity.csv`, then reads only the `Prozedur` column from each cell's GOLD parquet (via `pyarrow.ParquetFile` + `io_router.open_gold_range` for MinIO range-reads) to build the unique procedure list per cell.
+- **Aging metadata**: `output.add_information_METABATT.add_additional_information` parses `DOD / SOC / C_Rate / Temperature` out of the `jri_Aging_DOD..SOC..C..grad..` procedure names.
+- **Output** (driven by `upload_to`):
+  - `<working_path>/50_evaluation/capacity_results.csv` — all CAP rows across the fleet.
+  - MinIO: `<minio_prefix>/50_evaluation/capacity_results.csv` (untagged) when `upload_to` includes `minio`.
+
+  Latest-per-cell SOH is already covered by the aging-status monitor, so this script only emits the full history.
+
 ## Aging-status monitor
 
 `monitor/aging_status.py` builds a sortable HTML report of per-cell SOH for spotting cells approaching EOL while tests are still running. Run on demand:
