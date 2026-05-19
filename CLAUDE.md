@@ -34,7 +34,7 @@ The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` also w
 
 **Venv (Linux)**: `source .venv/bin/activate` from project root.
 
-**Unified UI**: `src/pipeline_ui.py` — customtkinter desktop app that wraps all four stages (Download / Build BRONZE_CU / Run Pipeline / Monitor) in one window with a shared battery-config picker, per-tab Run buttons, a "Run all 1→2→3→4" chain button, a Stop button, and a live console for subprocess output. Persists last-used paths to `~/.config/metabatt_ui.json`.
+**Unified UI**: `src/pipeline_ui.py` — customtkinter desktop app that wraps all five stages (Download / Build BRONZE_CU / Run Pipeline / Monitor / Evaluation) in one window with a shared battery-config picker, per-tab Run buttons, a "Run all 1→2→3→4→5" chain button, a Stop button, and a live console for subprocess output. Persists last-used paths to `~/.config/metabatt_ui.json`.
 
 ```bash
 cd src
@@ -46,6 +46,7 @@ Each Run button spawns a `subprocess.Popen` of the relevant CLI:
 - Tab 2 → `download/build_bronze_cu_with_ah.py <battery_cfg> [--cells …] [--overwrite]`
 - Tab 3 → `main.py <battery_cfg> [--cells …] [--overwrite]`
 - Tab 4 → `python -m monitor.aging_status <battery_cfg> [-o …]`
+- Tab 5 → `python -m evaluation.export_cap_pulse <battery_cfg> [-o …]`
 
 Prereq on Linux: `sudo apt install python3-tk` (Tk bindings are not provided by pip). The Download tab's "Save JSON" writes the same shape as `download/get_user_input.py`; for full-pipeline runs that config is auto-written to `.metabatt_ui_download.json` at the project root (gitignored).
 

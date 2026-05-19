@@ -5,6 +5,7 @@ Four tabs, in pipeline order:
     2. Build BRONZE_CU    -> download/build_bronze_cu_with_ah.py
     3. Run Pipeline       -> main.py
     4. Monitor            -> monitor/aging_status.py
+    5. Evaluation         -> evaluation/export_cap_pulse.py
 
 Run from the src/ directory:
     python pipeline_ui.py
@@ -226,11 +227,13 @@ class PipelineUI(ctk.CTk):
         self.tabs.add("2. Build BRONZE_CU")
         self.tabs.add("3. Run Pipeline")
         self.tabs.add("4. Monitor")
+        self.tabs.add("5. Evaluation")
 
         self._build_download_tab(self.tabs.tab("1. Download"))
         self._build_bronze_tab(self.tabs.tab("2. Build BRONZE_CU"))
         self._build_pipeline_tab(self.tabs.tab("3. Run Pipeline"))
         self._build_monitor_tab(self.tabs.tab("4. Monitor"))
+        self._build_evaluation_tab(self.tabs.tab("5. Evaluation"))
 
         # Console + bottom controls
         bottom = ctk.CTkFrame(self)
@@ -252,7 +255,7 @@ class PipelineUI(ctk.CTk):
         )
         self.clear_btn.pack(side="right", padx=(0, 8))
         self.runall_btn = ctk.CTkButton(
-            ctrl, text="⏩ Run all (1→2→3→4)", width=180,
+            ctrl, text="⏩ Run all (1→2→3→4→5)", width=200,
             fg_color="#1f6f3d", hover_color="#155028", command=self._run_all,
         )
         self.runall_btn.pack(side="right", padx=(0, 8))
@@ -401,6 +404,30 @@ class PipelineUI(ctk.CTk):
 
         self._last_monitor_html: str | None = None
 
+    def _build_evaluation_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        s = _Section(parent, "Fleet-wide capacity aggregation")
+        s.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        self.ev_output = s.add_path("Output CSV (optional):", is_dir=False)
+
+        ctk.CTkLabel(
+            parent,
+            text=(
+                "If left blank, the CSV goes to <working_path>/50_evaluation/capacity_results.csv. "
+                "Pulse aggregation will be a separate stage."
+            ),
+            text_color="#888",
+            wraplength=900,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 6))
+
+        btns = ctk.CTkFrame(parent, fg_color="transparent")
+        btns.grid(row=2, column=0, sticky="ew", padx=8, pady=10)
+        self.ev_run_btn = ctk.CTkButton(
+            btns, text="▶ Run evaluation", width=160, command=self._run_evaluation,
+        )
+        self.ev_run_btn.pack(side="right", padx=4)
+
     # ------------------------------------------------------------- state I/O
 
     def _restore_state(self) -> None:
@@ -413,6 +440,7 @@ class PipelineUI(ctk.CTk):
         if s.get("mn_overwrite"):
             self.mn_overwrite.select()
         self.mo_output.insert(0, s.get("mo_output", ""))
+        self.ev_output.insert(0, s.get("ev_output", ""))
 
         dl = {**DEFAULT_DOWNLOAD_CFG, **s.get("download_cfg", {})}
         self._apply_download_cfg(dl)
@@ -425,6 +453,7 @@ class PipelineUI(ctk.CTk):
             "mn_cells": self.mn_cells.get(),
             "mn_overwrite": bool(self.mn_overwrite.get()),
             "mo_output": self.mo_output.get(),
+            "ev_output": self.ev_output.get(),
             "download_cfg": self._collect_download_cfg(),
         })
         _save_ui_state(self._state)
@@ -614,6 +643,16 @@ class PipelineUI(ctk.CTk):
                 self._last_monitor_html = None
         return argv
 
+    def _build_evaluation_argv(self) -> list[str] | None:
+        cfg = self._battery_cfg_or_warn()
+        if not cfg:
+            return None
+        argv = [sys.executable, "-m", "evaluation.export_cap_pulse", cfg]
+        out = self.ev_output.get().strip()
+        if out:
+            argv += ["-o", out]
+        return argv
+
     # --------------------------------------------------------------- run paths
 
     def _run_download(self):
@@ -636,6 +675,11 @@ class PipelineUI(ctk.CTk):
         if argv:
             self._launch(argv, label="monitor")
 
+    def _run_evaluation(self):
+        argv = self._build_evaluation_argv()
+        if argv:
+            self._launch(argv, label="evaluation")
+
     def _run_all(self):
         if self._runner.is_running:
             messagebox.showwarning("Busy", "A stage is already running.")
@@ -646,6 +690,7 @@ class PipelineUI(ctk.CTk):
             ("build_bronze_cu", self._build_bronze_argv),
             ("main pipeline", self._build_pipeline_argv),
             ("monitor", self._build_monitor_argv),
+            ("evaluation", self._build_evaluation_argv),
         ]
         steps: list[tuple[str, list[str]]] = []
         for label, fn in builders:
@@ -656,10 +701,10 @@ class PipelineUI(ctk.CTk):
                 )
                 return
             steps.append((label, argv))
-        self._append_console("=== Running all stages 1->2->3->4 ===\n")
+        self._append_console("=== Running all stages 1->2->3->4->5 ===\n")
         self._chain = steps[1:]
         first_label, first_argv = steps[0]
-        self._launch(first_argv, label=f"{first_label} (1/4)")
+        self._launch(first_argv, label=f"{first_label} (1/5)")
 
     def _launch(self, argv: list[str], *, label: str) -> None:
         if self._runner.is_running:
@@ -701,8 +746,8 @@ class PipelineUI(ctk.CTk):
 
         if self._chain and returncode == 0:
             next_label, next_argv = self._chain.pop(0)
-            remaining_index = 4 - len(self._chain)  # 2,3,4
-            self._launch(next_argv, label=f"{next_label} ({remaining_index}/4)")
+            remaining_index = 5 - len(self._chain)  # 2,3,4,5
+            self._launch(next_argv, label=f"{next_label} ({remaining_index}/5)")
             return
 
         self._set_running_ui(False, self.status_label.cget("text"))
@@ -734,7 +779,7 @@ class PipelineUI(ctk.CTk):
         new_state = "disabled" if running else "normal"
         for btn in (
             self.dl_run_btn, self.br_run_btn, self.mn_run_btn,
-            self.mo_run_btn, self.runall_btn,
+            self.mo_run_btn, self.ev_run_btn, self.runall_btn,
         ):
             btn.configure(state=new_state)
         self.stop_btn.configure(state="normal" if running else "disabled")
