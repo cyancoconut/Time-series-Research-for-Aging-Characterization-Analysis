@@ -23,7 +23,7 @@ from util import io_router
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-RUNNING_WINDOW_DAYS = 2
+DEFAULT_RUNNING_WINDOW_DAYS = 2
 YELLOW_THRESHOLD = 70.0
 RED_THRESHOLD = 60.0
 
@@ -96,6 +96,28 @@ def _read_gold_tail(source):
     return last_rg.tail(1) if not last_rg.empty else None
 
 
+def _has_unfinished_pertest(cell_stem, cfg, source, client=None):
+    """True if any raw per-test parquet in <prefix>/<cell_stem>/ has '=unfinished' in
+    its filename. The per-test files are written by download_single_tests with a
+    '=<status>.parquet' suffix; a cell is unfinished if any of its tests is."""
+    if source == "local":
+        cell_dir = os.path.join(cfg["working_path"], cell_stem)
+        if not os.path.isdir(cell_dir):
+            return False
+        for name in os.listdir(cell_dir):
+            if name.endswith(".parquet") and "=unfinished" in name:
+                return True
+        return False
+
+    bucket = cfg["bucket_name"]
+    prefix = f"{cfg['minio_prefix']}/{cell_stem}/"
+    for o in client.list_objects(bucket, prefix=prefix, recursive=False):
+        name = os.path.basename(o.object_name)
+        if name.endswith(".parquet") and "=unfinished" in name:
+            return True
+    return False
+
+
 def _cell_summary(df):
     if df.empty or "SOH" not in df.columns:
         return {"latest_soh": None, "delta_soh_per_cu": None, "n_cu": 0}
@@ -119,8 +141,10 @@ def build_status_table(cfg, source="minio"):
     cells, fetch_capacity, fetch_gold_tail = _make_readers(cfg, source)
     logging.info(f"Found {len(cells)} capacity CSVs ({source})")
 
+    client = io_router.make_minio_client(cfg) if source == "minio" else None
+    running_window_days = cfg.get("running_window_days", DEFAULT_RUNNING_WINDOW_DAYS)
     now = datetime.now(timezone.utc)
-    running_cutoff = now - timedelta(days=RUNNING_WINDOW_DAYS)
+    running_cutoff = now - timedelta(days=running_window_days)
 
     rows = []
     for cell in cells:
@@ -144,11 +168,15 @@ def build_status_table(cfg, source="minio"):
         except Exception as e:
             logging.warning(f"{cell_stem}: GOLD tail read failed: {type(e).__name__}: {e}")
 
-        if pd.notna(last_t):
-            last_t_aware = last_t.tz_localize("UTC") if last_t.tzinfo is None else last_t
-            is_running = last_t_aware >= running_cutoff
+        if _has_unfinished_pertest(cell_stem, cfg, source, client):
+            status = "unfinished"
         else:
-            is_running = False
+            if pd.notna(last_t):
+                last_t_aware = last_t.tz_localize("UTC") if last_t.tzinfo is None else last_t
+                is_running = last_t_aware >= running_cutoff
+            else:
+                is_running = False
+            status = "running" if is_running else "finished"
 
         rows.append({
             "cell": cell_stem,
@@ -157,14 +185,16 @@ def build_status_table(cfg, source="minio"):
             "n_CU": s["n_cu"],
             "last_row_time": last_t,
             "last_Prozedur": last_prozedur,
-            "status": "running" if is_running else "finished",
+            "status": status,
         })
 
     df_status = pd.DataFrame(rows)
     if df_status.empty:
         return df_status
 
-    df_status["_status_order"] = df_status["status"].map({"running": 0, "finished": 1})
+    df_status["_status_order"] = df_status["status"].map(
+        {"unfinished": 0, "running": 1, "finished": 2}
+    )
     df_status["_soh_sort"] = df_status["latest_SOH_%"].fillna(float("inf"))
     df_status = df_status.sort_values(
         by=["_status_order", "_soh_sort"], ascending=[True, True]
@@ -215,14 +245,17 @@ def _render_table(df, headers, table_id, title):
 </tbody></table>"""
 
 
-def render_html(df, out_path):
+def render_html(df, out_path, running_window_days=DEFAULT_RUNNING_WINDOW_DAYS):
     headers = ["cell", "latest_SOH_%", "dSOH_per_CU", "n_CU", "last_row_time", "last_Prozedur", "status"]
+    df_unfinished = df[df["status"] == "unfinished"]
     df_running = df[df["status"] == "running"]
     df_finished = df[df["status"] == "finished"]
 
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
     tables = (
-        _render_table(df_running, headers, "t_running", "Running")
+        _render_table(df_unfinished, headers, "t_unfinished", "Unfinished")
+        + "\n"
+        + _render_table(df_running, headers, "t_running", "Running")
         + "\n"
         + _render_table(df_finished, headers, "t_finished", "Finished")
     )
@@ -241,12 +274,13 @@ def render_html(df, out_path):
 </style>
 </head><body>
 <h1>Cell aging status</h1>
-<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; running = last row within {RUNNING_WINDOW_DAYS} days</div>
+<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; unfinished = any per-test parquet under the cell folder ends with `=unfinished` &middot; running = BRONZE finished but last GOLD row within {running_window_days} days</div>
 {tables}
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
 <script>
 $(function() {{
+  $('#t_unfinished').DataTable({{ paging: false, order: [], info: true, searching: true }});
   $('#t_running').DataTable({{ paging: false, order: [], info: true, searching: true }});
   $('#t_finished').DataTable({{ paging: false, order: [], info: true, searching: true }});
 }});
@@ -267,6 +301,7 @@ def main():
         cfg = json.load(f)
 
     source = cfg.get("download_from", "local")
+    running_window_days = cfg.get("running_window_days", DEFAULT_RUNNING_WINDOW_DAYS)
     df = build_status_table(cfg, source=source)
     if df.empty:
         logging.warning("No cells found")
@@ -277,13 +312,13 @@ def main():
     )
     if io_router.writes_local(cfg):
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-        render_html(df, out)
+        render_html(df, out, running_window_days=running_window_days)
     else:
         # Need a local temp render to get the HTML payload
         import tempfile
         tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w")
         tmp.close()
-        render_html(df, tmp.name)
+        render_html(df, tmp.name, running_window_days=running_window_days)
         out = tmp.name
 
     if io_router.writes_minio(cfg):
