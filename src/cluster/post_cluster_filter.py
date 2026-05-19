@@ -33,7 +33,11 @@ class cluster_filter:
         self.V_Nom = V_Nom
         self.CAP_Rate = CAP_Rate
         self.CAP_Type = CAP_Type
-        self.CAP_Temp = CAP_Temp
+        # CAP_Temp accepts a scalar or a list of target temperatures (°C).
+        # temperature_filter keeps rows within ±3°C of *any* configured value.
+        self.CAP_Temp = (
+            list(CAP_Temp) if isinstance(CAP_Temp, (list, tuple)) else [CAP_Temp]
+        )
         self.target_pulse_duration = target_pulse_duration
         self.pulse_type = pulse_type  # 1 = single pulse, 2 = consecutive double pulse
         self.pulse_target_unit = pulse_target_unit
@@ -251,10 +255,10 @@ class cluster_filter:
         return df_capacity_filtered
 
     def temperature_filter(self, x):
-        filter_temperature = (abs(x["Temperature_mean"]) < self.CAP_Temp + 3) & (
-            abs(x["Temperature_mean"]) > self.CAP_Temp - 3
-        )
-
+        temp_abs = abs(x["Temperature_mean"])
+        filter_temperature = pd.Series(False, index=x.index)
+        for t in self.CAP_Temp:
+            filter_temperature |= (temp_abs < t + 3) & (temp_abs > t - 3)
         return filter_temperature
 
     def CRate_filter(self, x):
