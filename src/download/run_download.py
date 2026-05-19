@@ -6,11 +6,15 @@ instead of opening the configuration GUI. Used by ``pipeline_ui.py``.
 Usage (from src/):
     python download/run_download.py /path/to/download_config.json
 
-The JSON has the same shape as the file ``get_user_input.py`` saves:
-    project, target_specimen, testformat,
+The JSON has the same shape as the file ``pipeline_ui.py`` saves:
+    project, target_cell, cell_type, testformat,
     ahjo_endpoint, ahjo_key,
     minio_endpoint, access_key, secret_key, bucket_name,
-    export_type, export_path
+    export_type, export_path,
+    include_unfinished, update_unfinished
+
+Legacy configs that still use ``target_specimen`` instead of ``target_cell``
+are accepted on load.
 """
 
 import argparse
@@ -27,7 +31,12 @@ from download_from_specimen import SpecimenDownloader
 
 def run(cfg: dict) -> None:
     project = cfg["project"]
-    target_specimen = cfg.get("target_specimen", [""])
+    target_cell = cfg.get("target_cell", cfg.get("target_specimen", [""]))
+    cell_type = (cfg.get("cell_type") or "").strip()
+    if not cell_type:
+        raise SystemExit(
+            "cell_type is required (MinIO path segment, e.g. 'VTC' or 'JGNE')."
+        )
     testformat = cfg["testformat"]
     ahjo_endpoint = cfg["ahjo_endpoint"]
     ahjo_key = cfg["ahjo_key"]
@@ -46,11 +55,12 @@ def run(cfg: dict) -> None:
     specimens = list(ahjo.list_specimens(ahjo_project))
     target_subset = [
         s for s in specimens
-        if not target_specimen or any(t in s.name for t in target_specimen)
+        if not target_cell or any(t in s.name for t in target_cell)
     ]
 
     print(f"Project: {project}")
-    print(f"Target specimen filter: {target_specimen}")
+    print(f"Cell type (MinIO prefix segment): {cell_type}")
+    print(f"Target cell filter: {target_cell}")
     print(f"Matched {len(target_subset)} / {len(specimens)} specimens")
     print(f"include_unfinished={include_unfinished}, update_unfinished={update_unfinished}")
 
@@ -66,7 +76,6 @@ def run(cfg: dict) -> None:
         bucket_name=bucket_name,
     )
 
-    cell_type = target_specimen[0] if target_specimen else ""
     prefix = f"j8005-metabatt/Metabatt/{cell_type}/"
 
     for specimen in target_subset:

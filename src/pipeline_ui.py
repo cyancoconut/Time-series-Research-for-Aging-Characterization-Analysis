@@ -30,7 +30,8 @@ UI_STATE_PATH = Path.home() / ".config" / "metabatt_ui.json"
 
 DEFAULT_DOWNLOAD_CFG = {
     "project": "",
-    "target_specimen": [""],
+    "target_cell": [""],
+    "cell_type": "",
     "testformat": " Format01",
     "ahjo_endpoint": "https://ahjo.isea.rwth-aachen.de",
     "ahjo_key": "",
@@ -268,7 +269,10 @@ class PipelineUI(ctk.CTk):
         proj.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
         self.dl_project = proj.add_entry("Project:")
         self.dl_specimen = proj.add_entry(
-            "Target specimen:", placeholder="comma-separated, e.g. VTC,SDI"
+            "Target cell:", placeholder="comma-separated, e.g. cell01,cell02"
+        )
+        self.dl_cell_type = proj.add_entry(
+            "Cell type:", placeholder="required, e.g. VTC or JGNE (MinIO path segment)"
         )
         self.dl_format = proj.add_entry("Test format:", placeholder=" Format01")
 
@@ -443,7 +447,8 @@ class PipelineUI(ctk.CTk):
         specimen_list = [s.strip() for s in specimen_text.split(",")] if specimen_text else [""]
         return {
             "project": self.dl_project.get(),
-            "target_specimen": specimen_list,
+            "target_cell": specimen_list,
+            "cell_type": self.dl_cell_type.get().strip(),
             "testformat": self.dl_format.get(),
             "ahjo_endpoint": self.dl_ahjo_endpoint.get(),
             "ahjo_key": self.dl_ahjo_key.get(),
@@ -463,8 +468,10 @@ class PipelineUI(ctk.CTk):
             entry.insert(0, value or "")
 
         _set(self.dl_project, cfg.get("project", ""))
-        specimen = cfg.get("target_specimen", [""])
-        _set(self.dl_specimen, ", ".join(specimen) if isinstance(specimen, list) else str(specimen))
+        # Accept legacy "target_specimen" key for back-compat with older saved configs.
+        target = cfg.get("target_cell", cfg.get("target_specimen", [""]))
+        _set(self.dl_specimen, ", ".join(target) if isinstance(target, list) else str(target))
+        _set(self.dl_cell_type, cfg.get("cell_type", ""))
         _set(self.dl_format, cfg.get("testformat", ""))
         _set(self.dl_ahjo_endpoint, cfg.get("ahjo_endpoint", ""))
         _set(self.dl_ahjo_key, cfg.get("ahjo_key", ""))
@@ -544,7 +551,11 @@ class PipelineUI(ctk.CTk):
 
     def _build_download_argv(self) -> list[str] | None:
         cfg = self._collect_download_cfg()
-        missing = [k for k in ("project", "ahjo_endpoint", "ahjo_key", "export_path") if not cfg.get(k)]
+        missing = [
+            k
+            for k in ("project", "cell_type", "ahjo_endpoint", "ahjo_key", "export_path")
+            if not cfg.get(k)
+        ]
         if missing:
             messagebox.showerror(
                 "Incomplete download config",
