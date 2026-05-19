@@ -132,6 +132,7 @@ python -m monitor.aging_status /path/to/battery_config.json
 | `V_max`, `V_min`, `V_nom` | Voltage limits and nominal voltage |
 | `Nom_Capacity` | Nominal capacity in Ah |
 | `CAP_Rate` | Capacity C-rate vs normalized `Current_mean` (÷ `Nom_Capacity`). `0.5` → C/2. |
+| `cap_temp` | Target temperature(s) in °C for capacity segments. Scalar (`25`) or list (`[25, 35, 45]`); each value matches `Temperature_mean` within ±3 °C and the per-value masks are OR-combined. |
 | `qOCV_CRate` | C-rate threshold for quasi-OCV (`0.05` → C/20, ~1200 min full discharge) |
 | `pau_duration` | Pause threshold in minutes for procedure boundary detection (default 9.9) |
 | `min_rows` | Minimum rows to keep a procedure segment (default 20) |
