@@ -143,6 +143,18 @@ class ConfigurationGUI:
         self.bucket_name_entry = ctk.CTkEntry(self.main_frame, width=400)
         self.bucket_name_entry.grid(row=12, column=1, pady=5, padx=(0, 20))
 
+        # MinIO Prefix
+        self.minio_prefix_label = ctk.CTkLabel(self.main_frame, text="MinIO Prefix:")
+        self.minio_prefix_label.grid(
+            row=13, column=0, sticky="w", padx=(20, 10), pady=5
+        )
+        self.minio_prefix_entry = ctk.CTkEntry(
+            self.main_frame,
+            width=400,
+            placeholder_text="j8005-metabatt/Metabatt/VTC",
+        )
+        self.minio_prefix_entry.grid(row=13, column=1, pady=5, padx=(0, 20))
+
         # Export Configuration Section
         self.section_label4 = ctk.CTkLabel(
             self.main_frame,
@@ -150,24 +162,24 @@ class ConfigurationGUI:
             font=ctk.CTkFont(size=16, weight="bold"),
         )
         self.section_label4.grid(
-            row=13, column=0, columnspan=2, pady=(20, 5), sticky="w"
+            row=14, column=0, columnspan=2, pady=(20, 5), sticky="w"
         )
 
         # Export Type
         self.export_type_label = ctk.CTkLabel(self.main_frame, text="Export Type:")
-        self.export_type_label.grid(row=14, column=0, sticky="w", padx=(20, 10), pady=5)
+        self.export_type_label.grid(row=15, column=0, sticky="w", padx=(20, 10), pady=5)
         self.export_type_entry = ctk.CTkEntry(
             self.main_frame, width=400, placeholder_text="local"
         )
-        self.export_type_entry.grid(row=14, column=1, pady=5, padx=(0, 20))
+        self.export_type_entry.grid(row=15, column=1, pady=5, padx=(0, 20))
         self.export_type_entry.insert(0, "local")
 
         # Export Path
         self.export_path_label = ctk.CTkLabel(self.main_frame, text="Export Path:")
-        self.export_path_label.grid(row=15, column=0, sticky="w", padx=(20, 10), pady=5)
+        self.export_path_label.grid(row=16, column=0, sticky="w", padx=(20, 10), pady=5)
 
         self.path_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.path_frame.grid(row=15, column=1, pady=5, padx=(0, 20), sticky="w")
+        self.path_frame.grid(row=16, column=1, pady=5, padx=(0, 20), sticky="w")
 
         self.export_path_entry = ctk.CTkEntry(self.path_frame, width=320)
         self.export_path_entry.pack(side="left", padx=(0, 10))
@@ -180,7 +192,7 @@ class ConfigurationGUI:
     def create_buttons(self):
         # Button frame
         self.button_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.button_frame.grid(row=16, column=0, columnspan=2, pady=(30, 0))
+        self.button_frame.grid(row=17, column=0, columnspan=2, pady=(30, 0))
 
         # Save button
         self.save_button = ctk.CTkButton(
@@ -245,6 +257,7 @@ class ConfigurationGUI:
             "access_key": self.access_key_entry.get(),
             "secret_key": self.secret_key_entry.get(),
             "bucket_name": self.bucket_name_entry.get(),
+            "minio_prefix": self.minio_prefix_entry.get(),
             "export_type": self.export_type_entry.get(),
             "export_path": self.export_path_entry.get(),
         }
@@ -301,6 +314,9 @@ class ConfigurationGUI:
                 self.bucket_name_entry.delete(0, tk.END)
                 self.bucket_name_entry.insert(0, config_data.get("bucket_name", ""))
 
+                self.minio_prefix_entry.delete(0, tk.END)
+                self.minio_prefix_entry.insert(0, config_data.get("minio_prefix", ""))
+
                 self.export_type_entry.delete(0, tk.END)
                 self.export_type_entry.insert(0, config_data.get("export_type", ""))
 
@@ -322,6 +338,7 @@ class ConfigurationGUI:
         self.access_key_entry.delete(0, tk.END)
         self.secret_key_entry.delete(0, tk.END)
         self.bucket_name_entry.delete(0, tk.END)
+        self.minio_prefix_entry.delete(0, tk.END)
         self.export_type_entry.delete(0, tk.END)
         self.export_path_entry.delete(0, tk.END)
 
@@ -367,12 +384,13 @@ def load_config_from_file(file_path):
                 config_data["access_key"],
                 config_data["secret_key"],
                 config_data["bucket_name"],
+                config_data["minio_prefix"],
                 config_data["export_type"],
                 config_data["export_path"],
             )
         else:
             # Return defaults if GUI was closed without applying
-            return ("", [""], " ", "", "", "", "", "", "", r"")
+            return ("", [""], " ", "", "", "", "", "", "", "", r"")
     except Exception as e:
         messagebox.showerror("Error", f"Failed to load configuration: {str(e)}")
         return None
@@ -395,9 +413,10 @@ def get_config_from_gui():
             config_data["access_key"],
             config_data["secret_key"],
             config_data["bucket_name"],
+            config_data["minio_prefix"],
             config_data["export_type"],
             config_data["export_path"],
         )
     else:
         # Return defaults if GUI was closed without applying
-        return ("", [""], " ", "", "", "", "", "", "", r"")
+        return ("", [""], " ", "", "", "", "", "", "", "", r"")
