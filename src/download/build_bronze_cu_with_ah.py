@@ -20,6 +20,13 @@ Required config keys (battery_config.json):
     working_path, type_cell, minio_endpoint, bucket_name, minio_prefix
     (e.g. minio_prefix = "j8005-metabatt/Metabatt/VTC")
 
+Source is controlled by `download_from`: "local" | "minio" (default "minio").
+    When "local", per-test parquets are read from <working_path>/<cell>/*.parquet.
+
+Destination is controlled by `upload_to` (same semantics as main.py):
+    "local" | "minio" | "both". Legacy `save_local` / `upload_s3` keys are
+    still honored when `upload_to` is absent.
+
 Credentials via env vars:
     MINIO_ACCESS_KEY, MINIO_SECRET_KEY
 """
@@ -33,23 +40,12 @@ import argparse
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import urllib3
 from minio import Minio
 from minio.error import S3Error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from util.add_ah_throughput import add_ah_throughput
-
-
-def _connect_minio(cfg: dict) -> Minio:
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    return Minio(
-        cfg["minio_endpoint"],
-        access_key=cfg["minio_access_key"],
-        secret_key=cfg["minio_secret_key"],
-        secure=True,
-        cert_check=False,
-    )
+from util import io_router
 
 
 def _is_cu(object_name: str) -> bool:
@@ -81,52 +77,76 @@ def _combine_tests(dfs: list) -> pd.DataFrame:
     return combined
 
 
-def save_parquet(df: pd.DataFrame, local_path: str | None, object_name: str | None = None, s3_dest: Minio | None = None) -> None:
-    """Write df to local_path and/or upload to S3.
+def _save_local_parquet(df: pd.DataFrame, local_path: str) -> None:
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    df.to_parquet(local_path, index=False)
+    print(f"  Saved locally:    {local_path}")
 
-    object_name: full "bucket/path/to/file.parquet" — bucket is the first path segment.
-    s3_dest: Minio client instance.
-    At least one of local_path or (object_name + s3_dest) must be provided.
-    """
-    buf = io.BytesIO()
-    df.to_parquet(buf, index=False)
 
-    if local_path:
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        with open(local_path, "wb") as f:
-            f.write(buf.getvalue())
-        print(f"  Saved locally:    {local_path}")
+def _list_cell_tests_local(working_path: str, cell: str) -> list:
+    cell_dir = os.path.join(working_path, cell)
+    if not os.path.isdir(cell_dir):
+        return []
+    return sorted(
+        os.path.join(cell_dir, f)
+        for f in os.listdir(cell_dir)
+        if f.endswith(".parquet")
+    )
 
-    if object_name and s3_dest:
-        bucket, key = object_name.split("/", 1)
-        buf.seek(0)
+
+def _list_cell_tests_minio(minio_client: Minio, bucket: str, prefix: str, cell: str) -> list:
+    objects = minio_client.list_objects(bucket, prefix=f"{prefix}/{cell}/", recursive=True)
+    return [o.object_name for o in objects if o.object_name.endswith(".parquet")]
+
+
+def _read_test_bytes_local(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError as e:
+        print(f"  Error fetching {path}: {e}")
+        return None
+
+
+def _read_test_bytes_minio(client: Minio, bucket: str, object_name: str) -> bytes | None:
+    try:
+        response = client.get_object(bucket, object_name)
         try:
-            s3_dest.put_object(
-                bucket_name=bucket,
-                object_name=key,
-                data=buf,
-                length=len(buf.getvalue()),
-            )
-            print(f"  Uploaded to S3:   {object_name}")
-        except S3Error as e:
-            print(f"  Upload error for {object_name}: {e}")
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+    except S3Error as e:
+        print(f"  Error fetching {object_name}: {e}")
+        return None
 
 
 def process_cell(
-    minio_client: Minio,
-    bucket_name: str,
-    prefix: str,
+    cfg: dict,
     cell: str,
-    out_bronze_cu: str,
+    out_bronze_cu: str | None,
     overwrite: bool = False,
-    s3_dest: Minio | None = None,
+    upload_minio: bool = False,
+    minio_client: Minio | None = None,
+    download_from: str = "minio",
 ) -> None:
-    if not overwrite and out_bronze_cu and os.path.exists(out_bronze_cu):
-        print(f"{cell} - already exists, skipping.")
-        return
+    bucket_name = cfg["bucket_name"]
+    prefix = cfg["minio_prefix"]
+    working_path = cfg.get("working_path")
+    cell_file = f"{cell}.parquet"
 
-    objects = minio_client.list_objects(bucket_name, prefix=f"{prefix}/{cell}/", recursive=True)
-    cell_tests = [obj.object_name for obj in objects if obj.object_name.endswith(".parquet")]
+    if not overwrite:
+        if out_bronze_cu and os.path.exists(out_bronze_cu):
+            print(f"{cell} - local BRONZE_CU already exists, skipping.")
+            return
+        if upload_minio and io_router.bronze_exists_on_minio(minio_client, cfg, cell_file):
+            print(f"{cell} - MinIO BRONZE_CU already exists, skipping.")
+            return
+
+    if download_from == "local":
+        cell_tests = _list_cell_tests_local(working_path, cell)
+    else:
+        cell_tests = _list_cell_tests_minio(minio_client, bucket_name, prefix, cell)
 
     if not cell_tests:
         print(f"{cell} - no parquet files found.")
@@ -140,13 +160,11 @@ def process_cell(
     ah_frames = []
 
     for object_name in cell_tests:
-        try:
-            response = minio_client.get_object(bucket_name, object_name)
-            data = response.read()
-            response.close()
-            response.release_conn()
-        except S3Error as e:
-            print(f"  Error fetching {object_name}: {e}")
+        if download_from == "local":
+            data = _read_test_bytes_local(object_name)
+        else:
+            data = _read_test_bytes_minio(minio_client, bucket_name, object_name)
+        if data is None:
             continue
 
         is_cu = _is_cu(object_name)
@@ -201,15 +219,17 @@ def process_cell(
     else:
         print(f"{cell} - no Zeit/Strom data for Ah throughput; column omitted.")
 
-    save_parquet(
-        bronze,
-        out_bronze_cu,
-        object_name=f"{bucket_name}/{prefix}/BRONZE_CU/{cell}.parquet",
-        s3_dest=s3_dest,
-    )
+    if out_bronze_cu:
+        _save_local_parquet(bronze, out_bronze_cu)
+    if upload_minio:
+        io_router.upload_parquet(
+            minio_client, cfg, bronze,
+            io_router.bronze_object_key(f"{cell}.parquet"),
+            include_tag=False,
+        )
 
 
-def _list_cells(minio_client: Minio, bucket_name: str, prefix: str) -> list:
+def _list_cells_minio(minio_client: Minio, bucket_name: str, prefix: str) -> list:
     objects = minio_client.list_objects(bucket_name, prefix=f"{prefix}/", recursive=True)
     cells = set()
     strip_len = len(f"{prefix}/")
@@ -220,26 +240,69 @@ def _list_cells(minio_client: Minio, bucket_name: str, prefix: str) -> list:
     return sorted(cells)
 
 
+def _list_cells_local(working_path: str) -> list:
+    if not working_path or not os.path.isdir(working_path):
+        return []
+    reserved = {"BRONZE_CU", "preSILVER", "SILVER", "GOLD",
+                "with_features_pre_labeled", "with_features_post_labeled",
+                "20_export_pulse", "30_export_qocv", "40_capacity_monitore",
+                "50_evaluation"}
+    cells = []
+    for name in sorted(os.listdir(working_path)):
+        full = os.path.join(working_path, name)
+        if not os.path.isdir(full) or name in reserved:
+            continue
+        if any(f.endswith(".parquet") for f in os.listdir(full)):
+            cells.append(name)
+    return cells
+
+
 def run(cfg: dict, target_cells: list = None, overwrite: bool = False) -> None:
-    minio_client = _connect_minio(cfg)
     bucket_name = cfg["bucket_name"]
     prefix = cfg["minio_prefix"]
     working_path = cfg.get("working_path")
-    save_local = cfg.get("save_local", True)
-    s3_dest = minio_client if cfg.get("upload_s3", False) else None
 
-    cells = target_cells if target_cells else _list_cells(minio_client, bucket_name, prefix)
+    # Honor `upload_to` (same semantics as main.py): "local" | "minio" | "both".
+    # Fall back to legacy `save_local` / `upload_s3` keys when `upload_to` is absent.
+    if cfg.get("upload_to") is not None:
+        save_local = io_router.writes_local(cfg)
+        upload_minio = io_router.writes_minio(cfg)
+    else:
+        save_local = cfg.get("save_local", True)
+        upload_minio = bool(cfg.get("upload_s3", False))
+
+    if not save_local and not upload_minio:
+        raise ValueError(
+            "upload_to must be one of 'local', 'minio', 'both' "
+            "(or set legacy save_local/upload_s3)."
+        )
+
+    download_from = (cfg.get("download_from") or "minio").lower().strip()
+    if download_from not in ("local", "minio"):
+        raise ValueError(f"download_from must be 'local' or 'minio', got: {download_from!r}")
+    if download_from == "local" and not working_path:
+        raise ValueError("working_path required when download_from='local'")
+
+    needs_minio = download_from == "minio" or upload_minio
+    minio_client = io_router.make_minio_client(cfg) if needs_minio else None
+
+    if target_cells:
+        cells = target_cells
+    elif download_from == "minio":
+        cells = _list_cells_minio(minio_client, bucket_name, prefix)
+    else:
+        cells = _list_cells_local(working_path)
 
     for cell in cells:
         print(f"Processing {cell}...")
         process_cell(
-            minio_client=minio_client,
-            bucket_name=bucket_name,
-            prefix=prefix,
+            cfg=cfg,
             cell=cell,
             out_bronze_cu=os.path.join(working_path, "BRONZE_CU", f"{cell}.parquet") if save_local else None,
             overwrite=overwrite,
-            s3_dest=s3_dest,
+            upload_minio=upload_minio,
+            minio_client=minio_client,
+            download_from=download_from,
         )
 
 

@@ -180,6 +180,20 @@ def gold_local_path(working_path: str, cell: str) -> str:
     return os.path.join(working_path, "GOLD", cell)
 
 
+def bronze_object_key(cell: str) -> str:
+    return f"BRONZE_CU/{cell}"
+
+
+def bronze_exists_on_minio(client: Minio, cfg: dict, cell: str) -> bool:
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/BRONZE_CU/{cell}"
+    try:
+        client.stat_object(bucket, key)
+        return True
+    except S3Error:
+        return False
+
+
 @contextmanager
 def fetch_bronze(client: Minio, cfg: dict, cell: str):
     """Stream a BRONZE_CU object from MinIO into a tempfile; yield its path."""

@@ -6,8 +6,8 @@
     "minio_prefix": "j8005-metabatt/Metabatt/VTC",
 
     "working_path": "/home/user/Documents/Data_Metabatt",
-    "save_local": true,
-    "upload_s3": false,
+    "download_from": "minio",
+    "upload_to": "local",
 
     "V_max": 4.2,
     "V_min": 2.5,
