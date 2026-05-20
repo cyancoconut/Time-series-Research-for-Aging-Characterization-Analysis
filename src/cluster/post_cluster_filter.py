@@ -212,19 +212,26 @@ class cluster_filter:
 
     def previous_voltage(self, x, dismembered_df):
         """
-        Check if the first row of the preceding segment has a fully charged voltage.
-        Uses raw time-series (dismembered_df) so PAU stubs are visible.
-        Returns True if first-row voltage of the previous ID > V_max * 0.99.
+        Check if the most recent non-PAU predecessor ended at a fully charged
+        voltage. Walks back up to 4 procedure steps, skipping PAU stubs so the
+        check lands on the actual CHA segment (not a relaxation pause whose
+        first-row voltage relaxes downward over time on LFP). Reads the *last*
+        row of that predecessor to capture its end-state voltage.
+        Returns True if that end-of-segment voltage > V_max * 0.95.
         """
         try:
             current_group_cu = x.split("_")[0]
             current_group_cu_procedure = int(x.split("_")[1])
 
-            for step in range(1, 3):
+            for step in range(1, 5):
                 previous_ID = f"{current_group_cu}_{current_group_cu_procedure - step}"
                 prev_data = dismembered_df[dismembered_df["ID"] == previous_ID]
-                if len(prev_data) > 0:
-                    return bool(prev_data["Voltage"].iloc[0] > self.V_max * 0.95)
+                if len(prev_data) == 0:
+                    continue
+                if prev_data["target"].iloc[0] == "PAU":
+                    continue
+                end_voltage = prev_data["Voltage"].iloc[-1]
+                return bool(end_voltage > self.V_max * 0.95)
 
             return False
         except Exception as e:
