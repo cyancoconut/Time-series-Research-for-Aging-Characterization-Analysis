@@ -214,6 +214,7 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
             hdbscan_l1,
             cfg["hdbscan_para_layer_2"],
             post_filter,
+            layer1_csv_path=(paths["X_layer1"] if paths else None),
         )
     except ClusterNotFoundException as e:
         logging.warning(
@@ -318,6 +319,7 @@ def _run_clustering(
     hdbscan_l1,
     hdbscan_l2,
     post_filter,
+    layer1_csv_path=None,
 ):
     first_layer_cols = ["Duration_quartile", "abs_Current_mean", "ID"]
     second_layer_cols = ["Current_mean", "ID"]
@@ -333,6 +335,11 @@ def _run_clustering(
             hdbscan_l1,
         )
     )
+
+    if layer1_csv_path:
+        os.makedirs(os.path.dirname(layer1_csv_path), exist_ok=True)
+        X_l1.to_csv(layer1_csv_path, index=False)
+        logging.info(f"{cell}: X_layer1 -> {layer1_csv_path}")
 
     capacity_status, df_clustered_filtered, counter = (
         model_and_supervise.supervised_capacity_filter(
@@ -391,6 +398,9 @@ def _build_paths(cell: str, working_path: str) -> dict:
         "bronze": os.path.join(working_path, "BRONZE_CU", cell),
         "X_silver": os.path.join(
             working_path, "with_features_post_labeled", stem + ".csv"
+        ),
+        "X_layer1": os.path.join(
+            working_path, "with_features_layer1_labeled", stem + ".csv"
         ),
         "gold": os.path.join(working_path, "GOLD", cell),
         "export_pulse_dir": os.path.join(working_path, "20_export_pulse", stem),
