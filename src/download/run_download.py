@@ -9,7 +9,7 @@ Usage (from src/):
 The JSON has the same shape as the file ``pipeline_ui.py`` saves:
     project, target_cell, cell_type, testformat,
     ahjo_endpoint, ahjo_key,
-    minio_endpoint, access_key, secret_key, bucket_name,
+    minio_endpoint, access_key, secret_key, bucket_name, minio_prefix,
     export_type, export_path,
     include_unfinished, update_unfinished
 
@@ -44,7 +44,13 @@ def run(cfg: dict) -> None:
     access_key = cfg["access_key"]
     secret_key = cfg["secret_key"]
     bucket_name = cfg["bucket_name"]
+    minio_prefix = (cfg.get("minio_prefix") or "").strip().strip("/")
     export_type = cfg["export_type"]
+    if export_type in ("minio", "both", "server") and not minio_prefix:
+        raise SystemExit(
+            "minio_prefix is required when export_type uploads to MinIO "
+            "(e.g. 'j8005-metabatt/Metabatt/VTC')."
+        )
     export_path = cfg["export_path"]
     include_unfinished = bool(cfg.get("include_unfinished", False))
     update_unfinished = bool(cfg.get("update_unfinished", True))
@@ -78,7 +84,8 @@ def run(cfg: dict) -> None:
         bucket_name=bucket_name,
     )
 
-    prefix = f"j8005-metabatt/Metabatt/{cell_type}/"
+    prefix = f"{minio_prefix}/"
+    print(f"MinIO prefix: {prefix}")
 
     for specimen in target_subset:
         print(f"--- Downloading {specimen.name} ---")

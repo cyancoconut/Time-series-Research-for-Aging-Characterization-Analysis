@@ -40,6 +40,7 @@ DEFAULT_DOWNLOAD_CFG = {
     "access_key": "",
     "secret_key": "",
     "bucket_name": "",
+    "minio_prefix": "",
     "export_type": "local",
     "export_path": "",
     "include_unfinished": False,
@@ -294,6 +295,9 @@ class PipelineUI(ctk.CTk):
         self.dl_access_key = minio.add_entry("Access key:")
         self.dl_secret_key = minio.add_entry("Secret key:", secret=True)
         self.dl_bucket = minio.add_entry("Bucket:")
+        self.dl_minio_prefix = minio.add_entry(
+            "Prefix:", placeholder="required, e.g. j8005-metabatt/Metabatt/VTC"
+        )
 
         export = _Section(parent, "Export")
         export.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
@@ -485,6 +489,7 @@ class PipelineUI(ctk.CTk):
             "access_key": self.dl_access_key.get(),
             "secret_key": self.dl_secret_key.get(),
             "bucket_name": self.dl_bucket.get(),
+            "minio_prefix": self.dl_minio_prefix.get().strip().strip("/"),
             "export_type": self.dl_export_type.get(),
             "export_path": self.dl_export_path.get(),
             "include_unfinished": bool(self.dl_include_unfinished.get()),
@@ -508,6 +513,7 @@ class PipelineUI(ctk.CTk):
         _set(self.dl_access_key, cfg.get("access_key", ""))
         _set(self.dl_secret_key, cfg.get("secret_key", ""))
         _set(self.dl_bucket, cfg.get("bucket_name", ""))
+        _set(self.dl_minio_prefix, cfg.get("minio_prefix", ""))
 
         # export_type: accept legacy "server" as alias for "minio".
         et = (cfg.get("export_type") or "local").lower().strip()
@@ -580,11 +586,10 @@ class PipelineUI(ctk.CTk):
 
     def _build_download_argv(self) -> list[str] | None:
         cfg = self._collect_download_cfg()
-        missing = [
-            k
-            for k in ("project", "cell_type", "ahjo_endpoint", "ahjo_key", "export_path")
-            if not cfg.get(k)
-        ]
+        required = ["project", "cell_type", "ahjo_endpoint", "ahjo_key", "export_path"]
+        if cfg.get("export_type") in ("minio", "both"):
+            required.append("minio_prefix")
+        missing = [k for k in required if not cfg.get(k)]
         if missing:
             messagebox.showerror(
                 "Incomplete download config",

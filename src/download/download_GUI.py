@@ -24,9 +24,16 @@ if result:
         access_key,
         secret_key,
         bucket_name,
+        minio_prefix,
         export_type,
         export_path,
     ) = result
+    minio_prefix = (minio_prefix or "").strip().strip("/")
+    if export_type in ("minio", "both", "server") and not minio_prefix:
+        raise SystemExit(
+            "minio_prefix is required when export_type uploads to MinIO "
+            "(e.g. 'j8005-metabatt/Metabatt/VTC')."
+        )
 
 ahjo = AhjoSource(ahjo_endpoint, ahjo_key)
 ahjo_project = ahjo.get_project(project)
@@ -64,12 +71,11 @@ for specimen in target_subset:
         initial_download = 0
         include_unfinished = False
         update_unfinished = True
-        cell_type = target_specimen[0]
 
         SpecimenDownloader.download_single_tests(
             specimen,
             export_type,
-            prefix=f"j8005-metabatt/Metabatt/{cell_type}/",
+            prefix=f"{minio_prefix}/",
             include_unfinished=include_unfinished,
             update_unfinished=update_unfinished,
         )
