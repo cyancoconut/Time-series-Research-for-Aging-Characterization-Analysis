@@ -48,9 +48,9 @@ from util.add_ah_throughput import add_ah_throughput
 from util import io_router
 
 
-def _is_cu(object_name: str) -> bool:
+def _is_cu(object_name: str, cu_marker: str) -> bool:
     parts = os.path.basename(object_name).split("=")
-    return len(parts) > 3 and "jri_CU" in parts[3]
+    return len(parts) > 3 and cu_marker in parts[3]
 
 
 def _programme_name(object_name: str) -> str:
@@ -134,6 +134,14 @@ def process_cell(
     prefix = cfg["minio_prefix"]
     working_path = cfg.get("working_path")
     cell_file = f"{cell}.parquet"
+    # CU-file detection follows the config's procedure_filter (the check-up
+    # programme name in the 4th '='-delimited filename field).
+    cu_marker = cfg.get("procedure_filter")
+    if not cu_marker:
+        raise ValueError(
+            "procedure_filter must be set in the battery config — it is the "
+            "check-up programme name used to detect CU test files."
+        )
 
     if not overwrite:
         if out_bronze_cu and os.path.exists(out_bronze_cu):
@@ -152,7 +160,7 @@ def process_cell(
         print(f"{cell} - no parquet files found.")
         return
 
-    if not any(_is_cu(t) for t in cell_tests):
+    if not any(_is_cu(t, cu_marker) for t in cell_tests):
         print(f"{cell} - no CU files found, skipping.")
         return
 
@@ -167,7 +175,7 @@ def process_cell(
         if data is None:
             continue
 
-        is_cu = _is_cu(object_name)
+        is_cu = _is_cu(object_name, cu_marker)
 
         if is_cu:
             try:
