@@ -173,6 +173,28 @@ class SpecimenDownloader:
             df.drop(columns=zeit_columns, inplace=True)
             df.sort_values("Zeit", inplace=True)
             df = df.rename(columns=lambda x: x.split("#")[0] if "#" in x else x)
+
+            # The temperature channel is exported under inconsistent names
+            # ("T1", or the German "Temperatur" — sometimes with a sensor-
+            # channel suffix, e.g. "Temperatur_ / PBOC1"). Exact-name matching
+            # misses those, so the column was being dropped by the
+            # desired_columns whitelist below. Normalise the first
+            # temperature-like column to "T1" so it survives the whitelist and
+            # is renamed to "Temperature" downstream in read_and_fix_format.
+            if "T1" not in df.columns:
+                temp_cols = [
+                    c
+                    for c in df.columns
+                    if str(c).strip().lower().startswith("temp")
+                ]
+                if temp_cols:
+                    if len(temp_cols) > 1:
+                        print(
+                            f"Multiple temperature columns {temp_cols}; "
+                            f"using {temp_cols[0]!r} as T1"
+                        )
+                    df = df.rename(columns={temp_cols[0]: "T1"})
+
             desired_columns = [
                 "Zeit",
                 "Spannung",
