@@ -203,6 +203,7 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         cfg["pulse_target_unit"],
         cfg["tolerances"]["pulse_cluster_tolerance"],
         cfg["v_max"],
+        cfg.get("tolerances", {}).get("qocv_duration_tolerance", 1.2),
     )
 
     try:

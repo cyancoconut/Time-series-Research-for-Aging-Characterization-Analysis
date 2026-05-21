@@ -174,6 +174,7 @@ python -m monitor.aging_status /path/to/battery_config.json
 | `CAP_Rate` | Capacity C-rate vs normalized `Current_mean` (÷ `Nom_Capacity`). `0.5` → C/2. |
 | `cap_temp` | Target temperature(s) in °C for capacity segments. Scalar (`25`) or list (`[25, 35, 45]`); each value matches `Temperature_mean` within ±3 °C and the per-value masks are OR-combined. |
 | `qOCV_CRate` | C-rate threshold for quasi-OCV (`0.05` → C/20, ~1200 min full discharge) |
+| `tolerances.qocv_duration_tolerance` | Optional. Multiplier on the nominal qOCV duration (`60 / qOCV_CRate` min) for the upper bound in `find_qocv` (default `1.2`). A C/20 sweep runs longer than the nominal 20 h when a cell over-delivers vs `nom_capacity`, so the window needs headroom. |
 | `pau_duration` | Pause threshold in minutes for procedure boundary detection (default 9.9) |
 | `min_rows` | Minimum rows to keep a procedure segment (default 20) |
 | `qocv_procedure_filter` | Optional. Substring matched against `Prozedur`; inside matching procedures every `Zustand` change also cuts a segment boundary, splitting a single-`Prozedur` qOCV into its `DCH` / `CHA` halves. Omit (default `None`) to disable — dismember then behaves unchanged. |
