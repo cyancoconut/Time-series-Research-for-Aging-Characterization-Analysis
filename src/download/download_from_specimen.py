@@ -95,6 +95,7 @@ class SpecimenDownloader:
         include_unfinished,
         update_unfinished,
         redownload=False,
+        temperature_column=None,
     ):
         # redownload=True forces a fresh fetch of every test: existing parquets
         # (finished and unfinished) are deleted so they drop out of the
@@ -196,22 +197,45 @@ class SpecimenDownloader:
             # ("T1", or the German "Temperatur" — sometimes with a sensor-
             # channel suffix, e.g. "Temperatur_ / PBOC1"). Exact-name matching
             # misses those, so the column was being dropped by the
-            # desired_columns whitelist below. Normalise the first
-            # temperature-like column to "T1" so it survives the whitelist and
-            # is renamed to "Temperature" downstream in read_and_fix_format.
+            # desired_columns whitelist below. Normalise the chosen temperature
+            # column to "T1" so it survives the whitelist and is renamed to
+            # "Temperature" downstream in read_and_fix_format.
+            #
+            # A test may carry several temperature-like columns (e.g.
+            # "Temperatur / C" alongside "Temperatur_ / PBOC1") where only one
+            # is the cell temperature. Set the `temperature_column` config key
+            # to the exact raw column name to pick it explicitly; otherwise the
+            # first temperature-like column is used and a warning is logged.
             if "T1" not in df.columns:
-                temp_cols = [
-                    c
-                    for c in df.columns
-                    if str(c).strip().lower().startswith("temp")
-                ]
-                if temp_cols:
-                    if len(temp_cols) > 1:
+                chosen = None
+                if temperature_column:
+                    wanted = str(temperature_column).strip()
+                    matches = [
+                        c for c in df.columns if str(c).strip() == wanted
+                    ]
+                    if matches:
+                        chosen = matches[0]
+                    else:
                         print(
-                            f"Multiple temperature columns {temp_cols}; "
-                            f"using {temp_cols[0]!r} as T1"
+                            f"  temperature_column {temperature_column!r} not "
+                            f"found in test columns; falling back to heuristic"
                         )
-                    df = df.rename(columns={temp_cols[0]: "T1"})
+                if chosen is None:
+                    temp_cols = [
+                        c
+                        for c in df.columns
+                        if str(c).strip().lower().startswith("temp")
+                    ]
+                    if temp_cols:
+                        if len(temp_cols) > 1:
+                            print(
+                                f"  multiple temperature columns {temp_cols}; "
+                                f"using {temp_cols[0]!r} as T1 — set the "
+                                f"'temperature_column' config key to choose"
+                            )
+                        chosen = temp_cols[0]
+                if chosen is not None:
+                    df = df.rename(columns={chosen: "T1"})
 
             desired_columns = [
                 "Zeit",

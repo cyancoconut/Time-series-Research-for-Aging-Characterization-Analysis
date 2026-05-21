@@ -55,6 +55,7 @@ def run(cfg: dict) -> None:
     include_unfinished = bool(cfg.get("include_unfinished", False))
     update_unfinished = bool(cfg.get("update_unfinished", True))
     redownload = bool(cfg.get("redownload", False))
+    temperature_column = cfg.get("temperature_column")
 
     ahjo = AhjoSource(ahjo_endpoint, ahjo_key)
     ahjo_project = ahjo.get_project(project)
@@ -98,6 +99,7 @@ def run(cfg: dict) -> None:
                 include_unfinished=include_unfinished,
                 update_unfinished=update_unfinished,
                 redownload=redownload,
+                temperature_column=temperature_column,
             )
         except Exception as e:
             print(f"Download failed for {specimen}: {e}")
