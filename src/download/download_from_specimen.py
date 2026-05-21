@@ -88,8 +88,18 @@ class SpecimenDownloader:
                 print(f"  Upload error for {object_name}: {err}")
 
     def download_single_tests(
-        self, specimen, export_type, prefix, include_unfinished, update_unfinished
+        self,
+        specimen,
+        export_type,
+        prefix,
+        include_unfinished,
+        update_unfinished,
+        redownload=False,
     ):
+        # redownload=True forces a fresh fetch of every test: existing parquets
+        # (finished and unfinished) are deleted so they drop out of the
+        # existing_test skip-list and are downloaded again. Use it to re-pull
+        # data after a downloader fix (e.g. a newly retained column).
         print(f"Processing {specimen.name}")
 
         cfg = {"upload_to": _normalize_export_type(export_type)}
@@ -106,10 +116,14 @@ class SpecimenDownloader:
                 segs = file_name.split("=")
                 if len(segs) < 5:
                     continue
-                if replace_unfinished and file_name.endswith("=unfinished.parquet"):
+                if redownload or (
+                    replace_unfinished
+                    and file_name.endswith("=unfinished.parquet")
+                ):
+                    reason = "redownload" if redownload else "unfinished refresh"
                     try:
                         os.remove(path)
-                        print(f"  removed local unfinished file: {path}")
+                        print(f"  removed local file ({reason}): {path}")
                     except OSError as e:
                         print(f"  could not remove {path}: {e}")
                     continue
@@ -126,8 +140,12 @@ class SpecimenDownloader:
                 segs = file_name.split("=")
                 if len(segs) < 5:
                     continue
-                if replace_unfinished and file_name.endswith("=unfinished.parquet"):
-                    print(f"  removing MinIO unfinished file: {obj.object_name}")
+                if redownload or (
+                    replace_unfinished
+                    and file_name.endswith("=unfinished.parquet")
+                ):
+                    reason = "redownload" if redownload else "unfinished refresh"
+                    print(f"  removing MinIO file ({reason}): {obj.object_name}")
                     try:
                         self.minio_client.remove_object(
                             bucket_name=self.bucket_name,

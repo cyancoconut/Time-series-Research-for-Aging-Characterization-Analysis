@@ -54,6 +54,7 @@ def run(cfg: dict) -> None:
     export_path = cfg["export_path"]
     include_unfinished = bool(cfg.get("include_unfinished", False))
     update_unfinished = bool(cfg.get("update_unfinished", True))
+    redownload = bool(cfg.get("redownload", False))
 
     ahjo = AhjoSource(ahjo_endpoint, ahjo_key)
     ahjo_project = ahjo.get_project(project)
@@ -96,6 +97,7 @@ def run(cfg: dict) -> None:
                 prefix=prefix,
                 include_unfinished=include_unfinished,
                 update_unfinished=update_unfinished,
+                redownload=redownload,
             )
         except Exception as e:
             print(f"Download failed for {specimen}: {e}")
