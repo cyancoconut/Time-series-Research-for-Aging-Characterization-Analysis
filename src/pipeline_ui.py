@@ -5,7 +5,7 @@ Four tabs, in pipeline order:
     2. Build BRONZE_CU    -> download/build_bronze_cu_with_ah.py
     3. Run Pipeline       -> main.py
     4. Monitor            -> monitor/aging_status.py
-    5. Evaluation         -> evaluation/export_cap_pulse.py
+    5. Evaluation         -> evaluation/export_cap_pulse.py + evaluation/aging_matrix.py
 
 Run from the src/ directory:
     python pipeline_ui.py
@@ -186,7 +186,8 @@ class PipelineUI(ctk.CTk):
         self._state = _load_ui_state()
         self._runner = ProcessRunner(self._on_runner_line, self._on_runner_done)
         self._log_queue: queue.Queue[str] = queue.Queue()
-        self._chain: list = []  # remaining build_argv callables when running full pipeline
+        self._chain: list = []  # remaining (label, argv) steps in the current chain
+        self._chain_total = 0  # total step count of the current chain
         self._chain_label: str | None = None
 
         self._build_widgets()
@@ -419,15 +420,25 @@ class PipelineUI(ctk.CTk):
 
     def _build_evaluation_tab(self, parent):
         parent.grid_columnconfigure(0, weight=1)
-        s = _Section(parent, "Fleet-wide capacity aggregation")
+        s = _Section(parent, "Select outputs to generate")
         s.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
-        self.ev_output = s.add_path("Output CSV (optional):", is_dir=False)
+        self.ev_capacity_agg = s.add_checkbox(
+            "Fleet-wide capacity aggregation   →   50_evaluation/capacity_results.csv"
+        )
+        self.ev_capacity_eval = s.add_checkbox(
+            "Capacity evaluation (Alterungsmatrix)   →   50_evaluation/aging_matrix.html + .csv"
+        )
+        self.ev_pulse = s.add_checkbox("Pulse evaluation   (coming soon)")
+        self.ev_pulse.configure(state="disabled")
+        self.ev_qocv = s.add_checkbox("qOCV evaluation   (coming soon)")
+        self.ev_qocv.configure(state="disabled")
 
         ctk.CTkLabel(
             parent,
             text=(
-                "If left blank, the CSV goes to <working_path>/50_evaluation/capacity_results.csv. "
-                "Pulse aggregation will be a separate stage."
+                "Each ticked output is run in sequence. Outputs go to "
+                "<working_path>/50_evaluation/; routing follows download_from / "
+                "upload_to in the battery config."
             ),
             text_color="#888",
             wraplength=900,
@@ -453,7 +464,10 @@ class PipelineUI(ctk.CTk):
         if s.get("mn_overwrite"):
             self.mn_overwrite.select()
         self.mo_output.insert(0, s.get("mo_output", ""))
-        self.ev_output.insert(0, s.get("ev_output", ""))
+        if s.get("ev_capacity_agg", True):
+            self.ev_capacity_agg.select()
+        if s.get("ev_capacity_eval", True):
+            self.ev_capacity_eval.select()
 
         dl = {**DEFAULT_DOWNLOAD_CFG, **s.get("download_cfg", {})}
         self._apply_download_cfg(dl)
@@ -466,7 +480,8 @@ class PipelineUI(ctk.CTk):
             "mn_cells": self.mn_cells.get(),
             "mn_overwrite": bool(self.mn_overwrite.get()),
             "mo_output": self.mo_output.get(),
-            "ev_output": self.ev_output.get(),
+            "ev_capacity_agg": bool(self.ev_capacity_agg.get()),
+            "ev_capacity_eval": bool(self.ev_capacity_eval.get()),
             "download_cfg": self._collect_download_cfg(),
         })
         _save_ui_state(self._state)
@@ -664,15 +679,32 @@ class PipelineUI(ctk.CTk):
                 self._last_monitor_html = None
         return argv
 
-    def _build_evaluation_argv(self) -> list[str] | None:
+    def _build_cap_agg_argv(self) -> list[str] | None:
         cfg = self._battery_cfg_or_warn()
         if not cfg:
             return None
-        argv = [sys.executable, "-m", "evaluation.export_cap_pulse", cfg]
-        out = self.ev_output.get().strip()
-        if out:
-            argv += ["-o", out]
-        return argv
+        return [sys.executable, "-m", "evaluation.export_cap_pulse", cfg]
+
+    def _build_capacity_eval_argv(self) -> list[str] | None:
+        cfg = self._battery_cfg_or_warn()
+        if not cfg:
+            return None
+        return [sys.executable, "-m", "evaluation.aging_matrix", cfg]
+
+    def _collect_evaluation_steps(self) -> list[tuple[str, list[str]]] | None:
+        """(label, argv) for each ticked evaluation; None if the config is invalid."""
+        steps: list[tuple[str, list[str]]] = []
+        for ticked, label, builder in (
+            (self.ev_capacity_agg.get(), "capacity aggregation", self._build_cap_agg_argv),
+            (self.ev_capacity_eval.get(), "capacity evaluation", self._build_capacity_eval_argv),
+        ):
+            if not ticked:
+                continue
+            argv = builder()
+            if argv is None:
+                return None
+            steps.append((label, argv))
+        return steps
 
     # --------------------------------------------------------------- run paths
 
@@ -697,24 +729,32 @@ class PipelineUI(ctk.CTk):
             self._launch(argv, label="monitor")
 
     def _run_evaluation(self):
-        argv = self._build_evaluation_argv()
-        if argv:
-            self._launch(argv, label="evaluation")
+        if self._runner.is_running:
+            messagebox.showwarning("Busy", "A stage is already running.")
+            return
+        steps = self._collect_evaluation_steps()
+        if steps is None:
+            return  # invalid config — error already shown
+        if not steps:
+            messagebox.showinfo(
+                "Nothing selected", "Tick at least one evaluation to run."
+            )
+            return
+        self._append_console("=== Running evaluation ===\n")
+        self._launch_chain(steps)
 
     def _run_all(self):
         if self._runner.is_running:
             messagebox.showwarning("Busy", "A stage is already running.")
             return
-        # Build all four argvs up front so we fail fast on missing config.
-        builders = [
+        # Build all argvs up front so we fail fast on missing config.
+        steps: list[tuple[str, list[str]]] = []
+        for label, fn in (
             ("download", self._build_download_argv),
             ("build_bronze_cu", self._build_bronze_argv),
             ("main pipeline", self._build_pipeline_argv),
             ("monitor", self._build_monitor_argv),
-            ("evaluation", self._build_evaluation_argv),
-        ]
-        steps: list[tuple[str, list[str]]] = []
-        for label, fn in builders:
+        ):
             argv = fn()
             if argv is None:
                 self._append_console(
@@ -722,10 +762,22 @@ class PipelineUI(ctk.CTk):
                 )
                 return
             steps.append((label, argv))
-        self._append_console("=== Running all stages 1->2->3->4->5 ===\n")
+        eval_steps = self._collect_evaluation_steps()
+        if eval_steps is None:
+            self._append_console("[run-all aborted: failed to prepare evaluation]\n")
+            return
+        steps.extend(eval_steps)
+        self._append_console("=== Running all stages ===\n")
+        self._launch_chain(steps)
+
+    def _launch_chain(self, steps: list[tuple[str, list[str]]]) -> None:
+        """Run a sequence of (label, argv) steps, one after another."""
+        if not steps:
+            return
+        self._chain_total = len(steps)
         self._chain = steps[1:]
         first_label, first_argv = steps[0]
-        self._launch(first_argv, label=f"{first_label} (1/5)")
+        self._launch(first_argv, label=f"{first_label} (1/{self._chain_total})")
 
     def _launch(self, argv: list[str], *, label: str) -> None:
         if self._runner.is_running:
@@ -767,8 +819,8 @@ class PipelineUI(ctk.CTk):
 
         if self._chain and returncode == 0:
             next_label, next_argv = self._chain.pop(0)
-            remaining_index = 5 - len(self._chain)  # 2,3,4,5
-            self._launch(next_argv, label=f"{next_label} ({remaining_index}/5)")
+            idx = self._chain_total - len(self._chain)
+            self._launch(next_argv, label=f"{next_label} ({idx}/{self._chain_total})")
             return
 
         self._set_running_ui(False, self.status_label.cget("text"))
