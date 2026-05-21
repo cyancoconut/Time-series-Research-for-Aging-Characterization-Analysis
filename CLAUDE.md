@@ -78,6 +78,7 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
 **Pipeline stages and their modules:**
 
 1. **`dismember/dismember_raw_cell.py`** — reads BRONZE_CU parquet, renames German columns (`Spannung→Voltage`, `Strom→Current`, `Zeit→Time`, `T1→Temperature`), segments into discrete procedures. Groups by `Ahjo_Test_ID` → `BM_Programm`, splits by `Prozedur` changes and PAU pauses > `pau_duration` minutes. Drops segments with < `min_rows` rows. Assigns string ID: `<BM_Programm>_<procedure_number>` (e.g. `13_16`). Core logic: `dismember/cluster_preparation.py` (`DismembererFunctions`, `allocate_IDs`).
+   - **qOCV Zustand split**: optional. When `qocv_procedure_filter` is set in the config, every `Zustand` change inside a procedure whose `Prozedur` contains that substring also fires a segment boundary. This is needed when a qOCV procedure's discharge and charge halves share one `Prozedur` and are separated only by a sub-`pau_duration` pause — without the split they collapse into one segment whose signed `Current_mean` (and therefore `abs_Current_mean`) cancels to ≈0, making the qOCV indistinguishable from a rest. The split isolates the `DCH` and `CHA` halves into separate segments. When the key is absent the boundary condition is inert and dismember behaves exactly as before; it is gated per-row on the `Prozedur` match, so all non-qOCV procedures (and cells with no qOCV) are unaffected.
    - **PAU stubs**: long PAU/PAUO segments (> `pau_duration`) are kept as 2-row stubs (first + last row) with their own ID and `target="PAU"`. `Duration_minutes` is the actual pause length (last − first timestamp). Short pauses (≤ `pau_duration`) and middle rows of long pauses are assigned `BM_Programm_procedure=0` (discard bucket). PAU stubs are exempt from the `min_rows` check. They are excluded from feature extraction and clustering (filtered out by the `target == -1` guard in `create_features.py`) but flow through to SILVER and GOLD, making the relaxed-cell voltage and pause duration available for pulse resistance calculations.
 
 2. **`feature_extraction/create_features.py`** + **`feature_extraction/classification.py`** — per-segment statistical features (mean, std, min, max of Voltage/Current/Temperature). Normalization: Voltage by `(V_max - V_min)`, Current/Power by `Nom_Capacity`. Adds `Duration_quartile = log1p(Duration_minutes)` and `abs_Current_mean = |Current_mean|`. Saves to `with_features_pre_labeled/<cell>.csv`.
@@ -100,7 +101,7 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
 
    Routing follows `download_from` / `upload_to` like GOLD. MinIO keys for exports do **not** include the `10_TRACY` tag — they sit directly under `<minio_prefix>/`.
 
-7. **`output/export_capacity.py`** — always runs at the end of `_process_cell` (no flag). Writes a compact per-cell capacity summary CSV (one row per BM_Programm) consumed by the aging-status monitor. Columns: `BM_Programm, Capacity_py, SOH, CAP_start_time, CAP_end_time`. Files sit flat under the folder (no per-cell subdirectory):
+7. **`output/export_capacity.py`** — always runs at the end of `_process_cell` (no flag). Writes a compact per-cell capacity summary CSV (one row per BM_Programm) consumed by the aging-status monitor and the aging matrix. Columns: `BM_Programm, Capacity_py, Ah_throughput, SOH, CAP_start_time`. `Ah_throughput` is the cumulative throughput at the **start** of the CAP segment (the value at the check-up). Files sit flat under the folder (no per-cell subdirectory):
    - Local: `<working_path>/40_capacity_monitore/<cell_stem>_capacity.csv`
    - MinIO: `<minio_prefix>/40_capacity_monitore/<cell_stem>_capacity.csv` (untagged)
 
@@ -121,6 +122,26 @@ python -m evaluation.export_cap_pulse /path/to/battery_config.json
   - MinIO: `<minio_prefix>/50_evaluation/capacity_results.csv` (untagged) when `upload_to` includes `minio`.
 
   Latest-per-cell SOH is already covered by the aging-status monitor, so this script only emits the full history.
+
+## Evaluation: aging matrix
+
+`evaluation/aging_matrix.py` builds the fleet-wide **Alterungsmatrix** — per-cell capacity loss normalized by Ah throughput, aggregated over the cell design space. Port of the exploratory `evaluation/alterungsmatrix.ipynb` notebook.
+
+```bash
+cd src
+python -m evaluation.aging_matrix /path/to/battery_config.json
+# optional: -o /custom/output_dir
+```
+
+- **Source** (driven by `download_from`): reuses `export_cap_pulse.build_capacity_table` for the fleet capacity table. Requires the `Ah_throughput` column in `40_capacity_monitore/*_capacity.csv` — runs predating that column need a pipeline re-run first; the script aborts with a clear error otherwise.
+- **Per cell**: `capacity_lost` = max − min of `Capacity_py`; `Delta_Ah_throughput` = max − min of `Ah_throughput`, both across the cell's check-ups.
+- **Matrix**: groups cells by `(C_Rate, Temperature, DOD, SOC)` → mean/std of both, `candidate_count`, the cell list, and `capacity_lost_norm = capacity_lost_mean / Delta_Ah_throughput_mean`.
+- **Output** (driven by `upload_to`):
+  - `<working_path>/50_evaluation/aging_matrix.csv` — the aggregated matrix.
+  - `<working_path>/50_evaluation/aging_matrix.html` — interactive plotly report: per-`(C_Rate, Temperature)` 2D SOC×DOD variance scatter and 3D aging surface, plus a multi-temperature 3D surface per C-rate.
+  - MinIO: `<minio_prefix>/50_evaluation/...` (untagged) when `upload_to` includes `minio`.
+
+The notebook's cross-cell-type comparison (VTC vs A123) is intentionally dropped — the pipeline runs one battery config (one cell type) at a time.
 
 ## Aging-status monitor
 
@@ -155,6 +176,7 @@ python -m monitor.aging_status /path/to/battery_config.json
 | `qOCV_CRate` | C-rate threshold for quasi-OCV (`0.05` → C/20, ~1200 min full discharge) |
 | `pau_duration` | Pause threshold in minutes for procedure boundary detection (default 9.9) |
 | `min_rows` | Minimum rows to keep a procedure segment (default 20) |
+| `qocv_procedure_filter` | Optional. Substring matched against `Prozedur`; inside matching procedures every `Zustand` change also cuts a segment boundary, splitting a single-`Prozedur` qOCV into its `DCH` / `CHA` halves. Omit (default `None`) to disable — dismember then behaves unchanged. |
 | `target_pulse_duration` | Expected pulse duration in seconds (default 20 s) |
 | `export_pulse` | If true, write per-BM_Programm PUL parquet files to `20_export_pulse/` (default false) |
 | `export_qocv` | If true, write per-BM_Programm qOCV_DCH / qOCV_CHA parquet files to `30_export_qocv/` (default false) |
