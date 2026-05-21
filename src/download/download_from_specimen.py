@@ -88,8 +88,19 @@ class SpecimenDownloader:
                 print(f"  Upload error for {object_name}: {err}")
 
     def download_single_tests(
-        self, specimen, export_type, prefix, include_unfinished, update_unfinished
+        self,
+        specimen,
+        export_type,
+        prefix,
+        include_unfinished,
+        update_unfinished,
+        redownload=False,
+        temperature_column=None,
     ):
+        # redownload=True forces a fresh fetch of every test: existing parquets
+        # (finished and unfinished) are deleted so they drop out of the
+        # existing_test skip-list and are downloaded again. Use it to re-pull
+        # data after a downloader fix (e.g. a newly retained column).
         print(f"Processing {specimen.name}")
 
         cfg = {"upload_to": _normalize_export_type(export_type)}
@@ -106,10 +117,14 @@ class SpecimenDownloader:
                 segs = file_name.split("=")
                 if len(segs) < 5:
                     continue
-                if replace_unfinished and file_name.endswith("=unfinished.parquet"):
+                if redownload or (
+                    replace_unfinished
+                    and file_name.endswith("=unfinished.parquet")
+                ):
+                    reason = "redownload" if redownload else "unfinished refresh"
                     try:
                         os.remove(path)
-                        print(f"  removed local unfinished file: {path}")
+                        print(f"  removed local file ({reason}): {path}")
                     except OSError as e:
                         print(f"  could not remove {path}: {e}")
                     continue
@@ -126,8 +141,12 @@ class SpecimenDownloader:
                 segs = file_name.split("=")
                 if len(segs) < 5:
                     continue
-                if replace_unfinished and file_name.endswith("=unfinished.parquet"):
-                    print(f"  removing MinIO unfinished file: {obj.object_name}")
+                if redownload or (
+                    replace_unfinished
+                    and file_name.endswith("=unfinished.parquet")
+                ):
+                    reason = "redownload" if redownload else "unfinished refresh"
+                    print(f"  removing MinIO file ({reason}): {obj.object_name}")
                     try:
                         self.minio_client.remove_object(
                             bucket_name=self.bucket_name,
@@ -173,6 +192,51 @@ class SpecimenDownloader:
             df.drop(columns=zeit_columns, inplace=True)
             df.sort_values("Zeit", inplace=True)
             df = df.rename(columns=lambda x: x.split("#")[0] if "#" in x else x)
+
+            # The temperature channel is exported under inconsistent names
+            # ("T1", or the German "Temperatur" — sometimes with a sensor-
+            # channel suffix, e.g. "Temperatur_ / PBOC1"). Exact-name matching
+            # misses those, so the column was being dropped by the
+            # desired_columns whitelist below. Normalise the chosen temperature
+            # column to "T1" so it survives the whitelist and is renamed to
+            # "Temperature" downstream in read_and_fix_format.
+            #
+            # A test may carry several temperature-like columns (e.g.
+            # "Temperatur / C" alongside "Temperatur_ / PBOC1") where only one
+            # is the cell temperature. Set the `temperature_column` config key
+            # to the exact raw column name to pick it explicitly; otherwise the
+            # first temperature-like column is used and a warning is logged.
+            if "T1" not in df.columns:
+                chosen = None
+                if temperature_column:
+                    wanted = str(temperature_column).strip()
+                    matches = [
+                        c for c in df.columns if str(c).strip() == wanted
+                    ]
+                    if matches:
+                        chosen = matches[0]
+                    else:
+                        print(
+                            f"  temperature_column {temperature_column!r} not "
+                            f"found in test columns; falling back to heuristic"
+                        )
+                if chosen is None:
+                    temp_cols = [
+                        c
+                        for c in df.columns
+                        if str(c).strip().lower().startswith("temp")
+                    ]
+                    if temp_cols:
+                        if len(temp_cols) > 1:
+                            print(
+                                f"  multiple temperature columns {temp_cols}; "
+                                f"using {temp_cols[0]!r} as T1 — set the "
+                                f"'temperature_column' config key to choose"
+                            )
+                        chosen = temp_cols[0]
+                if chosen is not None:
+                    df = df.rename(columns={chosen: "T1"})
+
             desired_columns = [
                 "Zeit",
                 "Spannung",
