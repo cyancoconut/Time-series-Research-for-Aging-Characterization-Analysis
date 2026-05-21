@@ -49,6 +49,16 @@ def read_and_fix_format(loadpath, V_max):
         }
     )
 
+    # The temperature channel is exported under different names across datasets
+    # (e.g. "T1", or the German "Temperatur"). Only fall back to an alias when
+    # "Temperature" is not already present, so a file that has both "T1" and an
+    # alias never ends up with two "Temperature" columns.
+    if "Temperature" not in df_cell.columns:
+        for alias in ("Temperatur", "Temp"):
+            if alias in df_cell.columns:
+                df_cell = df_cell.rename(columns={alias: "Temperature"})
+                break
+
     # Convert Time to datetime if it isn't already
     if not pd.api.types.is_datetime64_any_dtype(df_cell["Time"]):
         df_cell["Time"] = pd.to_datetime(df_cell["Time"], errors='coerce')
