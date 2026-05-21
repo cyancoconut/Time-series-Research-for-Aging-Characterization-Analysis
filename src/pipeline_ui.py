@@ -43,8 +43,10 @@ DEFAULT_DOWNLOAD_CFG = {
     "minio_prefix": "",
     "export_type": "local",
     "export_path": "",
+    "temperature_column": "",
     "include_unfinished": False,
     "update_unfinished": True,
+    "redownload": False,
 }
 
 
@@ -316,6 +318,10 @@ class PipelineUI(ctk.CTk):
         export._row += 1
 
         self.dl_export_path = export.add_path("Export path:", is_dir=True)
+        self.dl_temperature_column = export.add_entry(
+            "Temperature column:",
+            placeholder="optional — raw temperature column name, e.g. Temperatur_",
+        )
         self.dl_include_unfinished = export.add_checkbox(
             "Include unfinished tests"
         )
@@ -325,6 +331,9 @@ class PipelineUI(ctk.CTk):
         self.dl_include_unfinished.configure(command=self._on_include_unfinished_toggle)
         # Initial state: update_unfinished is locked until include_unfinished is checked.
         self._on_include_unfinished_toggle()
+        self.dl_redownload = export.add_checkbox(
+            "Re-download all (delete and re-fetch existing tests)"
+        )
 
         # Buttons
         btns = ctk.CTkFrame(parent, fg_color="transparent")
@@ -492,8 +501,10 @@ class PipelineUI(ctk.CTk):
             "minio_prefix": self.dl_minio_prefix.get().strip().strip("/"),
             "export_type": self.dl_export_type.get(),
             "export_path": self.dl_export_path.get(),
+            "temperature_column": self.dl_temperature_column.get().strip(),
             "include_unfinished": bool(self.dl_include_unfinished.get()),
             "update_unfinished": bool(self.dl_update_unfinished.get()),
+            "redownload": bool(self.dl_redownload.get()),
         }
 
     def _apply_download_cfg(self, cfg: dict) -> None:
@@ -524,6 +535,7 @@ class PipelineUI(ctk.CTk):
         self.dl_export_type.set(et)
 
         _set(self.dl_export_path, cfg.get("export_path", ""))
+        _set(self.dl_temperature_column, cfg.get("temperature_column", ""))
 
         if cfg.get("include_unfinished", False):
             self.dl_include_unfinished.select()
@@ -533,6 +545,10 @@ class PipelineUI(ctk.CTk):
             self.dl_update_unfinished.select()
         else:
             self.dl_update_unfinished.deselect()
+        if cfg.get("redownload", False):
+            self.dl_redownload.select()
+        else:
+            self.dl_redownload.deselect()
         # Re-apply the dependency: update_unfinished is only enabled when
         # include_unfinished is checked.
         self._on_include_unfinished_toggle()
