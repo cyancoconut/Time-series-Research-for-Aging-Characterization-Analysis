@@ -26,6 +26,7 @@ class cluster_filter:
         pulse_target_unit,
         pulse_cluster_tolerance,
         V_max,
+        qocv_duration_tolerance=1.2,
     ):
         self.number_programms = number_programms
         self.qOCV_CRate = qOCV_CRate
@@ -43,6 +44,12 @@ class cluster_filter:
         self.pulse_target_unit = pulse_target_unit
         self.pulse_cluster_tolerance = pulse_cluster_tolerance
         self.V_max = V_max
+        # Multiplier on the nominal qOCV duration (60 / qOCV_CRate minutes)
+        # used as the upper bound in find_qocv. A C/20 sweep runs longer than
+        # the nominal 20 h when a cell over-delivers vs Nom_Capacity (the C/20
+        # current is fixed off nominal), so the window needs headroom beyond
+        # the old fixed +100 min buffer.
+        self.qocv_duration_tolerance = qocv_duration_tolerance
 
     ## Filter the clusters
     def find_capacity(self, cluster_means, cluster_size, layer):
@@ -199,7 +206,8 @@ class cluster_filter:
         # getting the qocv through Duration Time
         possible_cluster = cluster_means[cluster_means.index >= 0]
         valid_clusters = possible_cluster[
-            possible_cluster["Duration_minutes"] <= (60 / self.qOCV_CRate) + 100
+            possible_cluster["Duration_minutes"]
+            <= (60 / self.qOCV_CRate) * self.qocv_duration_tolerance
         ]
         if valid_clusters.empty:
             print("No cluster matches qOCV duration window; treating as no qOCV present.")

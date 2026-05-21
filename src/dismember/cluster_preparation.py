@@ -6,10 +6,18 @@ from scipy import integrate
 
 class DismemblerFunctions:
 
-    def __init__(self, MIN_ROWS, PAU_DURATION):
+    def __init__(self, MIN_ROWS, PAU_DURATION, QOCV_PROCEDURE_FILTER=None):
 
         self.MIN_ROWS = MIN_ROWS
         self.PAU_DURATION = PAU_DURATION
+        # Optional substring matched against Prozedur. For procedures whose
+        # discharge and charge halves share a single Prozedur (e.g. qOCV),
+        # neither the Prozedur-change nor the long-PAU rule splits them, so the
+        # halves collapse into one segment whose mean current cancels to ~0.
+        # When set, every Zustand change inside a matching procedure also fires
+        # a segment boundary so DCH and CHA become separate segments. None ->
+        # behaviour is unchanged.
+        self.QOCV_PROCEDURE_FILTER = QOCV_PROCEDURE_FILTER
 
     def prefiltering(self, df_cell, drop_columns):
         df_cell.drop_duplicates(subset=["Time", "Zustand"], inplace=True)
@@ -102,6 +110,23 @@ class DismemblerFunctions:
                 & (programm_df["ZUSTAND_Duration_minutes"].shift() > self.PAU_DURATION)
             )
 
+            # Within a qOCV procedure the discharge and charge halves share one
+            # Prozedur and are only separated by a sub-threshold PAU, so neither
+            # the Prozedur-change nor the long-PAU rule splits them. Fire a
+            # boundary on every Zustand change for rows whose Prozedur matches
+            # QOCV_PROCEDURE_FILTER. ZUSTAND_group already increments on each
+            # Zustand change, so a group change == a Zustand change. Inert
+            # (all-False) when the filter is unset or no Prozedur matches.
+            if self.QOCV_PROCEDURE_FILTER:
+                qocv_zustand_boundary = programm_df["Prozedur"].str.contains(
+                    self.QOCV_PROCEDURE_FILTER, na=False
+                ) & (
+                    programm_df["ZUSTAND_group"]
+                    != programm_df["ZUSTAND_group"].shift()
+                )
+            else:
+                qocv_zustand_boundary = pd.Series(False, index=programm_df.index)
+
             # New procedure condition: PAU state + long duration + (group change OR first row)
             programm_df["new_procedure_start"] = (
                 (
@@ -119,6 +144,9 @@ class DismemblerFunctions:
                 |
                 # OR procedure change
                 (programm_df["Prozedur"] != programm_df["Prozedur"].shift())
+                |
+                # OR Zustand change inside a qOCV procedure
+                qocv_zustand_boundary
             )
 
             # Cumulative sum to create unique procedure identifiers

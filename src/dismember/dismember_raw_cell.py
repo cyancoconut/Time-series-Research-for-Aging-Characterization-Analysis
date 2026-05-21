@@ -130,7 +130,13 @@ def read_and_fix_format(loadpath, V_max):
 
 
 def dismember_raw_cell(
-    cell, loadpath, MIN_ROWS, PAU_DURATION, V_max, procedure_filter=None
+    cell,
+    loadpath,
+    MIN_ROWS,
+    PAU_DURATION,
+    V_max,
+    procedure_filter=None,
+    qocv_procedure_filter=None,
 ):
 
     bronze_columns = [
@@ -159,7 +165,7 @@ def dismember_raw_cell(
 
         df_cell = read_and_fix_format(loadpath, V_max)
         # Dismember df
-        globals = DismemblerFunctions(MIN_ROWS, PAU_DURATION)
+        globals = DismemblerFunctions(MIN_ROWS, PAU_DURATION, qocv_procedure_filter)
         prefiltered_df = globals.prefiltering(df_cell, ["SAVE", "REST"])
         prefiltered_df = globals.add_ah_throughput(prefiltered_df)
         dismembered_df = globals.dismembling(prefiltered_df)
