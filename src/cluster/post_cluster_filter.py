@@ -210,7 +210,7 @@ class cluster_filter:
         )
         return [closest_idx]
 
-    def previous_voltage(self, x, dismembered_df):
+    def previous_voltage(self, x, id_summary):
         """
         Check if the most recent non-PAU predecessor ended at a fully charged
         voltage. Walks back up to 4 procedure steps, skipping PAU stubs so the
@@ -218,6 +218,9 @@ class cluster_filter:
         first-row voltage relaxes downward over time on LFP). Reads the *last*
         row of that predecessor to capture its end-state voltage.
         Returns True if that end-of-segment voltage > V_max * 0.95.
+
+        ``id_summary`` is a dict of ``{ID: {"first_target": ..., "last_voltage": ...}}``
+        precomputed by :meth:`check_previous_voltage` so each lookup is O(1).
         """
         try:
             current_group_cu = x.split("_")[0]
@@ -225,13 +228,12 @@ class cluster_filter:
 
             for step in range(1, 5):
                 previous_ID = f"{current_group_cu}_{current_group_cu_procedure - step}"
-                prev_data = dismembered_df[dismembered_df["ID"] == previous_ID]
-                if len(prev_data) == 0:
+                prev = id_summary.get(previous_ID)
+                if prev is None:
                     continue
-                if prev_data["target"].iloc[0] == "PAU":
+                if prev["first_target"] == "PAU":
                     continue
-                end_voltage = prev_data["Voltage"].iloc[-1]
-                return bool(end_voltage > self.V_max * 0.95)
+                return bool(prev["last_voltage"] > self.V_max * 0.95)
 
             return False
         except Exception as e:
@@ -240,14 +242,22 @@ class cluster_filter:
 
     def check_previous_voltage(self, df_capacity, dismembered_df):
         """
-        Filter capacity candidates to those where the preceding segment starts
-        at a fully charged voltage, checked against raw time-series data.
+        Filter capacity candidates to those preceded by a fully charged segment.
+        Builds a per-ID summary once (single groupby pass) so the per-candidate
+        lookback in :meth:`previous_voltage` is O(1) per step instead of an
+        O(N) boolean mask over the full time-series.
         """
         print("Checking previous voltage for all capacity measurements...")
 
+        id_summary = (
+            dismembered_df.groupby("ID", sort=False)
+            .agg(first_target=("target", "first"), last_voltage=("Voltage", "last"))
+            .to_dict("index")
+        )
+
         def filter_function(row):
             id_value = row["ID"]
-            has_valid_voltage = self.previous_voltage(id_value, dismembered_df)
+            has_valid_voltage = self.previous_voltage(id_value, id_summary)
             if has_valid_voltage:
                 print(f"Keeping row with ID {id_value}")
             else:
