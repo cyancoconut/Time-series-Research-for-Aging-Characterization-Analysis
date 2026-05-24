@@ -231,6 +231,23 @@ X_silver.to_csv(paths["X_silver"], index=False)
 
 This overwrites the intermediate clustering labels (CAP\*, PUL\*, QOCV\*) with the final calculated targets (CAP, PUL, PUL\*RES, qOCV\_DCH, qOCV\_CHA, −1). Numeric HDBSCAN labels not matched to any test type are left as-is (to be set to −1 in a future cleanup step).
 
+## Field-data track (`src/field/`)
+
+Parallel pipeline for **EV field data** (driving + charging + parking telemetry from real vehicles), separate from the cycler-based CU pipeline. Lives in `src/field/` next to `dismember/`, `cluster/`, etc.
+
+Reference dataset: **RWTH Aachen "Electric Vehicle and Battery Data"** (DOI 10.18154/RWTH-2024-01907, CC BY 4.0), 9 vehicles (1× iMiEV, 2× iOn, 6× Smart), 2014–2016 geriatric-care fleet. Unzipped at `<working_data>/field_data/rwth_aachen/`. Four tracks: `field_test/<vehicle>.parquet` (raw real-world time series), `capacity_test/<vehicle>_capacity_tests.parquet` (periodic dyno SOH refs — ground truth), `charging_curves/`, `trip_data/`.
+
+The TUM FTM UDS dataset (https://github.com/TUMFTM/electric-vehicle-uds-dataset) was the first pick but its GitHub LFS budget is exhausted — only the 286 session JSONs came through, the per-vehicle parquet files are unreachable. Kept at `<working_data>/field_data/tum_uds/` for later.
+
+**Stage F1 — `field/io_rwth.py`** (adapter, smoke-testable via `python -m field.io_rwth [base_dir]`):
+- `load_field_test(path)` → DataFrame with canonical schema `Time / Voltage / Current / Temperature / SOC / Speed / Odometer / Power` (extras preserved). Renames `Temp_Ambient→Temperature`, `SoC_Real→SOC`. Converts `time_num` (MATLAB datenum, days since 0000-01-01) to UTC datetime via `pd.to_datetime(time_num - 719529, unit='D', utc=True)`. Drops leading rows where Voltage/Current/Temperature are all NaN (BMS signals lag SOC at log start).
+- `load_capacity_test(path)` → same canonical columns plus `test_number`, `test_direction` (1=charge, 2=discharge), `Power_AC`.
+- `list_field_test_vehicles(base_dir)`, `field_test_path()`, `capacity_test_path()` — directory helpers.
+
+Data quirks surfaced by the smoke test: Smart-5 has zero `Power_AC` (no AC charging logged); iMiEV-1's field_test has ~50% non-null Temperature/SOC (sparser logger). Both vehicles still produce usable Voltage/Current/SOC streams.
+
+Later stages (planned, not yet built): F2 segmenter (DRIVE/CHARGE/REST, validated against `trip_data/*_datafile.parquet`), F3 pseudo-CAP from full charge events (validated against `capacity_test/*`), F4 pseudo-qOCV from long rests + DCIR from current steps, F5 GOLD-equivalent CSV emit so existing `monitor/aging_status.py` and `evaluation/aging_matrix.py` work unchanged.
+
 ## Documentation
 
 - `METAbatt_Pipeline_Report.md` — full technical report of the pipeline
