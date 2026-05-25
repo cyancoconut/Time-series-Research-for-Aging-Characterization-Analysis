@@ -246,7 +246,32 @@ The TUM FTM UDS dataset (https://github.com/TUMFTM/electric-vehicle-uds-dataset)
 
 Data quirks surfaced by the smoke test: Smart-5 has zero `Power_AC` (no AC charging logged); iMiEV-1's field_test has ~50% non-null Temperature/SOC (sparser logger). Both vehicles still produce usable Voltage/Current/SOC streams.
 
-Later stages (planned, not yet built): F2 segmenter (DRIVE/CHARGE/REST, validated against `trip_data/*_datafile.parquet`), F3 pseudo-CAP from full charge events (validated against `capacity_test/*`), F4 pseudo-qOCV from long rests + DCIR from current steps, F5 GOLD-equivalent CSV emit so existing `monitor/aging_status.py` and `evaluation/aging_matrix.py` work unchanged.
+**Stage F2 — `field/segment.py`** (DRIVE/CHARGE/REST segmenter, smoke-testable via `python -m field.segment [base_dir] [--vehicle V] [--trips ...]`):
+
+Key insight from the RWTH data — the BMS logger sleeps when the car is parked with key off, so REST shows up as the *absence* of rows, not as low-current samples. The active sample coverage of wall-clock time is only ~2–3 %.
+
+Segmentation model:
+- **REST** = any inter-row Δt > `gap_threshold_s` (default 300 s) becomes a synthetic REST segment spanning `(Time[i], Time[i+1])` with `n_rows = 0`.
+- **CHARGE** = a maximal run of consecutive rows with `Current > i_charge_threshold` (default 0.5 A) whose wall-clock duration is at least `min_charge_duration_s` (default 60 s). The duration requirement intentionally excludes brief regen-braking bursts during driving (median positive-current run is ~2 s on the Smart fleet).
+- **DRIVE** = everything else inside an active session.
+
+Sign convention (RWTH): positive Current = charging (SOC rises). Verified at runtime by `check_sign_convention` against dSOC/dt — using Speed is unreliable because regen produces positive current with nonzero Speed.
+
+`to_segments(df_with_state, *, gap_threshold_s=300)` collapses the per-row state into one row per segment (columns: `segment_id, state, start_time, end_time, duration_s, n_rows, Current_mean, Voltage_mean, SOC_start, SOC_end, Speed_max, distance_km`).
+
+`validate_against_trips(segments, trips, vehicle)` matches DRIVE segments to ground-truth `trip_data/*_datafile.parquet` rows by time overlap. Fleet-wide validation (vehicles present in GeriatricCare trip file):
+
+| Vehicle | trips | DRIVE segs | recall | precision | median \|ΔSOC error\| |
+|---------|-------|-----------|--------|-----------|----------------------|
+| Smart-1 | 5 708 | 5 101 | 99.5 % | 99.0 % | 0.1 % |
+| Smart-3 | 2 192 | 2 119 | 99.3 % | 98.8 % | 0.1 % |
+| iMiEV-1 | 1 508 | 3 022 | 99.9 % | 45.5 % | 0.5 % |
+
+iMiEV-1's low precision is a known over-segmentation case — its logger has intra-trip gaps > 300 s, so the gap rule splits single trips into multiple DRIVE segments. Each trip still gets recovered (recall is 99.9 %).
+
+Charging is rarely visible in `field_test/*` because the logger is usually off while the car charges. Of 5 095 long gaps on Smart-1, only 6 show SOC rise > 5 % with valid SOC on both sides; most real charging activity lives in `capacity_test/*` and in cross-gap SOC jumps that F3 will detect later.
+
+Later stages (planned, not yet built): F3 pseudo-CAP from full charge events (validated against `capacity_test/*`), F4 pseudo-qOCV from long rests + DCIR from current steps, F5 GOLD-equivalent CSV emit so existing `monitor/aging_status.py` and `evaluation/aging_matrix.py` work unchanged.
 
 ## Documentation
 
