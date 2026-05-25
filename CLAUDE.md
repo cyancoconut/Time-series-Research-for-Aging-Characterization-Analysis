@@ -271,7 +271,29 @@ iMiEV-1's low precision is a known over-segmentation case — its logger has int
 
 Charging is rarely visible in `field_test/*` because the logger is usually off while the car charges. Of 5 095 long gaps on Smart-1, only 6 show SOC rise > 5 % with valid SOC on both sides; most real charging activity lives in `capacity_test/*` and in cross-gap SOC jumps that F3 will detect later.
 
-Later stages (planned, not yet built): F3 pseudo-CAP from full charge events (validated against `capacity_test/*`), F4 pseudo-qOCV from long rests + DCIR from current steps, F5 GOLD-equivalent CSV emit so existing `monitor/aging_status.py` and `evaluation/aging_matrix.py` work unchanged.
+**Stage F1 (shiyunliu) — `field/io_shiyunliu.py`** (adapter for the on-road EV charging dataset, smoke-testable via `python -m field.io_shiyunliu [base_dir]`):
+
+Scope pivot: after concluding that the RWTH dataset is pre-segmented by activity type (driving in `field_test/`, charging shapes as templates in `charging_curves/`, capacity in dyno `capacity_test/`), the field-data track refocused on the **shiyunliu on-road EV charging dataset** (20 production EVs, ~29 months each, MIT licence, accompanies Deng et al. Applied Energy 339:120954). Repo: `shiyunliu-battery/battery-charging-data-of-on-road-electric-vehicles`. Unzipped at `<working_data>/field_data/shiyunliu_20ev/` as `#1.csv`..`#20.csv` (~1.4 GB total, ~60 MB per vehicle, ~800 k rows per vehicle).
+
+The data is **charging-only** — sessions are detected by 10-s time gaps and the timeline between sessions (driving, parking) is not recorded. This is a deliberate match for the refined goal: identify "capacity tests" = opportunistic full CC-CV charge events, using a modified main.py + HDBSCAN architecture.
+
+`load_vehicle(path)` returns the canonical schema `Time / Voltage / Current / Temperature / SOC / Cell_V_max / Cell_V_min / Cell_T_min / Available_Energy_kWh / Available_Capacity_Ah` (extras preserved):
+- Decodes `record_time` (integer `YYYYMMDDhhmmss`) to tz-aware UTC datetime.
+- Strips unit suffixes from CSV column names (e.g. `pack_voltage (V)` → `pack_voltage`).
+- **Negates `charge_current`** so positive Current means charging — the raw shiyunliu convention is `charge_current < 0` during charging, opposite of the field-track convention used elsewhere (e.g. RWTH).
+- `check_sign_convention` re-verifies via dSOC/dt against the post-negation series; passes silently on all 20 vehicles.
+
+Smoke-tested: all 20 vehicles load cleanly, 100 % non-null on every canonical column, spans align around 842–847 days each. Two outliers flagged: **vehicles #6 and #17** show post-negation max Current = 400 A vs. ~90–95 A on the rest — likely positive-current rows in the raw CSV (sensor glitches or discharge logging slipping in). Treat with care before HDBSCAN clustering.
+
+Charging-session segmentation (per the dataset's own `capacity_extract.py`): `dt > 10 s` between consecutive rows. Vehicle #1 has 4 223 sessions over 843 days, with **197 sessions of ΔSOC > 70 %** (strong CAP candidates).
+
+**Later stages (planned, not yet built):**
+- F2 (shiyunliu) — session segmentation + per-session feature extraction (`duration_s, dSOC, I_mean, I_std, has_CV_tail, T_mean, SOC_start, SOC_end`).
+- F3 — HDBSCAN cluster on the per-session feature matrix → pick the "full CC-CV" cluster as the CAP equivalent.
+- F4 — coulomb-count CAP-cluster sessions → SOH timeline per vehicle; emit `40_capacity_monitore`-shaped CSV so the existing aging-status monitor and aging matrix run unchanged.
+- F5 — benchmark our extracted capacities against the dataset author's published Fig1.png values.
+
+**Legacy code from earlier scopes** (kept for reference): `io_rwth.py` (RWTH Aachen adapter) and `segment.py` (rule-based DRIVE/CHARGE/REST segmenter that was the F2 of an earlier plan). Both remain useful as sibling adapters / reference implementations; neither is on the path of the current shiyunliu work.
 
 ## Documentation
 
