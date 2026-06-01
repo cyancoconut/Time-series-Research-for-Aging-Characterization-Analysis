@@ -383,6 +383,18 @@ def _run_clustering(
         dismembered_df,
     )
     X_final["cluster_id"] = X_final["ID"].map(cluster_id_map)
+
+    # Union back the segments that concat_clusters dropped (non-CAP/PUL/QOCV
+    # clusters — prep CHA/DCH, SOC adjusts, off-spec qOCV, etc.) so X_silver
+    # contains every segment. These rows keep their raw HDBSCAN integer as
+    # target; cluster_id matches. Provides the negative-class examples that a
+    # learned cluster/segment classifier needs.
+    dropped_mask = ~X_clustered["ID"].isin(X_final["ID"])
+    if dropped_mask.any():
+        X_dropped = X_clustered.loc[dropped_mask].copy()
+        X_dropped["cluster_id"] = X_dropped["ID"].map(cluster_id_map)
+        X_final = pd.concat([X_final, X_dropped], ignore_index=True)
+
     df_final = model_and_supervise.merge_target(df_clustered, X_final)
 
     # Parquet requires string object columns
