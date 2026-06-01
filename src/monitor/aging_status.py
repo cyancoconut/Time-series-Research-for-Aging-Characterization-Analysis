@@ -29,10 +29,13 @@ RED_THRESHOLD = 60.0
 
 
 def _make_readers(cfg, source):
-    """Return (cells, fetch_capacity, fetch_gold_tail).
+    """Return (cells, fetch_capacity, fetch_bronze_tail).
 
-    fetch_gold_tail(stem) returns a 1-row DataFrame with Time + Prozedur of the
-    last row in the cell's GOLD parquet, or None if GOLD is missing.
+    fetch_bronze_tail(stem) returns a 1-row DataFrame with Time + Prozedur of
+    the last row in the cell's BRONZE_CU parquet, or None if BRONZE_CU is
+    missing. BRONZE_CU's last row is the last-row stub of the most recent
+    cycling test (see build_bronze_cu_with_ah), so this reflects the cell's
+    most recent activity without needing a pipeline run.
     """
     if source == "local":
         wp = cfg["working_path"]
@@ -43,13 +46,13 @@ def _make_readers(cfg, source):
         def fetch_capacity(name):
             return pd.read_csv(os.path.join(cap_dir, name))
 
-        def fetch_gold_tail(stem):
-            path = os.path.join(wp, "GOLD", f"{stem}.parquet")
+        def fetch_bronze_tail(stem):
+            path = os.path.join(wp, "BRONZE_CU", f"{stem}.parquet")
             if not os.path.exists(path):
                 return None
-            return _read_gold_tail(path)
+            return _read_bronze_tail(path)
 
-        return cells, fetch_capacity, fetch_gold_tail
+        return cells, fetch_capacity, fetch_bronze_tail
 
     client = io_router.make_minio_client(cfg)
     bucket = cfg["bucket_name"]
@@ -71,29 +74,37 @@ def _make_readers(cfg, source):
             response.release_conn()
         return pd.read_csv(io.BytesIO(data))
 
-    def fetch_gold_tail(stem):
+    def fetch_bronze_tail(stem):
         try:
-            f = io_router.open_gold_range(client, cfg, f"{stem}.parquet")
+            f = io_router.open_bronze_range(client, cfg, f"{stem}.parquet")
         except Exception:
             return None
         try:
-            return _read_gold_tail(f)
+            return _read_bronze_tail(f)
         finally:
             f.close()
 
-    return cells, fetch_capacity, fetch_gold_tail
+    return cells, fetch_capacity, fetch_bronze_tail
 
 
-def _read_gold_tail(source):
-    """Read Time + Prozedur of the last row from a parquet path or BytesIO,
-    using only the last row group to avoid loading the full file."""
+def _read_bronze_tail(source):
+    """Read Time + Prozedur of the last row from a BRONZE_CU parquet (path or
+    BytesIO), using only the last row group to avoid loading the full file.
+
+    BRONZE_CU stores the timestamp column as `Zeit`; it is renamed to `Time`
+    here so downstream code stays column-name-stable.
+    """
     pf = pq.ParquetFile(source)
     available = pf.schema_arrow.names
-    cols = [c for c in ("Time", "Prozedur") if c in available]
+    cols = [c for c in ("Zeit", "Prozedur") if c in available]
     if not cols or pf.num_row_groups == 0:
         return None
     last_rg = pf.read_row_group(pf.num_row_groups - 1, columns=cols).to_pandas()
-    return last_rg.tail(1) if not last_rg.empty else None
+    if last_rg.empty:
+        return None
+    if "Zeit" in last_rg.columns:
+        last_rg = last_rg.rename(columns={"Zeit": "Time"})
+    return last_rg.tail(1)
 
 
 def _has_unfinished_pertest(cell_stem, cfg, source, client=None):
@@ -138,7 +149,7 @@ def _cell_summary(df):
 
 
 def build_status_table(cfg, source="minio"):
-    cells, fetch_capacity, fetch_gold_tail = _make_readers(cfg, source)
+    cells, fetch_capacity, fetch_bronze_tail = _make_readers(cfg, source)
     logging.info(f"Found {len(cells)} capacity CSVs ({source})")
 
     client = io_router.make_minio_client(cfg) if source == "minio" else None
@@ -159,14 +170,14 @@ def build_status_table(cfg, source="minio"):
         last_t = pd.NaT
         last_prozedur = None
         try:
-            tail = fetch_gold_tail(cell_stem)
+            tail = fetch_bronze_tail(cell_stem)
             if tail is not None and not tail.empty:
                 if "Time" in tail.columns:
                     last_t = pd.to_datetime(tail["Time"].iloc[0], errors="coerce")
                 if "Prozedur" in tail.columns:
                     last_prozedur = tail["Prozedur"].iloc[0]
         except Exception as e:
-            logging.warning(f"{cell_stem}: GOLD tail read failed: {type(e).__name__}: {e}")
+            logging.warning(f"{cell_stem}: BRONZE_CU tail read failed: {type(e).__name__}: {e}")
 
         if _has_unfinished_pertest(cell_stem, cfg, source, client):
             status = "unfinished"
@@ -274,7 +285,7 @@ def render_html(df, out_path, running_window_days=DEFAULT_RUNNING_WINDOW_DAYS):
 </style>
 </head><body>
 <h1>Cell aging status</h1>
-<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; unfinished = any per-test parquet under the cell folder ends with `=unfinished` &middot; running = BRONZE finished but last GOLD row within {running_window_days} days</div>
+<div class="meta">Generated {generated} &middot; {len(df)} cells &middot; yellow &lt; {YELLOW_THRESHOLD:.0f}% SOH, red &lt; {RED_THRESHOLD:.0f}% SOH &middot; unfinished = any per-test parquet under the cell folder ends with `=unfinished` &middot; running = last BRONZE_CU row within {running_window_days} days</div>
 {tables}
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>

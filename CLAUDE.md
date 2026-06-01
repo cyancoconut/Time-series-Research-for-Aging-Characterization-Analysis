@@ -153,12 +153,12 @@ python -m monitor.aging_status /path/to/battery_config.json
 # optional: -o /custom/path.html
 ```
 
-- **Source** (driven by `download_from`): reads `<...>/40_capacity_monitore/*_capacity.csv` for SOH/CU history, then loads only the **last row group** of each cell's GOLD parquet (via `pyarrow.ParquetFile.read_row_group`) to get the most recent `Time` and `Prozedur`. For MinIO, the parquet is opened through `io_router.open_gold_range`, a seekable file-like wrapper around `Minio.get_object(..., offset, length)` so pyarrow can HTTP-range-read just the footer + last row group instead of downloading the full file (per-cell network I/O drops from tens of MB to tens of KB, critical at fleet scale).
+- **Source** (driven by `download_from`): reads `<...>/40_capacity_monitore/*_capacity.csv` for SOH/CU history, then loads only the **last row group** of each cell's **BRONZE_CU** parquet (via `pyarrow.ParquetFile.read_row_group`) to get the most recent `Zeit` (renamed to `Time`) and `Prozedur`. Reading from BRONZE_CU instead of GOLD means a BRONZE_CU rebuild alone refreshes `last_row_time` / `last_Prozedur` / `status` — no full pipeline run needed; SOH still refreshes only when the pipeline regenerates the capacity CSVs. For MinIO, the parquet is opened through `io_router.open_bronze_range`, a seekable file-like wrapper around `Minio.get_object(..., offset, length)` so pyarrow can HTTP-range-read just the footer + last row group instead of downloading the full file (per-cell network I/O drops from tens of MB to tens of KB, critical at fleet scale).
 - **Output**: `<working_path>/40_capacity_monitore/aging_status.html` locally; uploaded to `<minio_prefix>/40_capacity_monitore/aging_status.html` when `upload_to` includes `minio` (untagged).
 - **Columns**: `cell · latest_SOH_% · dSOH_per_CU · n_CU · last_row_time · last_Prozedur · status`.
 - **Status** (three-valued, evaluated in this order):
   1. `unfinished` if any raw per-test parquet under `<prefix>/<cell_stem>/` has `=unfinished` in its filename. The downloader (`download/download_from_specimen.py` → `download_single_tests`) writes per-test files as `…=filesize-XXX=<status>.parquet` where `<status>` is `finished`/`unfinished` from Ahjo's `test.finished`. BRONZE_CU (the concatenated per-cell parquet) cannot itself carry the suffix, so the monitor inspects the per-test folder directly. The unfinished tag is authoritative and wins over the time heuristic.
-  2. else `running` if last GOLD row's Time is within `running_window_days` (default 2).
+  2. else `running` if the last BRONZE_CU row's Time is within `running_window_days` (default 2).
   3. else `finished`.
 
   Unfinished / running / finished cells are rendered as three separate DataTables.
@@ -182,7 +182,7 @@ python -m monitor.aging_status /path/to/battery_config.json
 | `export_pulse` | If true, write per-BM_Programm PUL parquet files to `20_export_pulse/` (default false) |
 | `export_qocv` | If true, write per-BM_Programm qOCV_DCH / qOCV_CHA parquet files to `30_export_qocv/` (default false) |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/`, consumed by `monitor/aging_status.py` |
-| `running_window_days` | Aging-status monitor: a cell is `running` if its last GOLD row's `Time` is within this many days of now, else `finished` (default 2) |
+| `running_window_days` | Aging-status monitor: a cell is `running` if its last BRONZE_CU row's `Time` is within this many days of now, else `finished` (default 2) |
 
 `hdbscan_para_layer_1["min_cluster_size"]` defaults to `max(2, n_programs − 1)` at runtime. If `min_cluster_size` is explicitly set in the config JSON, that value takes precedence (config key is merged last via `{defaults, **cfg["hdbscan_para_layer_1"]}`).
 `hdbscan_para_layer_1["cluster_selection_epsilon"]` must be **0.3** (not 3.0) for correct qOCV separation.
