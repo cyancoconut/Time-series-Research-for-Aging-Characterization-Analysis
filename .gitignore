@@ -12,3 +12,4 @@ dig2mat.log
 /ahjo-dl
 /.metabatt_ui_download.json
 /.claude/
+/src/debug_monitor.py
