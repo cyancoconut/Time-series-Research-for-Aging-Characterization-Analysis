@@ -369,6 +369,11 @@ def _run_clustering(
         capacity_cluster = df_clustered_filtered
         df_clustered = model_and_supervise.merge_target(df_l1, X_clustered)
 
+    # Snapshot the raw HDBSCAN cluster label per ID before add_pulse_qocv_and_concat
+    # rewrites `target` to CAP*/PUL*/QOCV*. Used downstream as the stable groupby
+    # key for per-cluster feature aggregation.
+    cluster_id_map = X_clustered.set_index("ID")["target"]
+
     X_final = model_and_supervise.add_pulse_qocv_and_concat(
         post_filter,
         cluster_means_l1,
@@ -377,6 +382,7 @@ def _run_clustering(
         X_clustered,
         dismembered_df,
     )
+    X_final["cluster_id"] = X_final["ID"].map(cluster_id_map)
     df_final = model_and_supervise.merge_target(df_clustered, X_final)
 
     # Parquet requires string object columns
