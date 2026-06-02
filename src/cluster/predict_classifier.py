@@ -50,7 +50,8 @@ def _load(model_path: str, meta_path: str):
 
 def predict_targets(X_features: pd.DataFrame, model_path: str, meta_path: str) -> pd.DataFrame:
     """Replace the `target` column in X_features with classifier predictions
-    (translated to cluster-tagged form). Returns a new DataFrame; input is not
+    (translated to cluster-tagged form) and add a `cluster_id` column holding
+    the raw (untagged) predicted label. Returns a new DataFrame; input is not
     modified."""
     model, meta = _load(model_path, meta_path)
     feature_cols = meta["feature_columns"]
@@ -71,5 +72,10 @@ def predict_targets(X_features: pd.DataFrame, model_path: str, meta_path: str) -
     if (~na_mask).any():
         preds.loc[~na_mask] = model.predict(X.loc[~na_mask])
 
+    # cluster_id = the raw classifier label, mirroring how the HDBSCAN path
+    # stores its raw integer cluster here. Captured before _LABEL_TO_TAGGED
+    # collapses qOCV_DCH/qOCV_CHA -> QOCV* and PUL -> PUL*, so the DCH/CHA and
+    # restore distinctions are preserved for training provenance.
+    X_out["cluster_id"] = preds.fillna("-1").astype(object)
     X_out["target"] = preds.map(_LABEL_TO_TAGGED).fillna("-1").astype(object)
     return X_out
