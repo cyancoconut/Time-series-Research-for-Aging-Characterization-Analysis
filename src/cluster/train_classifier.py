@@ -29,12 +29,21 @@ from sklearn.metrics import classification_report
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+# Current profile + voltage *edges* + duration only. Voltage_mean/std (the
+# voltage curve *shape*) and Temperature_mean (absolute °C) are intentionally
+# excluded: on VTC they carry no unique signal (LOCO 0.9748 -> 0.9745 when
+# removed, per-class unchanged) and they are exactly the chemistry-/sensor-bound
+# features that would not transfer to a different cell type. What remains is
+# scale- and chemistry-portable: the current features are C-rate normalized
+# (÷ Nom_Capacity), the voltage edges are window-normalized (÷ (V_max - V_min)),
+# and the voltage *range* is the SoC-swing proxy that — together with duration —
+# separates a brief pulse from a full CAP discharge. This is the feature basis
+# for one model that can run across cell types.
 FEATURE_COLS = [
-    "Voltage_mean", "Voltage_std", "Voltage_max", "Voltage_min", "Voltage_range",
     "Current_mean", "Current_std", "Current_max", "Current_min", "Current_range",
-    "Temperature_mean",
-    "Duration_minutes", "Duration_quartile",
     "abs_Current_mean",
+    "Voltage_max", "Voltage_min", "Voltage_range",
+    "Duration_minutes", "Duration_quartile",
     "prev_end_voltage_norm",
 ]
 

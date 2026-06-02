@@ -1,19 +1,16 @@
 {
   "feature_columns": [
-    "Voltage_mean",
-    "Voltage_std",
-    "Voltage_max",
-    "Voltage_min",
-    "Voltage_range",
     "Current_mean",
     "Current_std",
     "Current_max",
     "Current_min",
     "Current_range",
-    "Temperature_mean",
+    "abs_Current_mean",
+    "Voltage_max",
+    "Voltage_min",
+    "Voltage_range",
     "Duration_minutes",
     "Duration_quartile",
-    "abs_Current_mean",
     "prev_end_voltage_norm"
   ],
   "classes": [
@@ -31,10 +28,11 @@
     "METABatt_Sony_Murata_18650VTC6_005",
     "METABatt_Sony_Murata_18650VTC6_006",
     "METABatt_Sony_Murata_18650VTC6_007",
-    "METABatt_Sony_Murata_18650VTC6_260"
+    "METABatt_Sony_Murata_18650VTC6_260",
+    "METABatt_Sony_Murata_18650VTC6_600"
   ],
-  "n_segments": 4287,
-  "trained_at": "2026-06-01T15:16:28.497311Z",
+  "n_segments": 4320,
+  "trained_at": "2026-06-02T10:22:25.360665Z",
   "estimator": "RandomForestClassifier",
   "estimator_params": {
     "bootstrap": true,
