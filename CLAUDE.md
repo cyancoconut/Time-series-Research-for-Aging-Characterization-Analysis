@@ -223,8 +223,8 @@ Restore pulses are **not dropped** — they are labelled `PUL*RES` in both the G
 
 ## Configuration
 
-- **Battery parameters**: JSON config file passed to `main.py` (e.g. `battery_config_VTC_linux.json` in the data directory).
-- **MinIO/Ahjo credentials**: `config.json` at project root (gitignored). Copy structure from `config_SE_example.json`. Also available via env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`.
+- **Battery parameters**: JSON config file passed to `main.py` (e.g. `battery_config_VTC_linux.json` in the data directory). See `battery_config_example.json` at project root for the full current schema (cell/voltage/CAP/pulse/qOCV params, `tolerances`, HDBSCAN layers, `download_from`/`upload_to` routing + MinIO keys, and the optional `classifier_model_path` / `classifier_meta_path`).
+- **MinIO/Ahjo credentials**: `config.json` at project root (gitignored). Copy structure from `config_example.json` (a `minio` block: `endpoint` / `access_key` / `secret_key` / `bucket_name`). Also available via env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`.
 - **Data path**: set `working_path` in the config JSON. BRONZE_CU parquet files must be under `<working_path>/BRONZE_CU/`.
 
 ## CLI flags
