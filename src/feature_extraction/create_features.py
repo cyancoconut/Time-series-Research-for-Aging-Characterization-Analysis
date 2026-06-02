@@ -6,6 +6,40 @@ from feature_extraction import classification
 import duckdb
 
 
+def prev_end_voltage_norm(dismembered_df, V_max):
+    """Per-segment context feature: end-of-segment voltage of the most recent
+    non-PAU predecessor, normalized by ``V_max``.
+
+    Mirrors ``post_cluster_filter.previous_voltage`` exactly (walk back up to 4
+    procedure steps, skip PAU stubs, read the predecessor's *last* row voltage)
+    so a learned classifier sees the same signal the CAP rule keys on: a true
+    CAP discharge is preceded by a fully charged segment, a prep discharge is
+    not. Returns ``{ID: value}``; ``0.0`` when no predecessor is found.
+    """
+    id_summary = (
+        dismembered_df.groupby("ID", sort=False)
+        .agg(first_target=("target", "first"), last_voltage=("Voltage", "last"))
+        .to_dict("index")
+    )
+    out = {}
+    for seg_id in id_summary:
+        value = 0.0
+        try:
+            group, proc = seg_id.split("_")[0], int(seg_id.split("_")[1])
+            for step in range(1, 5):
+                prev = id_summary.get(f"{group}_{proc - step}")
+                if prev is None:
+                    continue
+                if str(prev["first_target"]) == "PAU":
+                    continue
+                value = prev["last_voltage"] / V_max
+                break
+        except Exception:
+            value = 0.0
+        out[seg_id] = value
+    return out
+
+
 def feature_extraction(
     dismembered_df, feature_columns, V_max, V_min, V_nom, Nom_Capacity
 ):
@@ -36,6 +70,13 @@ def feature_extraction(
     )
 
     X_unlabeled_features["abs_Current_mean"] = X_unlabeled_features["Current_mean"].abs()
+
+    # Context feature for the learned classifier: predecessor end-of-charge
+    # voltage. Inert for HDBSCAN (it clusters on a fixed 3-column subset).
+    prev_map = prev_end_voltage_norm(dismembered_df, V_max)
+    X_unlabeled_features["prev_end_voltage_norm"] = (
+        X_unlabeled_features["ID"].map(prev_map).fillna(0.0)
+    )
 
     # Add target column
     X_unlabeled_features["target"] = np.nan
