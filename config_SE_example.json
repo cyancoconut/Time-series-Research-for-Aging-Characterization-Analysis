@@ -1,16 +1,63 @@
 {
-    "sources": {
-        "ahjo": {
-            "type": "ahjo",
-            "url": "https://ahjo.isea.rwth-aachen.de",
-            "apikey": ""
-        }
+    "working_path": "/path/to/Data_Metabatt",
+    "type_cell": "VTC",
+
+    "nom_capacity": 3.0,
+    "v_min": 2.5,
+    "v_max": 4.2,
+    "v_nom": 3.6,
+
+    "qocv_crate": 0.05,
+    "cap_type": "CC",
+    "cap_rate": 0.5,
+    "cap_temp": 25,
+
+    "target_pulse_duration": 20,
+    "pulse_type": 1,
+    "pulse_target_unit": "Resistance",
+    "pulse_keep_per_group": [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23],
+    "pulse_group_by": "BM_Programm",
+    "pulse_step_threshold": null,
+
+    "tolerances": {
+        "pulse_duration_tolerance": 1.08,
+        "pulse_cluster_tolerance": 3.0,
+        "restore_current_tolerance": 0.05,
+        "qocv_current_tolerance": 0.01,
+        "qocv_duration_tolerance": 1.2
     },
-    "targets": {
-        "local": {
-            "type": "nanu",
-            "folder": "Z:/Forschung/bgA/J7099_SIE_Alterung/Daten/ahjo_dl",
-            "format": "mat"
-        }
-    }
+
+    "min_rows": 20,
+    "pau_duration": 9.9,
+    "procedure_filter": "jri_CU",
+    "qocv_procedure_filter": null,
+
+    "export_pulse": false,
+    "export_qocv": false,
+    "running_window_days": 2,
+
+    "feature_columns": ["Voltage", "Current", "Temperature"],
+
+    "hdbscan_para_layer_1": {
+        "min_samples": 8,
+        "cluster_selection_epsilon": 0.3,
+        "allow_single_cluster": false
+    },
+    "hdbscan_para_layer_2": {
+        "min_cluster_size": 3,
+        "min_samples": 3,
+        "cluster_selection_epsilon": 0.001,
+        "allow_single_cluster": false
+    },
+
+    "classifier_model_path": "models/vtc_classifier.joblib",
+    "classifier_meta_path": "models/vtc_classifier_meta.json",
+
+    "download_from": "local",
+    "upload_to": "local",
+    "minio_endpoint": "your-minio-host:9000",
+    "minio_access_key": "your_access_key",
+    "minio_secret_key": "your_secret_key",
+    "bucket_name": "projects",
+    "minio_prefix": "j8005-metabatt/Metabatt"
 }
