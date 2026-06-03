@@ -127,6 +127,19 @@ def compare(h_cells: dict, c_cells: dict) -> dict:
             cap.insert(0, "cell", cell)
             cap_frames.append(cap)
 
+    # CAP counts for classifier-only cells (HDBSCAN wrote no CSV at all, so its
+    # CAP count is 0 by construction). This is the headline recovery number:
+    # whether the cells HDBSCAN gave up on actually got check-ups labeled.
+    recovered_frames = []
+    for cell in classifier_only:
+        c = c_cells[cell]
+        if "BM_Programm" not in c.columns:
+            continue
+        c_cap = c[c["target"] == "CAP"].groupby("BM_Programm").size()
+        rec = c_cap.reset_index(name="cap_classifier")
+        rec.insert(0, "cell", cell)
+        recovered_frames.append(rec)
+
     diffs = (
         pd.concat(diff_frames, ignore_index=True)
         if diff_frames
@@ -139,6 +152,12 @@ def compare(h_cells: dict, c_cells: dict) -> dict:
     )
     if not caps.empty:
         caps["cap_delta"] = caps["cap_classifier"] - caps["cap_hdbscan"]
+
+    caps_recovered = (
+        pd.concat(recovered_frames, ignore_index=True)
+        if recovered_frames
+        else pd.DataFrame(columns=["cell", "BM_Programm", "cap_classifier"])
+    )
 
     # Label-transition counts (hdbscan -> classifier) over disagreements.
     if not diffs.empty:
@@ -155,6 +174,7 @@ def compare(h_cells: dict, c_cells: dict) -> dict:
         "hdbscan_only": hdbscan_only,
         "diffs": diffs,
         "caps": caps,
+        "caps_recovered": caps_recovered,
         "transitions": transitions,
     }
 
@@ -183,6 +203,23 @@ def _print_report(res: dict) -> None:
         print(f"\nprograms where classifier found FEWER CAP (dropped): {len(lost)}")
         if not lost.empty:
             print(lost.to_string(index=False))
+
+    rec = res["caps_recovered"]
+    print("\n=== CAP counts in classifier-only cells (HDBSCAN skipped these) ===")
+    if rec.empty:
+        print("(no classifier-only cells, or no CAP labeled in them)")
+    else:
+        n_cells = rec["cell"].nunique()
+        n_caps = int(rec["cap_classifier"].sum())
+        print(f"{n_cells} recovered cells with {n_caps} CAP check-ups the classifier "
+              "found where HDBSCAN produced nothing:")
+        print(rec.to_string(index=False))
+        cells_with_cap = set(rec["cell"])
+        empty = [c for c in res["classifier_only"] if c not in cells_with_cap]
+        if empty:
+            print(f"\nclassifier-only cells with NO CAP found ({len(empty)}):")
+            for c in empty:
+                print(f"    ! {c}")
 
     print("\n=== Label transitions (HDBSCAN -> classifier) over disagreements ===")
     if res["transitions"].empty:
@@ -224,10 +261,13 @@ def main(config_path: str, source, hdbscan_dir, classifier_dir, out_dir) -> None
     os.makedirs(out_dir, exist_ok=True)
     diff_path = os.path.join(out_dir, "label_diff_segments.csv")
     cap_path = os.path.join(out_dir, "cap_count_diff.csv")
+    rec_path = os.path.join(out_dir, "cap_recovered_cells.csv")
     res["diffs"].to_csv(diff_path, index=False)
     res["caps"].to_csv(cap_path, index=False)
+    res["caps_recovered"].to_csv(rec_path, index=False)
     print(f"\nwrote {diff_path}")
     print(f"wrote {cap_path}")
+    print(f"wrote {rec_path}")
 
 
 if __name__ == "__main__":
