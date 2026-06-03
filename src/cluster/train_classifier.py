@@ -5,10 +5,13 @@ Reads every per-segment CSV in `<working_path>/with_features_post_labeled/`
 the prep / SOC-adjust leftovers and a `cluster_id` column), treats the `target`
 column as ground truth, weak-labels the obvious leftover families (PREP_CHA /
 PREP_DCH), runs leave-one-cell-out CV to report per-class precision/recall, then
-refits on all data and writes:
+refits on all data and writes (stem from config `type_cell`, timestamped so runs
+are kept side by side and never overwritten; also uploaded to MinIO when the
+config's `upload_to` includes minio, untagged under
+`<minio_prefix>/60_classifier/models/`):
 
-    models/vtc_classifier.joblib       — the fitted estimator
-    models/vtc_classifier_meta.json    — feature columns, classes, training cells
+    models/<type_cell>_classifier_<ts>.joblib      — the fitted estimator
+    models/<type_cell>_classifier_<ts>_meta.json   — feature columns, classes, training cells
 
 Usage (from src/):
     python -m cluster.train_classifier /path/to/battery_config.json
@@ -179,10 +182,37 @@ def _loco_cv(df: pd.DataFrame) -> None:
     print(classification_report(y_true, y_pred, digits=3, zero_division=0))
 
 
-def train(config_path: str, model_out: str, meta_out: str) -> None:
+def _stamp_path(path: str, ts: str) -> str:
+    """Inject `_<ts>` before the file extension (keeps runs from overwriting)."""
+    root, ext = os.path.splitext(path)
+    return f"{root}_{ts}{ext}"
+
+
+def _resolve_out_paths(cfg: dict, model_out, meta_out, ts: str):
+    """Build timestamped, cell-type-aware output paths.
+
+    When `--model-out` / `--meta-out` are omitted the stem is derived from the
+    config's `type_cell` (e.g. ``vtc_classifier_<ts>.joblib``); when given, the
+    user's stem is kept but still gets a `_<ts>` suffix so nothing is clobbered.
+    """
+    cell = str(cfg.get("type_cell", "model")).lower()
+    if model_out is None:
+        model_out = f"../models/{cell}_classifier_{ts}.joblib"
+    else:
+        model_out = _stamp_path(model_out, ts)
+    if meta_out is None:
+        meta_out = f"../models/{cell}_classifier_{ts}_meta.json"
+    else:
+        meta_out = _stamp_path(meta_out, ts)
+    return model_out, meta_out
+
+
+def train(config_path: str, model_out=None, meta_out=None) -> None:
     with open(config_path) as f:
         cfg = json.load(f)
     source = cfg.get("download_from", "local")
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    model_out, meta_out = _resolve_out_paths(cfg, model_out, meta_out, ts)
 
     df = _load_cell_csvs(cfg, source)
     logging.info(f"Loaded {len(df)} segments from {df['cell'].nunique()} cells ({source})")
@@ -201,6 +231,8 @@ def train(config_path: str, model_out: str, meta_out: str) -> None:
         "classes": sorted(df["target"].unique().tolist()),
         "training_cells": sorted(df["cell"].unique().tolist()),
         "n_segments": int(len(df)),
+        "type_cell": cfg.get("type_cell"),
+        "run_timestamp": ts,
         "trained_at": datetime.utcnow().isoformat() + "Z",
         "estimator": "RandomForestClassifier",
         "estimator_params": model.get_params(),
@@ -214,12 +246,32 @@ def train(config_path: str, model_out: str, meta_out: str) -> None:
     logging.info(f"Wrote model -> {model_out}")
     logging.info(f"Wrote meta  -> {meta_out}")
 
+    # MinIO upload follows `upload_to` (untagged, under
+    # <prefix>/60_classifier/models/), mirroring how exports / aging_status.html
+    # sit directly under the prefix.
+    if io_router.want_minio(cfg):
+        client = io_router.make_minio_client(cfg)
+        with open(model_out, "rb") as f:
+            io_router._upload_bytes(
+                client, cfg, f"60_classifier/models/{os.path.basename(model_out)}",
+                f.read(), include_tag=False,
+            )
+        with open(meta_out, "rb") as f:
+            io_router._upload_bytes(
+                client, cfg, f"60_classifier/models/{os.path.basename(meta_out)}",
+                f.read(), include_tag=False,
+            )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train segment classifier")
     parser.add_argument("config", help="Path to battery config JSON")
-    parser.add_argument("--model-out", default="../models/vtc_classifier.joblib")
-    parser.add_argument("--meta-out", default="../models/vtc_classifier_meta.json")
+    parser.add_argument("--model-out", default=None,
+                        help="Override model path stem; a _<timestamp> suffix is always added. "
+                             "Default: ../models/<type_cell>_classifier_<timestamp>.joblib")
+    parser.add_argument("--meta-out", default=None,
+                        help="Override meta path stem; a _<timestamp> suffix is always added. "
+                             "Default: ../models/<type_cell>_classifier_<timestamp>_meta.json")
     args = parser.parse_args()
 
     train(args.config, args.model_out, args.meta_out)

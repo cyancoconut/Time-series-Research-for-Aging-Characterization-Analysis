@@ -1,11 +1,12 @@
 """Unified UI for the METAbatt pipeline.
 
-Four tabs, in pipeline order:
+Six tabs, in pipeline order:
     1. Download           -> download/run_download.py
     2. Build BRONZE_CU    -> download/build_bronze_cu_with_ah.py
     3. Run Pipeline       -> main.py
     4. Monitor            -> monitor/aging_status.py
     5. Evaluation         -> evaluation/export_cap_pulse.py
+    6. Train Classifier   -> cluster/train_classifier.py
 
 Run from the src/ directory:
     python pipeline_ui.py
@@ -231,12 +232,14 @@ class PipelineUI(ctk.CTk):
         self.tabs.add("3. Run Pipeline")
         self.tabs.add("4. Monitor")
         self.tabs.add("5. Evaluation")
+        self.tabs.add("6. Train Classifier")
 
         self._build_download_tab(self.tabs.tab("1. Download"))
         self._build_bronze_tab(self.tabs.tab("2. Build BRONZE_CU"))
         self._build_pipeline_tab(self.tabs.tab("3. Run Pipeline"))
         self._build_monitor_tab(self.tabs.tab("4. Monitor"))
         self._build_evaluation_tab(self.tabs.tab("5. Evaluation"))
+        self._build_train_tab(self.tabs.tab("6. Train Classifier"))
 
         # Console + bottom controls
         bottom = ctk.CTkFrame(self)
@@ -441,6 +444,37 @@ class PipelineUI(ctk.CTk):
         )
         self.ev_run_btn.pack(side="right", padx=4)
 
+    def _build_train_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        s = _Section(parent, "Train segment classifier (cluster.train_classifier)")
+        s.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        self.tr_model_out = s.add_path("Model out (optional):", is_dir=False)
+        self.tr_meta_out = s.add_path("Meta out (optional):", is_dir=False)
+
+        ctk.CTkLabel(
+            parent,
+            text=(
+                "Reads with_features_post_labeled CSVs (routed by the config's "
+                "download_from) and trains a RandomForest. Leave the paths blank to "
+                "auto-name from type_cell + timestamp: "
+                "models/<type_cell>_classifier_<timestamp>.joblib (+ _meta.json). "
+                "Any override still gets a _<timestamp> suffix, so runs are never "
+                "overwritten. Uploaded to <minio_prefix>/60_classifier/models/ when "
+                "upload_to includes minio. Not part of 'Run all' — train after the "
+                "HDBSCAN pipeline has produced the CSVs."
+            ),
+            text_color="#888",
+            wraplength=900,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 6))
+
+        btns = ctk.CTkFrame(parent, fg_color="transparent")
+        btns.grid(row=2, column=0, sticky="ew", padx=8, pady=10)
+        self.tr_run_btn = ctk.CTkButton(
+            btns, text="▶ Train classifier", width=170, command=self._run_train,
+        )
+        self.tr_run_btn.pack(side="right", padx=4)
+
     # ------------------------------------------------------------- state I/O
 
     def _restore_state(self) -> None:
@@ -454,6 +488,8 @@ class PipelineUI(ctk.CTk):
             self.mn_overwrite.select()
         self.mo_output.insert(0, s.get("mo_output", ""))
         self.ev_output.insert(0, s.get("ev_output", ""))
+        self.tr_model_out.insert(0, s.get("tr_model_out", ""))
+        self.tr_meta_out.insert(0, s.get("tr_meta_out", ""))
 
         dl = {**DEFAULT_DOWNLOAD_CFG, **s.get("download_cfg", {})}
         self._apply_download_cfg(dl)
@@ -467,6 +503,8 @@ class PipelineUI(ctk.CTk):
             "mn_overwrite": bool(self.mn_overwrite.get()),
             "mo_output": self.mo_output.get(),
             "ev_output": self.ev_output.get(),
+            "tr_model_out": self.tr_model_out.get(),
+            "tr_meta_out": self.tr_meta_out.get(),
             "download_cfg": self._collect_download_cfg(),
         })
         _save_ui_state(self._state)
@@ -674,6 +712,19 @@ class PipelineUI(ctk.CTk):
             argv += ["-o", out]
         return argv
 
+    def _build_train_argv(self) -> list[str] | None:
+        cfg = self._battery_cfg_or_warn()
+        if not cfg:
+            return None
+        argv = [sys.executable, "-m", "cluster.train_classifier", cfg]
+        model_out = self.tr_model_out.get().strip()
+        if model_out:
+            argv += ["--model-out", model_out]
+        meta_out = self.tr_meta_out.get().strip()
+        if meta_out:
+            argv += ["--meta-out", meta_out]
+        return argv
+
     # --------------------------------------------------------------- run paths
 
     def _run_download(self):
@@ -700,6 +751,11 @@ class PipelineUI(ctk.CTk):
         argv = self._build_evaluation_argv()
         if argv:
             self._launch(argv, label="evaluation")
+
+    def _run_train(self):
+        argv = self._build_train_argv()
+        if argv:
+            self._launch(argv, label="train classifier")
 
     def _run_all(self):
         if self._runner.is_running:
@@ -800,7 +856,7 @@ class PipelineUI(ctk.CTk):
         new_state = "disabled" if running else "normal"
         for btn in (
             self.dl_run_btn, self.br_run_btn, self.mn_run_btn,
-            self.mo_run_btn, self.ev_run_btn, self.runall_btn,
+            self.mo_run_btn, self.ev_run_btn, self.tr_run_btn, self.runall_btn,
         ):
             btn.configure(state=new_state)
         self.stop_btn.configure(state="normal" if running else "disabled")
