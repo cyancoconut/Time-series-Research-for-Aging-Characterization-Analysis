@@ -271,6 +271,34 @@ def fetch_model_bytes(client: Minio, cfg: dict, filename: str) -> bytes:
         response.release_conn()
 
 
+def list_csv_objects(client: Minio, cfg: dict, rel_dir: str) -> list:
+    """List `*.csv` basenames under `<prefix>/<rel_dir>/` on MinIO.
+
+    Generic counterpart of `list_x_silver_cells` for arbitrary relative dirs
+    (e.g. `10_TRACY/with_features_post_labeled`, `60_classifier/with_features_post_labeled`).
+    """
+    bucket = cfg["bucket_name"]
+    base = f"{cfg['minio_prefix']}/{rel_dir.rstrip('/')}/"
+    objs = client.list_objects(bucket, prefix=base, recursive=False)
+    return sorted(
+        os.path.basename(o.object_name)
+        for o in objs
+        if o.object_name.endswith(".csv")
+    )
+
+
+def fetch_csv_object(client: Minio, cfg: dict, rel_dir: str, name: str) -> bytes:
+    """Fetch one `<prefix>/<rel_dir>/<name>` CSV payload from MinIO."""
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/{rel_dir.rstrip('/')}/{name}"
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
 def x_silver_object_key(cell: str, classifier: bool = False) -> str:
     stem = cell.split(".")[0]
     # Classifier-path CSVs go to 60_classifier/ (untagged, caller passes

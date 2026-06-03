@@ -160,6 +160,22 @@ python -m evaluation.aging_matrix /path/to/battery_config.json
 
 The notebook's cross-cell-type comparison (VTC vs A123) is intentionally dropped — the pipeline runs one battery config (one cell type) at a time.
 
+## Evaluation: HDBSCAN vs classifier label diff
+
+`evaluation/compare_labels.py` diffs the HDBSCAN and classifier per-segment label sets for the same cells, to see whether the classifier recovers CAP check-ups HDBSCAN missed. Needed because the classifier is trained on HDBSCAN's own labels, so any metric scored against those labels (the LOCO report) counts a recovered CAP as a *false positive* — the improvement is only visible by diffing the two label sets against the structural ground truth (each `BM_Programm` check-up = exactly one CAP).
+
+```bash
+cd src
+python -m evaluation.compare_labels /path/to/battery_config.json
+# --source {local,minio}  (default: config download_from)
+# local overrides: --hdbscan-dir DIR  --classifier-dir DIR
+# -o/--out-dir DIR
+```
+
+- **Source** (`--source`, default = config `download_from`): joins the two label sets per cell on `ID`. `local` reads HDBSCAN labels from `<working_path>/with_features_post_labeled/` and classifier labels from `<working_path>/60_classifier/with_features_post_labeled/`. `minio` reads them via `io_router.list_csv_objects`/`fetch_csv_object` from the tagged `<prefix>/10_TRACY/with_features_post_labeled/` (HDBSCAN) and untagged `<prefix>/60_classifier/with_features_post_labeled/` (classifier) — the diff CSVs are still written locally to `--out-dir`. Prerequisite: run the pipeline twice on the same cells — once HDBSCAN (`classifier_model_path` unset), once classifier (`classifier_model_path` set, `--overwrite`) — so both label sets exist.
+- **Reports** (console + CSV): cell coverage (in both / **classifier-only** = cells HDBSCAN skipped with no CAP cluster, the pure recoveries / HDBSCAN-only); per-`(cell, BM_Programm)` CAP-count delta (positive = recovered, negative = dropped); HDBSCAN→classifier label-transition counts over all disagreements; and every disagreeing segment with the features that explain the call (`Duration_minutes`, `Current_mean`, `Voltage_max/min/range`, `prev_end_voltage_norm`).
+- **Output**: `<out-dir>/label_diff_segments.csv` (per-segment disagreements) and `<out-dir>/cap_count_diff.csv` (per-program CAP counts + delta); default `<out-dir>` is `<working_path>/50_evaluation`. Local-only (no MinIO routing).
+
 ## Aging-status monitor
 
 `monitor/aging_status.py` builds a sortable HTML report of per-cell SOH for spotting cells approaching EOL while tests are still running. Run on demand:
