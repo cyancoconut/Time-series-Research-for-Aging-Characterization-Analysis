@@ -137,7 +137,6 @@ def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
 
 
 def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions):
-    working_path = cfg.get("working_path")
     # --- preSILVER ---
     logging.info(f"{cell}: dismembering")
     procedure_filter = cfg.get("procedure_filter", None)
@@ -172,14 +171,12 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     X_features, count = create_features(
         dismembered_df,
         cell,
-        working_path,
         exceptions,
         cfg["v_max"],
         cfg["v_min"],
         cfg["v_nom"],
         cfg["nom_capacity"],
         cfg["feature_columns"],
-        overwrite=1,
     )
     _validate(X_features, "features")
 
