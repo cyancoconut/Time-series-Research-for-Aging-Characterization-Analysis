@@ -255,6 +255,22 @@ def gold_object_key(cell: str) -> str:
     return f"GOLD/{cell}"
 
 
+def fetch_model_bytes(client: Minio, cfg: dict, filename: str) -> bytes:
+    """Fetch a classifier artifact from `<prefix>/60_classifier/models/<filename>`.
+
+    The trainer uploads model + meta there untagged; this is the read side used
+    when `classifier_model_path` is not present locally (cross-machine inference).
+    """
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/60_classifier/models/{filename}"
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
 def x_silver_object_key(cell: str, classifier: bool = False) -> str:
     stem = cell.split(".")[0]
     # Classifier-path CSVs go to 60_classifier/ (untagged, caller passes

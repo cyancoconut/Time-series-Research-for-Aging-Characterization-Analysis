@@ -2,6 +2,7 @@ import os
 import glob
 import json
 import logging
+import tempfile
 import traceback
 from contextlib import nullcontext
 
@@ -215,6 +216,9 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
             "classifier_meta_path",
             os.path.splitext(classifier_path)[0] + "_meta.json",
         )
+        classifier_path, meta_path = _resolve_classifier_paths(
+            cfg, minio_client, classifier_path, meta_path, cell
+        )
         logging.info(f"{cell}: classifying segments via {classifier_path}")
         X_silver = predict_targets(X_features, classifier_path, meta_path)
         df_silver = model_and_supervise.merge_target(dismembered_df, X_silver)
@@ -326,6 +330,43 @@ def _build_soh_map(df_export, nom_capacity):
     for bm_prog, cap in cap_by_prog.items():
         soh[bm_prog] = round(cap / nom_capacity * 100, 1) if pd.notna(cap) else "NA"
     return soh
+
+
+def _resolve_classifier_paths(cfg, minio_client, model_path, meta_path, cell):
+    """Ensure the classifier model + meta exist locally, fetching them from
+    MinIO (`<prefix>/60_classifier/models/<basename>`) when the given path is
+    absent and `download_from` is minio. Returns local paths (unchanged when the
+    file already exists locally; left as-is — so predict_classifier raises a
+    clear FileNotFoundError — when it is absent and MinIO is not in play)."""
+    download_from = cfg.get("download_from")
+    working_path = cfg.get("working_path")
+    cache_dir = None
+
+    def resolve(path, label):
+        nonlocal cache_dir
+        if os.path.exists(path):
+            return path
+        if download_from != "minio" or minio_client is None:
+            return path
+        if cache_dir is None:
+            cache_dir = (
+                os.path.join(working_path, "60_classifier", "models")
+                if working_path
+                else tempfile.mkdtemp(prefix="metabatt_clf_")
+            )
+            os.makedirs(cache_dir, exist_ok=True)
+        fname = os.path.basename(path)
+        local = os.path.join(cache_dir, fname)
+        if not os.path.exists(local):
+            logging.info(
+                f"{cell}: fetching classifier {label} from MinIO 60_classifier/models/{fname}"
+            )
+            data = io_router.fetch_model_bytes(minio_client, cfg, fname)
+            with open(local, "wb") as f:
+                f.write(data)
+        return local
+
+    return resolve(model_path, "model"), resolve(meta_path, "meta")
 
 
 def _write_x_silver(df, cell, cfg, paths, minio_client):

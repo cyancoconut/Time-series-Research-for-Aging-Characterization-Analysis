@@ -10,8 +10,8 @@ are kept side by side and never overwritten; also uploaded to MinIO when the
 config's `upload_to` includes minio, untagged under
 `<minio_prefix>/60_classifier/models/`):
 
-    models/<type_cell>_classifier_<ts>.joblib      — the fitted estimator
-    models/<type_cell>_classifier_<ts>_meta.json   — feature columns, classes, training cells
+    <working_path>/60_classifier/models/<type_cell>_classifier_<ts>.joblib    — the fitted estimator
+    <working_path>/60_classifier/models/<type_cell>_classifier_<ts>_meta.json — feature columns, classes, training cells
 
 Usage (from src/):
     python -m cluster.train_classifier /path/to/battery_config.json
@@ -191,17 +191,27 @@ def _stamp_path(path: str, ts: str) -> str:
 def _resolve_out_paths(cfg: dict, model_out, meta_out, ts: str):
     """Build timestamped, cell-type-aware output paths.
 
-    When `--model-out` / `--meta-out` are omitted the stem is derived from the
-    config's `type_cell` (e.g. ``vtc_classifier_<ts>.joblib``); when given, the
-    user's stem is kept but still gets a `_<ts>` suffix so nothing is clobbered.
+    The trained model is a pipeline artifact, so by default it lands under the
+    data folder (``<working_path>/60_classifier/models/``), mirroring the MinIO
+    ``<prefix>/60_classifier/models/`` layout — not in the code workspace. Falls
+    back to ``../models/`` only when ``working_path`` is unset. The stem is
+    derived from the config's ``type_cell`` (e.g. ``vtc_classifier_<ts>.joblib``);
+    when ``--model-out`` / ``--meta-out`` are given, the user's stem is kept but
+    still gets a ``_<ts>`` suffix so nothing is clobbered.
     """
     cell = str(cfg.get("type_cell", "model")).lower()
+    working_path = cfg.get("working_path")
+    base = (
+        os.path.join(working_path, "60_classifier", "models")
+        if working_path
+        else "../models"
+    )
     if model_out is None:
-        model_out = f"../models/{cell}_classifier_{ts}.joblib"
+        model_out = os.path.join(base, f"{cell}_classifier_{ts}.joblib")
     else:
         model_out = _stamp_path(model_out, ts)
     if meta_out is None:
-        meta_out = f"../models/{cell}_classifier_{ts}_meta.json"
+        meta_out = os.path.join(base, f"{cell}_classifier_{ts}_meta.json")
     else:
         meta_out = _stamp_path(meta_out, ts)
     return model_out, meta_out
@@ -268,10 +278,10 @@ if __name__ == "__main__":
     parser.add_argument("config", help="Path to battery config JSON")
     parser.add_argument("--model-out", default=None,
                         help="Override model path stem; a _<timestamp> suffix is always added. "
-                             "Default: ../models/<type_cell>_classifier_<timestamp>.joblib")
+                             "Default: <working_path>/60_classifier/models/<type_cell>_classifier_<timestamp>.joblib")
     parser.add_argument("--meta-out", default=None,
                         help="Override meta path stem; a _<timestamp> suffix is always added. "
-                             "Default: ../models/<type_cell>_classifier_<timestamp>_meta.json")
+                             "Default: <working_path>/60_classifier/models/<type_cell>_classifier_<timestamp>_meta.json")
     args = parser.parse_args()
 
     train(args.config, args.model_out, args.meta_out)
