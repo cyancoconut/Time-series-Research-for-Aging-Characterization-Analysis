@@ -12,6 +12,7 @@ from feature_extraction.create_features import create_features
 from cluster import model_and_supervise, post_cluster_filter
 from cluster.post_cluster_filter import ClusterNotFoundException
 from cluster.predict_classifier import predict_targets
+from cluster.train_classifier import bootstrap_leftover_labels
 from calculate import results_fetching
 from output.export_pulse import export_pulse
 from output.export_qocv import export_qocv
@@ -268,6 +269,16 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     # Propagate final targets back to X_silver and re-save
     target_map = df_gold.groupby("ID")["target"].first()
     X_silver["target"] = X_silver["ID"].map(target_map).fillna(X_silver["target"])
+
+    # HDBSCAN path: weak-label the leftover raw clusters (PREP_CHA / SOC_ADJUST /
+    # -1) in place of the stringified cluster ids, so the training CSV and GOLD
+    # carry named labels instead of raw clusters. The classifier path already
+    # emits these directly, so skip it there. cluster_id keeps the raw cluster.
+    if not classifier_path:
+        bootstrap_leftover_labels(X_silver)
+        leftover_map = X_silver.set_index("ID")["target"]
+        df_gold["target"] = df_gold["ID"].map(leftover_map).fillna(df_gold["target"])
+
     _write_x_silver(X_silver, cell, cfg, paths, minio_client)
 
     # TODO: consider moving the labeling and schedule preparation steps to a separate visualization module that takes the GOLD output as input, to keep the core pipeline focused on data processing and calculation. For now, we'll include it here for simplicity.
