@@ -249,7 +249,7 @@ def train(config_path: str, model_out=None, meta_out=None) -> None:
     # MinIO upload follows `upload_to` (untagged, under
     # <prefix>/60_classifier/models/), mirroring how exports / aging_status.html
     # sit directly under the prefix.
-    if io_router.want_minio(cfg):
+    if io_router.writes_minio(cfg):
         client = io_router.make_minio_client(cfg)
         with open(model_out, "rb") as f:
             io_router._upload_bytes(
