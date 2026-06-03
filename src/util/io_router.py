@@ -255,8 +255,13 @@ def gold_object_key(cell: str) -> str:
     return f"GOLD/{cell}"
 
 
-def x_silver_object_key(cell: str) -> str:
+def x_silver_object_key(cell: str, classifier: bool = False) -> str:
     stem = cell.split(".")[0]
+    # Classifier-path CSVs go to 60_classifier/ (untagged, caller passes
+    # include_tag=False) so they sit beside the model and stay out of the tagged
+    # 10_TRACY/with_features_post_labeled/ that train_classifier consumes.
+    if classifier:
+        return f"60_classifier/with_features_post_labeled/{stem}.csv"
     return f"with_features_post_labeled/{stem}.csv"
 
 

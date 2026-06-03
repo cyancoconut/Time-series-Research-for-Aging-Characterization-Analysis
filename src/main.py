@@ -106,7 +106,11 @@ def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
     working_path = cfg.get("working_path")
     download_from = cfg.get("download_from", "local")
 
-    paths = _build_paths(cell, working_path) if working_path else None
+    paths = (
+        _build_paths(cell, working_path, classifier=bool(cfg.get("classifier_model_path")))
+        if working_path
+        else None
+    )
     if paths and io_router.writes_local(cfg):
         os.makedirs(os.path.dirname(paths["gold"]), exist_ok=True)
 
@@ -281,6 +285,15 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
 
     _write_x_silver(X_silver, cell, cfg, paths, minio_client)
 
+    # Classifier route: the per-segment CSV (written to 60_classifier/ above) is
+    # the sole output. Skip GOLD, capacity, and pulse/qOCV exports so a classifier
+    # run never overwrites the HDBSCAN GOLD/exports — it produces only the
+    # comparison CSV. The calculate step already ran, so the CSV carries final
+    # labels (CAP / PUL / qOCV_DCH / qOCV_CHA).
+    if classifier_path:
+        logging.info(f"{cell}: classifier route — wrote CSV only, skipping GOLD/exports")
+        return
+
     # TODO: consider moving the labeling and schedule preparation steps to a separate visualization module that takes the GOLD output as input, to keep the core pipeline focused on data processing and calculation. For now, we'll include it here for simplicity.
     # try:
     #     from visualize import add_test_schedule
@@ -316,12 +329,14 @@ def _build_soh_map(df_export, nom_capacity):
 
 
 def _write_x_silver(df, cell, cfg, paths, minio_client):
+    classifier = bool(cfg.get("classifier_model_path"))
     if io_router.writes_local(cfg) and paths:
         os.makedirs(os.path.dirname(paths["X_silver"]), exist_ok=True)
         df.to_csv(paths["X_silver"], index=False)
         logging.info(f"{cell}: X_silver -> {paths['X_silver']}")
     if io_router.writes_minio(cfg):
-        io_router.upload_csv(minio_client, cfg, df, io_router.x_silver_object_key(cell))
+        key = io_router.x_silver_object_key(cell, classifier=classifier)
+        io_router.upload_csv(minio_client, cfg, df, key, include_tag=not classifier)
 
 
 def _write_gold(df, cell, cfg, paths, minio_client):
@@ -427,13 +442,20 @@ def _run_clustering(
     return df_final, X_final
 
 
-def _build_paths(cell: str, working_path: str) -> dict:
+def _build_paths(cell: str, working_path: str, classifier: bool = False) -> dict:
     stem = cell.split(".")[0]
+    # The classifier path's CSVs are *not* valid training data, so they are
+    # routed to 60_classifier/ (away from the HDBSCAN with_features_post_labeled/
+    # that train_classifier reads) — keeping the two label sets side by side and
+    # the training set uncontaminated.
+    x_silver_dir = (
+        os.path.join("60_classifier", "with_features_post_labeled")
+        if classifier
+        else "with_features_post_labeled"
+    )
     return {
         "bronze": os.path.join(working_path, "BRONZE_CU", cell),
-        "X_silver": os.path.join(
-            working_path, "with_features_post_labeled", stem + ".csv"
-        ),
+        "X_silver": os.path.join(working_path, x_silver_dir, stem + ".csv"),
         "gold": os.path.join(working_path, "GOLD", cell),
         "export_pulse_dir": os.path.join(working_path, "20_export_pulse", stem),
         "export_qocv_dir": os.path.join(working_path, "30_export_qocv", stem),
