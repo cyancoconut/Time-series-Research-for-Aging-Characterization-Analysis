@@ -16,6 +16,7 @@ Usage (from src/):
 
 import argparse
 import glob
+import io
 import json
 import logging
 import os
@@ -25,6 +26,8 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
+
+from util import io_router
 from sklearn.metrics import classification_report
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -89,16 +92,38 @@ def bootstrap_leftover_labels(df: pd.DataFrame, min_prep_current: float = 0.1) -
     return df
 
 
-def _load_cell_csvs(working_path: str) -> pd.DataFrame:
-    pattern = os.path.join(working_path, "with_features_post_labeled", "*.csv")
+def _iter_cell_csvs(cfg: dict, source: str):
+    """Yield ``(cell_name, DataFrame)`` for every with_features_post_labeled CSV.
+
+    Routed by ``download_from`` (``source``): ``local`` globs
+    ``<working_path>/with_features_post_labeled/*.csv``; ``minio`` lists and
+    fetches the tagged objects via :mod:`util.io_router`.
+    """
+    if source == "minio":
+        client = io_router.make_minio_client(cfg)
+        names = io_router.list_x_silver_cells(client, cfg)
+        if not names:
+            raise FileNotFoundError(
+                f"No labeled CSVs under "
+                f"{cfg['minio_prefix']}/{io_router.UPLOAD_PREFIX_TAG}/with_features_post_labeled/"
+            )
+        for name in names:
+            data = io_router.fetch_x_silver_bytes(client, cfg, name)
+            yield name.replace(".csv", ""), pd.read_csv(io.BytesIO(data))
+        return
+
+    pattern = os.path.join(cfg["working_path"], "with_features_post_labeled", "*.csv")
     files = sorted(glob.glob(pattern))
     if not files:
         raise FileNotFoundError(f"No labeled CSVs under {pattern}")
-
-    frames = []
     for f in files:
-        df = pd.read_csv(f)
-        df["cell"] = os.path.basename(f).replace(".csv", "")
+        yield os.path.basename(f).replace(".csv", ""), pd.read_csv(f)
+
+
+def _load_cell_csvs(cfg: dict, source: str) -> pd.DataFrame:
+    frames = []
+    for cell, df in _iter_cell_csvs(cfg, source):
+        df["cell"] = cell
         frames.append(df)
     df = pd.concat(frames, ignore_index=True)
 
@@ -157,10 +182,10 @@ def _loco_cv(df: pd.DataFrame) -> None:
 def train(config_path: str, model_out: str, meta_out: str) -> None:
     with open(config_path) as f:
         cfg = json.load(f)
-    working_path = cfg["working_path"]
+    source = cfg.get("download_from", "local")
 
-    df = _load_cell_csvs(working_path)
-    logging.info(f"Loaded {len(df)} segments from {df['cell'].nunique()} cells")
+    df = _load_cell_csvs(cfg, source)
+    logging.info(f"Loaded {len(df)} segments from {df['cell'].nunique()} cells ({source})")
     logging.info(f"Class counts:\n{df['target'].value_counts().to_string()}")
 
     _loco_cv(df)

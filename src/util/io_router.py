@@ -260,6 +260,34 @@ def x_silver_object_key(cell: str) -> str:
     return f"with_features_post_labeled/{stem}.csv"
 
 
+def list_x_silver_cells(client: Minio, cfg: dict) -> list:
+    """List the `with_features_post_labeled/*.csv` object names on MinIO.
+
+    These are uploaded tagged (`upload_csv` default `include_tag=True`), so they
+    live under `<prefix>/10_TRACY/with_features_post_labeled/`.
+    """
+    bucket = cfg["bucket_name"]
+    base = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/with_features_post_labeled/"
+    objs = client.list_objects(bucket, prefix=base, recursive=False)
+    return sorted(
+        os.path.basename(o.object_name)
+        for o in objs
+        if o.object_name.endswith(".csv")
+    )
+
+
+def fetch_x_silver_bytes(client: Minio, cfg: dict, name: str) -> bytes:
+    """Fetch one `with_features_post_labeled/<name>.csv` payload from MinIO."""
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/with_features_post_labeled/{name}"
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
 def export_pulse_object_key(cell: str, filename: str) -> str:
     stem = cell.split(".")[0]
     return f"20_export_pulse/{stem}/{filename}"
