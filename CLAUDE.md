@@ -34,7 +34,7 @@ The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` also w
 
 **Venv (Linux)**: `source .venv/bin/activate` from project root.
 
-**Unified UI**: `src/pipeline_ui.py` — customtkinter desktop app that wraps all five stages (Download / Build BRONZE_CU / Run Pipeline / Monitor / Evaluation) in one window with a shared battery-config picker, per-tab Run buttons, a "Run all 1→2→3→4→5" chain button, a Stop button, and a live console for subprocess output. Persists last-used paths to `~/.config/metabatt_ui.json`.
+**Unified UI**: `src/pipeline_ui.py` — customtkinter desktop app that wraps six stages (Download / Build BRONZE_CU / Run Pipeline / Monitor / Evaluation / Train Classifier) in one window with a shared battery-config picker, per-tab Run buttons, a "Run all 1→2→3→4→5" chain button, a Stop button, and a live console for subprocess output. Persists last-used paths to `~/.config/metabatt_ui.json`. The Train Classifier tab (6) is intentionally **outside** the Run-all chain — it's an offline build step that consumes the CSVs the HDBSCAN pipeline produces, not per-cell processing.
 
 ```bash
 cd src
@@ -47,6 +47,7 @@ Each Run button spawns a `subprocess.Popen` of the relevant CLI:
 - Tab 3 → `main.py <battery_cfg> [--cells …] [--overwrite]`
 - Tab 4 → `python -m monitor.aging_status <battery_cfg> [-o …]`
 - Tab 5 → `python -m evaluation.export_cap_pulse <battery_cfg> [-o …]`
+- Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …]`. Reads `with_features_post_labeled` CSVs (routed by `download_from`) and trains the RandomForest. Leave the two path fields blank to auto-name from `type_cell` + timestamp; any override still gets a `_<timestamp>` suffix. Honors `upload_to` for the `<minio_prefix>/60_classifier/models/` upload.
 
 Prereq on Linux: `sudo apt install python3-tk` (Tk bindings are not provided by pip). The Download tab's "Save JSON" writes the same shape as `download/get_user_input.py`; for full-pipeline runs that config is auto-written to `.metabatt_ui_download.json` at the project root (gitignored).
 
@@ -60,16 +61,16 @@ BRONZE_CU → preSILVER → SILVER → GOLD
 
 - **BRONZE_CU**: raw check-up cycler export (CU = check-up), German columns, unsegmented
 - **preSILVER**: segmented into discrete procedures; long PAU pauses (> `pau_duration`) are reduced to first+last row stubs (target="PAU"), short pauses discarded, short segments dropped, columns renamed to English. Written to disk for debugging.
-- **SILVER**: preSILVER with cluster labels merged back. Written to disk for debugging. In `main.py`, held in memory as `df_silver` — the `"silver"` path in `_build_paths` is unused dead code.
+- **SILVER**: preSILVER with cluster labels merged back. Written to disk for debugging. In `main.py`, held in memory as `df_silver`.
 - **GOLD**: SILVER enriched with calculated metrics (capacity, pulse resistance, qOCV)
 
-Two CSV helper layers support the clustering step (not time-series — one row per segment):
+A CSV helper layer supports the clustering step (not time-series — one row per segment):
 
 ```
-with_features_pre_labeled → [HDBSCAN clustering] → with_features_post_labeled
+in-memory feature table → [HDBSCAN clustering / classifier] → with_features_post_labeled
 ```
 
-These are a per-segment projection of preSILVER. Labels from `with_features_post_labeled` are merged back into the time-series to produce SILVER.
+The per-segment feature table is a projection of preSILVER held **in memory** (no `with_features_pre_labeled` CSV is written anymore — `with_features_post_labeled` now persists every segment plus its `cluster_id`, making the pre-labeled cache redundant). Labels from `with_features_post_labeled` are merged back into the time-series to produce SILVER.
 
 **Procedure-filter gate**: `_process_cell` in `main.py` peeks at the BRONZE `Prozedur` column before pulling the full payload. If `procedure_filter` is set in the config and no `Prozedur` matches, the cell is skipped immediately with `INFO {cell}: no Prozedur matches filter '<filter>', skipping` — dismember is never entered and, on MinIO, `fetch_bronze` is never called. The check uses `processing_procedure_filter` (pyarrow, reads only `Prozedur` row-group by row-group, short-circuits on first match). On MinIO it runs against `io_router.open_bronze_range`, a seekable HTTP-range-read file-like, so a filtered-out cell only fetches the parquet footer + one column.
 
@@ -81,7 +82,7 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
    - **qOCV Zustand split**: optional. When `qocv_procedure_filter` is set in the config, every `Zustand` change inside a procedure whose `Prozedur` contains that substring also fires a segment boundary. This is needed when a qOCV procedure's discharge and charge halves share one `Prozedur` and are separated only by a sub-`pau_duration` pause — without the split they collapse into one segment whose signed `Current_mean` (and therefore `abs_Current_mean`) cancels to ≈0, making the qOCV indistinguishable from a rest. The split isolates the `DCH` and `CHA` halves into separate segments. When the key is absent the boundary condition is inert and dismember behaves exactly as before; it is gated per-row on the `Prozedur` match, so all non-qOCV procedures (and cells with no qOCV) are unaffected.
    - **PAU stubs**: long PAU/PAUO segments (> `pau_duration`) are kept as 2-row stubs (first + last row) with their own ID and `target="PAU"`. `Duration_minutes` is the actual pause length (last − first timestamp). Short pauses (≤ `pau_duration`) and middle rows of long pauses are assigned `BM_Programm_procedure=0` (discard bucket). PAU stubs are exempt from the `min_rows` check. They are excluded from feature extraction and clustering (filtered out by the `target == -1` guard in `create_features.py`) but flow through to SILVER and GOLD, making the relaxed-cell voltage and pause duration available for pulse resistance calculations.
 
-2. **`feature_extraction/create_features.py`** + **`feature_extraction/classification.py`** — per-segment statistical features (mean, std, min, max of Voltage/Current/Temperature). Normalization: Voltage by `(V_max - V_min)`, Current/Power by `Nom_Capacity`. Adds `Duration_quartile = log1p(Duration_minutes)` and `abs_Current_mean = |Current_mean|`. Saves to `with_features_pre_labeled/<cell>.csv`.
+2. **`feature_extraction/create_features.py`** + **`feature_extraction/classification.py`** — per-segment statistical features (mean, std, min, max of Voltage/Current/Temperature). Normalization: Voltage by `(V_max - V_min)`, Current/Power by `Nom_Capacity`. Adds `Duration_quartile = log1p(Duration_minutes)` and `abs_Current_mean = |Current_mean|`. Returns the feature table in memory (no CSV written here — see the layer note above).
 
 3. **`cluster/model_and_supervise.py`** — two-layer HDBSCAN clustering:
    - Layer 1: clusters on `["Duration_quartile", "abs_Current_mean", "ID"]` via `TabularAutoencoderHDBSCAN.fit_cluster_only()`. `min_cluster_size = max(2, n_programs − 1)`.
@@ -104,6 +105,22 @@ These are a per-segment projection of preSILVER. Labels from `with_features_post
 7. **`output/export_capacity.py`** — always runs at the end of `_process_cell` (no flag). Writes a compact per-cell capacity summary CSV (one row per BM_Programm) consumed by the aging-status monitor and the aging matrix. Columns: `BM_Programm, Capacity_py, Ah_throughput, SOH, CAP_start_time`. `Ah_throughput` is the cumulative throughput at the **start** of the CAP segment (the value at the check-up). Files sit flat under the folder (no per-cell subdirectory):
    - Local: `<working_path>/40_capacity_monitore/<cell_stem>_capacity.csv`
    - MinIO: `<minio_prefix>/40_capacity_monitore/<cell_stem>_capacity.csv` (untagged)
+
+## Learned segment classifier (optional, replaces HDBSCAN)
+
+`cluster/train_classifier.py` + `cluster/predict_classifier.py` provide a RandomForest drop-in for the HDBSCAN + `post_cluster_filter` rule stack. The classifier is **opt-in**: it only runs when `classifier_model_path` is set in the battery config; otherwise the pipeline takes the unchanged HDBSCAN path. Motivation: the threshold rules encode hard per-cell-type boundaries (`CAP_Rate ± 5 %`, `cap_temp ± 3 °C`, the qOCV duration window) that need re-tuning per chemistry and are meaningless on field data.
+
+- **Feature basis** (`train_classifier.FEATURE_COLS`, 12 cols) — deliberately **scale- and chemistry-portable** so one model can run across cell types: the current profile (`Current_{mean,std,max,min,range}`, `abs_Current_mean`, C-rate normalized ÷ `Nom_Capacity`), the voltage **edges** (`Voltage_{max,min,range}`, window-normalized ÷ `(V_max − V_min)` — `Voltage_range` is the SoC-swing proxy that, with duration, separates a brief pulse from a full CAP discharge), `Duration_{minutes,quartile}`, and `prev_end_voltage_norm`. The voltage *curve shape* (`Voltage_mean/std`) and absolute `Temperature_mean` are **excluded on purpose**: an A/B on VTC showed removing them costs nothing (LOCO 0.9748 → 0.9745, per-class unchanged), and they are the chemistry-/sensor-bound features that would not transfer. The feature contract lives in `_meta.json["feature_columns"]`; `predict_classifier` reads it from there, so the inference side needs no edit when the set changes. `create_features` still computes the dropped columns (they ride through the CSVs harmlessly); the model just ignores them. Dropping `Temperature_mean` also removes the `→ -1` NaN-row drop that temperature-sparse cells used to trigger.
+- **Context feature** (`feature_extraction/create_features.py:prev_end_voltage_norm`): per-segment, the end-of-segment voltage of the most recent **non-PAU** predecessor (walk back ≤4 procedure steps, skipping PAU stubs), normalized by `V_max`; `0.0` when no predecessor exists. Mirrors `post_cluster_filter.previous_voltage` exactly, so the model sees the same signal the CAP rule keys on: a true CAP discharge is preceded by a fully charged segment, a prep/other discharge is not. The column rides through the in-memory feature table → `with_features_post_labeled` (it is inert for HDBSCAN, which clusters on a fixed 3-column subset). **CSVs generated before this column existed must be regenerated by a pipeline re-run before training** — `train_classifier` aborts with a clear message if the column is absent.
+- **Training** (`python -m cluster.train_classifier <battery_cfg>`): reads every `with_features_post_labeled/*.csv` (post-#37 these carry **all** segments + a `cluster_id` column, supplying the negative-class examples), weak-labels the obvious leftover families via `bootstrap_leftover_labels`, runs leave-one-cell-out CV (per-class precision/recall), then refits on all cells. **Output naming + routing**: the trained model is a pipeline artifact, so it lands under the **data folder** (`<working_path>/60_classifier/models/`), mirroring the MinIO `<prefix>/60_classifier/models/` layout — **not** in the code workspace (it falls back to `../models/` only when `working_path` is unset). The filename stem is derived from the config's `type_cell` and a UTC timestamp, so runs are kept side by side and never overwrite each other — `<working_path>/60_classifier/models/<type_cell.lower()>_classifier_<YYYYMMDDThhmmss>.joblib` + `..._meta.json` (e.g. `hina_classifier_20260603T105111.joblib`). `--model-out` / `--meta-out` override the stem but a `_<timestamp>` suffix is always appended. The meta JSON also records `type_cell` and `run_timestamp`. When `upload_to` includes `minio` (`io_router.writes_minio`), both files are also uploaded **untagged** to `<minio_prefix>/60_classifier/models/<filename>` (no `10_TRACY` tag — same convention as the exports). The local copy is always written first. Consequence: with timestamped names nothing is ever overwritten, so the folder accumulates — prune manually; and `classifier_model_path` on the inference side must point at a specific timestamped file (resolved locally, or auto-fetched from `<prefix>/60_classifier/models/` when `download_from="minio"` — see the `classifier_model_path` note). Note the HDBSCAN path in `main.py` now applies `bootstrap_leftover_labels` *before* writing the CSV (see the Bootstrap-labels bullet), so for CSVs from the current pipeline the training-time bootstrap is a **no-op** (idempotent re-derivation). It is kept because it's cheap and still converts **legacy** CSVs that carry raw integer clusters — letting old and new CSVs mix in one training run. **Source routing**: the CSV reader (`_load_cell_csvs` / `_iter_cell_csvs`) follows the config's `download_from` like the rest of the pipeline. `download_from="local"` (default) globs `<working_path>/with_features_post_labeled/*.csv`; `download_from="minio"` lists + fetches the tagged objects under `<minio_prefix>/10_TRACY/with_features_post_labeled/` via `io_router.list_x_silver_cells` / `fetch_x_silver_bytes`. One config = one source/prefix, so cross-chemistry training needs all cells' CSVs under the same folder (or prefix).
+- **Bootstrap labels** (`bootstrap_leftover_labels`): turns the stringified raw HDBSCAN integer clusters (the leftovers) into named weak labels by scale-free signature, **without touching** the final labels (`CAP`, `PUL`, `PUL*RES`, `qOCV_DCH`, `qOCV_CHA`, `-1`). It runs in **two places**, both reusing this one function: (a) **`main.py`, HDBSCAN path only** — after the post-calculate target sync, `_process_cell_inner` applies it to `X_silver` and maps the result back into `df_gold["target"]`, so the `with_features_post_labeled` CSV **and** GOLD carry the named leftover labels (`PREP_CHA` / `SOC_ADJUST` / `-1`) instead of raw cluster ids (`cluster_id` keeps the raw integer cluster for provenance). This mirrors how the classifier path surfaces these labels in GOLD, and since leftovers are never `CAP`/`PUL`/`qOCV_*`/`PAU` it changes no capacity/pulse/qOCV result or export. (b) **`train_classifier._load_cell_csvs`** — re-applies it for robustness/legacy (idempotent on current CSVs). The rules:
+  - `PREP_CHA` — charge (`Current_mean > 0`) at ≥ `min_prep_current` (default 0.1, ~C/10) that ends near full (`Voltage_max > 0.95`). The current floor keeps slow C/20 top-offs / CV holds / off-spec qOCV charges out (they stay `-1`).
+  - `SOC_ADJUST` — partial charge/discharge at ≥ `min_prep_current` that ends at an **intermediate** SoC (charge not reaching the top rail `Voltage_max ≤ 0.95`, or discharge not reaching the bottom rail `Voltage_min > 0.05`). `PREP_CHA` wins on overlap.
+  - Everything else leftover stays `-1` (OTHER) — SOC-adjust at trivial current, slow off-spec qOCV sweeps, full non-CAP discharges. There is **no `CYCLE` label** (BRONZE_CU has no cycling) and **no `PREP_DCH` label**: CAP-vs-discharge discrimination is carried by `prev_end_voltage_norm`, not a dedicated leftover class.
+  - **`PUL*RES` is merged into `PUL` for training** (`PUL*RES → PUL` in `_load_cell_csvs`). The classifier does not need to tell restores apart because the split is recomputed downstream by `update_pulse` (see inference). Merging removed a hard confusion pair and lifted LOCO accuracy 0.952 → 0.985.
+- **Inference** (`predict_classifier.predict_targets`, gated in `main.py` `_process_cell_inner`): predicts per segment, maps labels back to the cluster-tagged form the `calculate/` step expects: `CAP→CAP*` (`update_capacity` computes `Capacity_py`, refines to `CAP`), `PUL→PUL*` and `qOCV_DCH`/`qOCV_CHA → QOCV*`. **`update_pulse` still runs downstream** and re-splits `PUL*` into `PUL` / `PUL*RES` (restore detection by proc-num adjacency/sign) and applies the duration check — the classifier merges them only so it doesn't have to learn that distinction. `PREP_CHA` / `SOC_ADJUST` pass through unchanged and **surface in the GOLD `target` column** — the `calculate/` step only rewrites `CAP*/PUL*/QOCV*`, so these informational labels do not affect any numeric (capacity/pulse) result. Rows with NaN features → `-1`.
+  - **CSV output is routed to `60_classifier/` on the classifier path** (`_build_paths` `classifier` flag, gated on `classifier_model_path`): the per-segment CSV is written to `<working_path>/60_classifier/with_features_post_labeled/<stem>.csv` (local) and `<minio_prefix>/60_classifier/with_features_post_labeled/<stem>.csv` (MinIO, **untagged**), instead of the HDBSCAN path's `with_features_post_labeled/` (local) / `10_TRACY/with_features_post_labeled/` (MinIO). This keeps the classifier labels side by side with the HDBSCAN training CSVs for A/B comparison without overwriting them, and — since `train_classifier` reads only the tagged `10_TRACY/with_features_post_labeled/` — automatically keeps the (non-training-valid) classifier CSVs out of the training set. **The classifier route writes *only* this CSV.** After the second `_write_x_silver`, `_process_cell_inner` returns early when `classifier_model_path` is set, so `_write_gold`, `export_capacity`, and the optional pulse/qOCV exports are **all skipped** — a classifier run never touches the HDBSCAN GOLD, capacity CSVs, or exports. (The calculate step still runs beforehand, so the CSV carries final labels: `CAP` / `PUL` / `qOCV_DCH` / `qOCV_CHA`.) Consequently `--overwrite` is now safe to use on a classifier run — it regenerates the comparison CSV without disturbing any HDBSCAN output. Note the local skip-check still keys on the HDBSCAN GOLD path, so without `--overwrite` a cell with existing GOLD is skipped before inference runs; use `--overwrite` to (re)produce the classifier CSV.
+  - **`cluster_id` on the classifier path**: `predict_targets` also writes a `cluster_id` column holding the **raw (untagged) predicted label** (`CAP`, `PUL`, `qOCV_DCH`, `qOCV_CHA`, `PREP_CHA`, `SOC_ADJUST`, `-1`), captured *before* the tagged-form map so the DCH/CHA and PUL/restore distinctions are preserved. This mirrors how the HDBSCAN path stores its raw integer cluster in `cluster_id`, and rides through to the local `with_features_post_labeled/<cell>.csv` and its MinIO upload via `_write_x_silver` (the target-sync re-save only rewrites `target`, leaving `cluster_id` intact). **Caveat — this is not a substitute for HDBSCAN labels when building training data.** On the classifier path `cluster_id` is the *classifier's own* string label (useful for provenance/auditing of model output); it is **not** a raw HDBSCAN cluster. `train_classifier` consumes the HDBSCAN leftovers as its negative-class examples — now the named `PREP_CHA` / `SOC_ADJUST` / `-1` that the HDBSCAN path writes into `target` (the raw integer cluster survives only in `cluster_id`) — so assembling new training data still requires a re-run with `classifier_model_path` unset (the HDBSCAN path). Note the type differs by path: integer (HDBSCAN) vs. string (classifier) — consumers treat the column as opaque provenance.
 
 ## Evaluation: fleet-wide capacity aggregation
 
@@ -142,6 +159,22 @@ python -m evaluation.aging_matrix /path/to/battery_config.json
   - MinIO: `<minio_prefix>/50_evaluation/...` (untagged) when `upload_to` includes `minio`.
 
 The notebook's cross-cell-type comparison (VTC vs A123) is intentionally dropped — the pipeline runs one battery config (one cell type) at a time.
+
+## Evaluation: HDBSCAN vs classifier label diff
+
+`evaluation/compare_labels.py` diffs the HDBSCAN and classifier per-segment label sets for the same cells, to see whether the classifier recovers CAP check-ups HDBSCAN missed. Needed because the classifier is trained on HDBSCAN's own labels, so any metric scored against those labels (the LOCO report) counts a recovered CAP as a *false positive* — the improvement is only visible by diffing the two label sets against the structural ground truth (each `BM_Programm` check-up = exactly one CAP).
+
+```bash
+cd src
+python -m evaluation.compare_labels /path/to/battery_config.json
+# --source {local,minio}  (default: config download_from)
+# local overrides: --hdbscan-dir DIR  --classifier-dir DIR
+# -o/--out-dir DIR
+```
+
+- **Source** (`--source`, default = config `download_from`): joins the two label sets per cell on `ID`. `local` reads HDBSCAN labels from `<working_path>/with_features_post_labeled/` and classifier labels from `<working_path>/60_classifier/with_features_post_labeled/`. `minio` reads them via `io_router.list_csv_objects`/`fetch_csv_object` from the tagged `<prefix>/10_TRACY/with_features_post_labeled/` (HDBSCAN) and untagged `<prefix>/60_classifier/with_features_post_labeled/` (classifier) — the diff CSVs are still written locally to `--out-dir`. Prerequisite: run the pipeline twice on the same cells — once HDBSCAN (`classifier_model_path` unset), once classifier (`classifier_model_path` set, `--overwrite`) — so both label sets exist.
+- **Reports** (console + CSV): cell coverage (in both / **classifier-only** = cells HDBSCAN skipped with no CAP cluster, the pure recoveries / HDBSCAN-only); per-`(cell, BM_Programm)` CAP-count delta on shared cells (positive = recovered, negative = dropped); **CAP counts in the classifier-only cells** (whether the cells HDBSCAN gave up on actually got check-ups labeled — and which got none); HDBSCAN→classifier label-transition counts over all disagreements; and every disagreeing segment with the features that explain the call (`Duration_minutes`, `Current_mean`, `Voltage_max/min/range`, `prev_end_voltage_norm`).
+- **Output** (default `<out-dir>` = `<working_path>/50_evaluation`): `label_diff_segments.csv` (per-segment disagreements), `cap_count_diff.csv` (per-program CAP counts + delta on shared cells), and `cap_recovered_cells.csv` (per-program CAP counts for the classifier-only cells). The diff CSVs are always written locally even when `--source minio`.
 
 ## Aging-status monitor
 
@@ -183,17 +216,11 @@ python -m monitor.aging_status /path/to/battery_config.json
 | `export_qocv` | If true, write per-BM_Programm qOCV_DCH / qOCV_CHA parquet files to `30_export_qocv/` (default false) |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/`, consumed by `monitor/aging_status.py` |
 | `running_window_days` | Aging-status monitor: a cell is `running` if its last BRONZE_CU row's `Time` is within this many days of now, else `finished` (default 2) |
+| `classifier_model_path` | Optional. Path to a trained RandomForest (e.g. `<working_path>/60_classifier/models/vtc_classifier_<timestamp>.joblib`), read relative to `src/` or absolute. When set, `_process_cell_inner` uses the learned classifier instead of HDBSCAN + `post_cluster_filter`. **Resolution** (`_resolve_classifier_paths`): if the path exists locally it is loaded directly (`joblib.load`); if it is absent **and** `download_from="minio"`, the `.joblib` + `_meta.json` are fetched by basename from `<minio_prefix>/60_classifier/models/` into a local cache (`<working_path>/60_classifier/models/`, or a temp dir) and loaded from there — so on a fresh machine you can point at just the model basename and let MinIO supply it (only the **basename** is used as the MinIO object name). With `download_from="local"` there is no fetch: a missing file raises a clear `FileNotFoundError`. Omit (default) to keep the HDBSCAN path. |
+| `classifier_meta_path` | Optional. Path to the classifier metadata JSON. Defaults to `<classifier_model_path stem>_meta.json`. |
 
 `hdbscan_para_layer_1["min_cluster_size"]` defaults to `max(2, n_programs − 1)` at runtime. If `min_cluster_size` is explicitly set in the config JSON, that value takes precedence (config key is merged last via `{defaults, **cfg["hdbscan_para_layer_1"]}`).
 `hdbscan_para_layer_1["cluster_selection_epsilon"]` must be **0.3** (not 3.0) for correct qOCV separation.
-
-## qOCV detection note
-
-qOCV procedures come in discharge+charge pairs per aging cycle. Their signed `Current_mean` ≈ 0 (cancels), making them indistinguishable from rest segments if only signed current is used. `abs_Current_mean` is added to Layer 1 features to break this degeneracy. Layer 1 `cluster_selection_epsilon = 0.3` (tight) is required — 3.0 merges qOCV with rests.
-
-**Type coercion fix** (`cluster/model_and_supervise.py` `merge_target`): previously used `fillna` to merge Layer 1 integer cluster labels with Layer 2 string labels (`"cap_layer_N"`). NaNs in the string column forced int64→float64 coercion, so labels became `1.0`, `2.0` etc., causing `isin([np.int32(N)])` in `concat_clusters` to match 0 rows and produce no `QOCV*` labels. Fixed by using `.where(notna, target_x.astype(object))` to preserve integer types.
-
-**Pre-labeled target preservation fix** (`main.py` `_run_clustering`): both branches of the layer-1/layer-2 split previously rebuilt `df_clustered` via `df.drop(columns=["target"]).merge(X_clustered[...], how="left")`. This erased pre-labeled targets ("PAU", "EIS") for rows not present in `X_clustered` (which only contains clustered IDs), leaving them as NaN in GOLD. Fixed by replacing both merges with `merge_target(df, X_clustered)`, which falls back to the original target when no cluster result exists for an ID.
 
 ## Restore pulse structure
 
@@ -208,8 +235,8 @@ Restore pulses are **not dropped** — they are labelled `PUL*RES` in both the G
 
 ## Configuration
 
-- **Battery parameters**: JSON config file passed to `main.py` (e.g. `battery_config_VTC_linux.json` in the data directory).
-- **MinIO/Ahjo credentials**: `config.json` at project root (gitignored). Copy structure from `config_SE_example.json`. Also available via env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`.
+- **Battery parameters**: JSON config file passed to `main.py` (e.g. `battery_config_VTC_linux.json` in the data directory). See `battery_config_example.json` at project root for the full current schema (cell/voltage/CAP/pulse/qOCV params, `tolerances`, HDBSCAN layers, `download_from`/`upload_to` routing + MinIO keys, and the optional `classifier_model_path` / `classifier_meta_path`).
+- **MinIO/Ahjo credentials**: `config.json` at project root (gitignored). Copy structure from `config_example.json` (a `minio` block: `endpoint` / `access_key` / `secret_key` / `bucket_name`). Also available via env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`.
 - **Data path**: set `working_path` in the config JSON. BRONZE_CU parquet files must be under `<working_path>/BRONZE_CU/`.
 
 ## CLI flags
@@ -221,15 +248,7 @@ Restore pulses are **not dropped** — they are labelled `PUL*RES` in both the G
 
 ## Post-labeling target sync
 
-After all three `df_gold.update(...)` calls in `_process_cell`, final targets are propagated back to `with_features_post_labeled/<cell>.csv`:
-
-```python
-target_map = df_gold.groupby("ID")["target"].first()
-X_silver["target"] = X_silver["ID"].map(target_map).fillna(X_silver["target"])
-X_silver.to_csv(paths["X_silver"], index=False)
-```
-
-This overwrites the intermediate clustering labels (CAP\*, PUL\*, QOCV\*) with the final calculated targets (CAP, PUL, PUL\*RES, qOCV\_DCH, qOCV\_CHA, −1). Numeric HDBSCAN labels not matched to any test type are left as-is (to be set to −1 in a future cleanup step).
+After the `df_gold.update(...)` calls in `_process_cell`, final targets are propagated back into `with_features_post_labeled/<cell>.csv` by mapping `df_gold`'s per-`ID` target onto `X_silver` and re-saving. This overwrites the intermediate clustering labels (CAP\*, PUL\*, QOCV\*) with the final calculated targets (CAP, PUL, PUL\*RES, qOCV\_DCH, qOCV\_CHA, −1). Numeric HDBSCAN labels not matched to any test type are left as-is.
 
 ## Field-data track (`src/field/`)
 
@@ -238,38 +257,6 @@ Parallel pipeline for **EV field data** (driving + charging + parking telemetry 
 Reference dataset: **RWTH Aachen "Electric Vehicle and Battery Data"** (DOI 10.18154/RWTH-2024-01907, CC BY 4.0), 9 vehicles (1× iMiEV, 2× iOn, 6× Smart), 2014–2016 geriatric-care fleet. Unzipped at `<working_data>/field_data/rwth_aachen/`. Four tracks: `field_test/<vehicle>.parquet` (raw real-world time series), `capacity_test/<vehicle>_capacity_tests.parquet` (periodic dyno SOH refs — ground truth), `charging_curves/`, `trip_data/`.
 
 The TUM FTM UDS dataset (https://github.com/TUMFTM/electric-vehicle-uds-dataset) was the first pick but its GitHub LFS budget is exhausted — only the 286 session JSONs came through, the per-vehicle parquet files are unreachable. Kept at `<working_data>/field_data/tum_uds/` for later.
-
-**Stage F1 — `field/io_rwth.py`** (adapter, smoke-testable via `python -m field.io_rwth [base_dir]`):
-- `load_field_test(path)` → DataFrame with canonical schema `Time / Voltage / Current / Temperature / SOC / Speed / Odometer / Power` (extras preserved). Renames `Temp_Ambient→Temperature`, `SoC_Real→SOC`. Converts `time_num` (MATLAB datenum, days since 0000-01-01) to UTC datetime via `pd.to_datetime(time_num - 719529, unit='D', utc=True)`. Drops leading rows where Voltage/Current/Temperature are all NaN (BMS signals lag SOC at log start).
-- `load_capacity_test(path)` → same canonical columns plus `test_number`, `test_direction` (1=charge, 2=discharge), `Power_AC`.
-- `list_field_test_vehicles(base_dir)`, `field_test_path()`, `capacity_test_path()` — directory helpers.
-
-Data quirks surfaced by the smoke test: Smart-5 has zero `Power_AC` (no AC charging logged); iMiEV-1's field_test has ~50% non-null Temperature/SOC (sparser logger). Both vehicles still produce usable Voltage/Current/SOC streams.
-
-**Stage F2 — `field/segment.py`** (DRIVE/CHARGE/REST segmenter, smoke-testable via `python -m field.segment [base_dir] [--vehicle V] [--trips ...]`):
-
-Key insight from the RWTH data — the BMS logger sleeps when the car is parked with key off, so REST shows up as the *absence* of rows, not as low-current samples. The active sample coverage of wall-clock time is only ~2–3 %.
-
-Segmentation model:
-- **REST** = any inter-row Δt > `gap_threshold_s` (default 300 s) becomes a synthetic REST segment spanning `(Time[i], Time[i+1])` with `n_rows = 0`.
-- **CHARGE** = a maximal run of consecutive rows with `Current > i_charge_threshold` (default 0.5 A) whose wall-clock duration is at least `min_charge_duration_s` (default 60 s). The duration requirement intentionally excludes brief regen-braking bursts during driving (median positive-current run is ~2 s on the Smart fleet).
-- **DRIVE** = everything else inside an active session.
-
-Sign convention (RWTH): positive Current = charging (SOC rises). Verified at runtime by `check_sign_convention` against dSOC/dt — using Speed is unreliable because regen produces positive current with nonzero Speed.
-
-`to_segments(df_with_state, *, gap_threshold_s=300)` collapses the per-row state into one row per segment (columns: `segment_id, state, start_time, end_time, duration_s, n_rows, Current_mean, Voltage_mean, SOC_start, SOC_end, Speed_max, distance_km`).
-
-`validate_against_trips(segments, trips, vehicle)` matches DRIVE segments to ground-truth `trip_data/*_datafile.parquet` rows by time overlap. Fleet-wide validation (vehicles present in GeriatricCare trip file):
-
-| Vehicle | trips | DRIVE segs | recall | precision | median \|ΔSOC error\| |
-|---------|-------|-----------|--------|-----------|----------------------|
-| Smart-1 | 5 708 | 5 101 | 99.5 % | 99.0 % | 0.1 % |
-| Smart-3 | 2 192 | 2 119 | 99.3 % | 98.8 % | 0.1 % |
-| iMiEV-1 | 1 508 | 3 022 | 99.9 % | 45.5 % | 0.5 % |
-
-iMiEV-1's low precision is a known over-segmentation case — its logger has intra-trip gaps > 300 s, so the gap rule splits single trips into multiple DRIVE segments. Each trip still gets recovered (recall is 99.9 %).
-
-Charging is rarely visible in `field_test/*` because the logger is usually off while the car charges. Of 5 095 long gaps on Smart-1, only 6 show SOC rise > 5 % with valid SOC on both sides; most real charging activity lives in `capacity_test/*` and in cross-gap SOC jumps that F3 will detect later.
 
 **Stage F1 (shiyunliu) — `field/io_shiyunliu.py`** (adapter for the on-road EV charging dataset, smoke-testable via `python -m field.io_shiyunliu [base_dir]`):
 
@@ -293,7 +280,7 @@ Charging-session segmentation (per the dataset's own `capacity_extract.py`): `dt
 - F4 — coulomb-count CAP-cluster sessions → SOH timeline per vehicle; emit `40_capacity_monitore`-shaped CSV so the existing aging-status monitor and aging matrix run unchanged.
 - F5 — benchmark our extracted capacities against the dataset author's published Fig1.png values.
 
-**Legacy code from earlier scopes** (kept for reference): `io_rwth.py` (RWTH Aachen adapter) and `segment.py` (rule-based DRIVE/CHARGE/REST segmenter that was the F2 of an earlier plan). Both remain useful as sibling adapters / reference implementations; neither is on the path of the current shiyunliu work.
+**Legacy code from earlier scopes** (kept for reference): `io_rwth.py` (RWTH Aachen adapter) and `segment.py` (rule-based DRIVE/CHARGE/REST segmenter). Neither is on the path of the current shiyunliu work.
 
 ## Documentation
 

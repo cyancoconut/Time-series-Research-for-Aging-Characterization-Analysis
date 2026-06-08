@@ -1,0 +1,8 @@
+{
+    "minio": {
+        "endpoint": "your-minio-host:9000",
+        "access_key": "your_access_key",
+        "secret_key": "your_secret_key",
+        "bucket_name": "projects"
+    }
+}
