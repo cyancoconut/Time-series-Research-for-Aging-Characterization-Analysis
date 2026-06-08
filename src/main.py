@@ -318,7 +318,7 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     soh = _build_soh_map(df_export, cfg["nom_capacity"])
     export_capacity(df_export, soh, cell, cfg, paths, minio_client)
     if cfg.get("export_pulse"):
-        export_pulse(df_export, soh, cell, cfg, paths, minio_client)
+        export_pulse(df_export, soh, cell, cfg, paths, minio_client, bronze_path)
     if cfg.get("export_qocv"):
         export_qocv(df_export, soh, cell, cfg, paths, minio_client)
 
