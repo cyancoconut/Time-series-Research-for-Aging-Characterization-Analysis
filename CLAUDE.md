@@ -61,7 +61,7 @@ BRONZE_CU → preSILVER → SILVER → GOLD
 
 - **BRONZE_CU**: raw check-up cycler export (CU = check-up), German columns, unsegmented
 - **preSILVER**: segmented into discrete procedures; long PAU pauses (> `pau_duration`) are reduced to first+last row stubs (target="PAU"), short pauses discarded, short segments dropped, columns renamed to English. Written to disk for debugging.
-- **SILVER**: preSILVER with cluster labels merged back. Written to disk for debugging. In `main.py`, held in memory as `df_silver` — the `"silver"` path in `_build_paths` is unused dead code.
+- **SILVER**: preSILVER with cluster labels merged back. Written to disk for debugging. In `main.py`, held in memory as `df_silver`.
 - **GOLD**: SILVER enriched with calculated metrics (capacity, pulse resistance, qOCV)
 
 A CSV helper layer supports the clustering step (not time-series — one row per segment):
@@ -222,14 +222,6 @@ python -m monitor.aging_status /path/to/battery_config.json
 `hdbscan_para_layer_1["min_cluster_size"]` defaults to `max(2, n_programs − 1)` at runtime. If `min_cluster_size` is explicitly set in the config JSON, that value takes precedence (config key is merged last via `{defaults, **cfg["hdbscan_para_layer_1"]}`).
 `hdbscan_para_layer_1["cluster_selection_epsilon"]` must be **0.3** (not 3.0) for correct qOCV separation.
 
-## qOCV detection note
-
-qOCV procedures come in discharge+charge pairs per aging cycle. Their signed `Current_mean` ≈ 0 (cancels), making them indistinguishable from rest segments if only signed current is used. `abs_Current_mean` is added to Layer 1 features to break this degeneracy. Layer 1 `cluster_selection_epsilon = 0.3` (tight) is required — 3.0 merges qOCV with rests.
-
-**Type coercion fix** (`cluster/model_and_supervise.py` `merge_target`): previously used `fillna` to merge Layer 1 integer cluster labels with Layer 2 string labels (`"cap_layer_N"`). NaNs in the string column forced int64→float64 coercion, so labels became `1.0`, `2.0` etc., causing `isin([np.int32(N)])` in `concat_clusters` to match 0 rows and produce no `QOCV*` labels. Fixed by using `.where(notna, target_x.astype(object))` to preserve integer types.
-
-**Pre-labeled target preservation fix** (`main.py` `_run_clustering`): both branches of the layer-1/layer-2 split previously rebuilt `df_clustered` via `df.drop(columns=["target"]).merge(X_clustered[...], how="left")`. This erased pre-labeled targets ("PAU", "EIS") for rows not present in `X_clustered` (which only contains clustered IDs), leaving them as NaN in GOLD. Fixed by replacing both merges with `merge_target(df, X_clustered)`, which falls back to the original target when no cluster result exists for an ID.
-
 ## Restore pulse structure
 
 After each test pulse a restore pulse returns the cell to its original SoC. All restore pulses run at C/2. The C/2 restores (20 s) are filtered in `update_pulse` by `_filter_restore_pulses`: within each BM_Programm, a PUL* segment is a restore if **all three** conditions hold:
@@ -256,15 +248,7 @@ Restore pulses are **not dropped** — they are labelled `PUL*RES` in both the G
 
 ## Post-labeling target sync
 
-After all three `df_gold.update(...)` calls in `_process_cell`, final targets are propagated back to `with_features_post_labeled/<cell>.csv`:
-
-```python
-target_map = df_gold.groupby("ID")["target"].first()
-X_silver["target"] = X_silver["ID"].map(target_map).fillna(X_silver["target"])
-X_silver.to_csv(paths["X_silver"], index=False)
-```
-
-This overwrites the intermediate clustering labels (CAP\*, PUL\*, QOCV\*) with the final calculated targets (CAP, PUL, PUL\*RES, qOCV\_DCH, qOCV\_CHA, −1). Numeric HDBSCAN labels not matched to any test type are left as-is (to be set to −1 in a future cleanup step).
+After the `df_gold.update(...)` calls in `_process_cell`, final targets are propagated back into `with_features_post_labeled/<cell>.csv` by mapping `df_gold`'s per-`ID` target onto `X_silver` and re-saving. This overwrites the intermediate clustering labels (CAP\*, PUL\*, QOCV\*) with the final calculated targets (CAP, PUL, PUL\*RES, qOCV\_DCH, qOCV\_CHA, −1). Numeric HDBSCAN labels not matched to any test type are left as-is.
 
 ## Field-data track (`src/field/`)
 
@@ -273,38 +257,6 @@ Parallel pipeline for **EV field data** (driving + charging + parking telemetry 
 Reference dataset: **RWTH Aachen "Electric Vehicle and Battery Data"** (DOI 10.18154/RWTH-2024-01907, CC BY 4.0), 9 vehicles (1× iMiEV, 2× iOn, 6× Smart), 2014–2016 geriatric-care fleet. Unzipped at `<working_data>/field_data/rwth_aachen/`. Four tracks: `field_test/<vehicle>.parquet` (raw real-world time series), `capacity_test/<vehicle>_capacity_tests.parquet` (periodic dyno SOH refs — ground truth), `charging_curves/`, `trip_data/`.
 
 The TUM FTM UDS dataset (https://github.com/TUMFTM/electric-vehicle-uds-dataset) was the first pick but its GitHub LFS budget is exhausted — only the 286 session JSONs came through, the per-vehicle parquet files are unreachable. Kept at `<working_data>/field_data/tum_uds/` for later.
-
-**Stage F1 — `field/io_rwth.py`** (adapter, smoke-testable via `python -m field.io_rwth [base_dir]`):
-- `load_field_test(path)` → DataFrame with canonical schema `Time / Voltage / Current / Temperature / SOC / Speed / Odometer / Power` (extras preserved). Renames `Temp_Ambient→Temperature`, `SoC_Real→SOC`. Converts `time_num` (MATLAB datenum, days since 0000-01-01) to UTC datetime via `pd.to_datetime(time_num - 719529, unit='D', utc=True)`. Drops leading rows where Voltage/Current/Temperature are all NaN (BMS signals lag SOC at log start).
-- `load_capacity_test(path)` → same canonical columns plus `test_number`, `test_direction` (1=charge, 2=discharge), `Power_AC`.
-- `list_field_test_vehicles(base_dir)`, `field_test_path()`, `capacity_test_path()` — directory helpers.
-
-Data quirks surfaced by the smoke test: Smart-5 has zero `Power_AC` (no AC charging logged); iMiEV-1's field_test has ~50% non-null Temperature/SOC (sparser logger). Both vehicles still produce usable Voltage/Current/SOC streams.
-
-**Stage F2 — `field/segment.py`** (DRIVE/CHARGE/REST segmenter, smoke-testable via `python -m field.segment [base_dir] [--vehicle V] [--trips ...]`):
-
-Key insight from the RWTH data — the BMS logger sleeps when the car is parked with key off, so REST shows up as the *absence* of rows, not as low-current samples. The active sample coverage of wall-clock time is only ~2–3 %.
-
-Segmentation model:
-- **REST** = any inter-row Δt > `gap_threshold_s` (default 300 s) becomes a synthetic REST segment spanning `(Time[i], Time[i+1])` with `n_rows = 0`.
-- **CHARGE** = a maximal run of consecutive rows with `Current > i_charge_threshold` (default 0.5 A) whose wall-clock duration is at least `min_charge_duration_s` (default 60 s). The duration requirement intentionally excludes brief regen-braking bursts during driving (median positive-current run is ~2 s on the Smart fleet).
-- **DRIVE** = everything else inside an active session.
-
-Sign convention (RWTH): positive Current = charging (SOC rises). Verified at runtime by `check_sign_convention` against dSOC/dt — using Speed is unreliable because regen produces positive current with nonzero Speed.
-
-`to_segments(df_with_state, *, gap_threshold_s=300)` collapses the per-row state into one row per segment (columns: `segment_id, state, start_time, end_time, duration_s, n_rows, Current_mean, Voltage_mean, SOC_start, SOC_end, Speed_max, distance_km`).
-
-`validate_against_trips(segments, trips, vehicle)` matches DRIVE segments to ground-truth `trip_data/*_datafile.parquet` rows by time overlap. Fleet-wide validation (vehicles present in GeriatricCare trip file):
-
-| Vehicle | trips | DRIVE segs | recall | precision | median \|ΔSOC error\| |
-|---------|-------|-----------|--------|-----------|----------------------|
-| Smart-1 | 5 708 | 5 101 | 99.5 % | 99.0 % | 0.1 % |
-| Smart-3 | 2 192 | 2 119 | 99.3 % | 98.8 % | 0.1 % |
-| iMiEV-1 | 1 508 | 3 022 | 99.9 % | 45.5 % | 0.5 % |
-
-iMiEV-1's low precision is a known over-segmentation case — its logger has intra-trip gaps > 300 s, so the gap rule splits single trips into multiple DRIVE segments. Each trip still gets recovered (recall is 99.9 %).
-
-Charging is rarely visible in `field_test/*` because the logger is usually off while the car charges. Of 5 095 long gaps on Smart-1, only 6 show SOC rise > 5 % with valid SOC on both sides; most real charging activity lives in `capacity_test/*` and in cross-gap SOC jumps that F3 will detect later.
 
 **Stage F1 (shiyunliu) — `field/io_shiyunliu.py`** (adapter for the on-road EV charging dataset, smoke-testable via `python -m field.io_shiyunliu [base_dir]`):
 
@@ -328,7 +280,7 @@ Charging-session segmentation (per the dataset's own `capacity_extract.py`): `dt
 - F4 — coulomb-count CAP-cluster sessions → SOH timeline per vehicle; emit `40_capacity_monitore`-shaped CSV so the existing aging-status monitor and aging matrix run unchanged.
 - F5 — benchmark our extracted capacities against the dataset author's published Fig1.png values.
 
-**Legacy code from earlier scopes** (kept for reference): `io_rwth.py` (RWTH Aachen adapter) and `segment.py` (rule-based DRIVE/CHARGE/REST segmenter that was the F2 of an earlier plan). Both remain useful as sibling adapters / reference implementations; neither is on the path of the current shiyunliu work.
+**Legacy code from earlier scopes** (kept for reference): `io_rwth.py` (RWTH Aachen adapter) and `segment.py` (rule-based DRIVE/CHARGE/REST segmenter). Neither is on the path of the current shiyunliu work.
 
 ## Documentation
 
