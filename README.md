@@ -67,7 +67,7 @@ pip install -r requirements.txt         # other platforms
 | `export_pulse` | If `true`, write per-`BM_Programm` PUL parquet files to `<working_path>/20_export_pulse/<cell_stem>/` (and to MinIO under `<minio_prefix>/20_export_pulse/<cell_stem>/` when `upload_to` includes `"minio"`). Default `false`. |
 | `export_qocv` | If `true`, write per-`BM_Programm` qOCV_DCH / qOCV_CHA parquet files to `<working_path>/30_export_qocv/<cell_stem>/` (and the matching MinIO path). Default `false`. |
 
-**Credentials** — `config.json` at project root (gitignored). Copy structure from `config_SE_example.json`. Also accepts env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`. The MinIO endpoint, bucket and prefix live in the **battery config** alongside the routing keys above.
+**Credentials** — `config.json` at project root (gitignored). Copy structure from `config_example.json` (a `minio` block: `endpoint` / `access_key` / `secret_key` / `bucket_name`). Also accepts env vars: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `INFLUX_TOKEN`. A full main-pipeline config example lives at `battery_config_example.json`. The MinIO endpoint, bucket and prefix live in the **battery config** alongside the routing keys above.
 
 ## Running the pipeline
 

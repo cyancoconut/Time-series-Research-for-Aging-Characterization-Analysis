@@ -13,3 +13,7 @@ dig2mat.log
 /.metabatt_ui_download.json
 /.claude/
 /src/debug_monitor.py
+# Trained classifier artifacts live under the data folder
+# (<working_path>/60_classifier/models/); the repo /models/ is only the
+# fallback when working_path is unset and must not be committed.
+/models/

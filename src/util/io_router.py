@@ -255,9 +255,86 @@ def gold_object_key(cell: str) -> str:
     return f"GOLD/{cell}"
 
 
-def x_silver_object_key(cell: str) -> str:
+def fetch_model_bytes(client: Minio, cfg: dict, filename: str) -> bytes:
+    """Fetch a classifier artifact from `<prefix>/60_classifier/models/<filename>`.
+
+    The trainer uploads model + meta there untagged; this is the read side used
+    when `classifier_model_path` is not present locally (cross-machine inference).
+    """
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/60_classifier/models/{filename}"
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def list_csv_objects(client: Minio, cfg: dict, rel_dir: str) -> list:
+    """List `*.csv` basenames under `<prefix>/<rel_dir>/` on MinIO.
+
+    Generic counterpart of `list_x_silver_cells` for arbitrary relative dirs
+    (e.g. `10_TRACY/with_features_post_labeled`, `60_classifier/with_features_post_labeled`).
+    """
+    bucket = cfg["bucket_name"]
+    base = f"{cfg['minio_prefix']}/{rel_dir.rstrip('/')}/"
+    objs = client.list_objects(bucket, prefix=base, recursive=False)
+    return sorted(
+        os.path.basename(o.object_name)
+        for o in objs
+        if o.object_name.endswith(".csv")
+    )
+
+
+def fetch_csv_object(client: Minio, cfg: dict, rel_dir: str, name: str) -> bytes:
+    """Fetch one `<prefix>/<rel_dir>/<name>` CSV payload from MinIO."""
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/{rel_dir.rstrip('/')}/{name}"
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def x_silver_object_key(cell: str, classifier: bool = False) -> str:
     stem = cell.split(".")[0]
+    # Classifier-path CSVs go to 60_classifier/ (untagged, caller passes
+    # include_tag=False) so they sit beside the model and stay out of the tagged
+    # 10_TRACY/with_features_post_labeled/ that train_classifier consumes.
+    if classifier:
+        return f"60_classifier/with_features_post_labeled/{stem}.csv"
     return f"with_features_post_labeled/{stem}.csv"
+
+
+def list_x_silver_cells(client: Minio, cfg: dict) -> list:
+    """List the `with_features_post_labeled/*.csv` object names on MinIO.
+
+    These are uploaded tagged (`upload_csv` default `include_tag=True`), so they
+    live under `<prefix>/10_TRACY/with_features_post_labeled/`.
+    """
+    bucket = cfg["bucket_name"]
+    base = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/with_features_post_labeled/"
+    objs = client.list_objects(bucket, prefix=base, recursive=False)
+    return sorted(
+        os.path.basename(o.object_name)
+        for o in objs
+        if o.object_name.endswith(".csv")
+    )
+
+
+def fetch_x_silver_bytes(client: Minio, cfg: dict, name: str) -> bytes:
+    """Fetch one `with_features_post_labeled/<name>.csv` payload from MinIO."""
+    bucket = cfg["bucket_name"]
+    key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/with_features_post_labeled/{name}"
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
 
 
 def export_pulse_object_key(cell: str, filename: str) -> str:

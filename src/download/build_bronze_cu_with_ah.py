@@ -5,10 +5,10 @@ for each cell by downloading each test file exactly once.
 For each file:
   - All rows, Zeit + Strom  -> Ah throughput accumulator (full timeline)
   - CU file: all rows, all columns -> BRONZE_CU
-  - Non-CU file: first row only, all columns + Prozedur name -> BRONZE_CU stub
+  - Non-CU file: first + last row, all columns + Prozedur name -> BRONZE_CU stub
 
 Ah_throughput is computed over the full timeline (all files) and merged
-into BRONZE_CU by Zeit, so stubs receive the Ah value at their first row.
+into BRONZE_CU by Zeit, so stubs receive the Ah value at each stub row.
 
 Usage:
     cd src
@@ -39,6 +39,7 @@ import argparse
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 from minio import Minio
 from minio.error import S3Error
@@ -186,20 +187,43 @@ def process_cell(
             ah_frames.append(df[["Zeit", "Strom"]].copy())
             tests.append(df)
         else:
-            # stub: first row only, all columns; reuse table for Ah extraction
+            # Non-CU: open via ParquetFile on the in-memory bytes. Read
+            # Zeit+Strom for the Ah accumulator (full cycling timeline,
+            # column-projected) and first+last rows (all columns) for the
+            # BRONZE_CU stub — no full pandas materialization of the file.
             try:
-                table = pq.read_table(io.BytesIO(data))
-                stub = table.slice(0, 1).to_pandas()
+                pf = pq.ParquetFile(io.BytesIO(data))
+            except Exception as e:
+                print(f"  Error opening {object_name}: {e}")
+                continue
+
+            n_rows = pf.metadata.num_rows
+            n_rg = pf.num_row_groups
+            if n_rows == 0 or n_rg == 0:
+                continue
+
+            try:
+                ah_frames.append(pf.read(columns=["Zeit", "Strom"]).to_pandas())
+            except Exception as e:
+                print(f"  Error reading Zeit/Strom from {object_name}: {e}")
+
+            try:
+                first_rg = pf.read_row_group(0)
+                if n_rows == 1:
+                    stub = first_rg.slice(0, 1).to_pandas()
+                else:
+                    last_rg = (
+                        first_rg if n_rg == 1 else pf.read_row_group(n_rg - 1)
+                    )
+                    stub = pa.concat_tables([
+                        first_rg.slice(0, 1),
+                        last_rg.slice(last_rg.num_rows - 1, 1),
+                    ]).to_pandas()
             except Exception as e:
                 print(f"  Error reading stub from {object_name}: {e}")
                 continue
             stub["Prozedur"] = _programme_name(object_name)
             tests.append(stub)
-
-            try:
-                ah_frames.append(table.select(["Zeit", "Strom"]).to_pandas())
-            except Exception as e:
-                print(f"  Error reading Zeit/Strom from {object_name}: {e}")
 
     if not tests:
         print(f"{cell} - no data loaded.")
