@@ -289,13 +289,24 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
 
     _write_x_silver(X_silver, cell, cfg, paths, minio_client)
 
-    # Classifier route: the per-segment CSV (written to 60_classifier/ above) is
-    # the sole output. Skip GOLD, capacity, and pulse/qOCV exports so a classifier
-    # run never overwrites the HDBSCAN GOLD/exports — it produces only the
-    # comparison CSV. The calculate step already ran, so the CSV carries final
-    # labels (CAP / PUL / qOCV_DCH / qOCV_CHA).
+    # Capacity CSV (40_capacity_monitore) is written on BOTH the HDBSCAN and the
+    # classifier path so the aging monitor/matrix get Ah_throughput regardless of
+    # which labeller ran. df_gold is already fully calculated above (capacity
+    # included), and Ah_throughput is derived in dismember when BRONZE_CU lacks it.
+    df_export = df_gold[
+        df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA", "PAU"])
+    ]
+    soh = _build_soh_map(df_export, cfg["nom_capacity"])
+    export_capacity(df_export, soh, cell, cfg, paths, minio_client)
+
+    # Classifier route: the per-segment CSV (written to 60_classifier/ above) and
+    # the capacity CSV above are the outputs. Skip the GOLD parquet and pulse/qOCV
+    # exports so a classifier run never overwrites the HDBSCAN GOLD/exports — the
+    # calculate step already ran, so the CSV carries final labels (CAP / PUL /
+    # qOCV_DCH / qOCV_CHA). Aging metadata (DOD/SOC/C_Rate/Temp) for the matrix
+    # still comes from the HDBSCAN GOLD's Prozedur, so run HDBSCAN first if none.
     if classifier_path:
-        logging.info(f"{cell}: classifier route — wrote CSV only, skipping GOLD/exports")
+        logging.info(f"{cell}: classifier route — wrote CSV + capacity, skipping GOLD/pulse/qOCV")
         return
 
     # TODO: consider moving the labeling and schedule preparation steps to a separate visualization module that takes the GOLD output as input, to keep the core pipeline focused on data processing and calculation. For now, we'll include it here for simplicity.
@@ -312,11 +323,6 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
 
     _write_gold(df_gold, cell, cfg, paths, minio_client)
 
-    df_export = df_gold[
-        df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA", "PAU"])
-    ]
-    soh = _build_soh_map(df_export, cfg["nom_capacity"])
-    export_capacity(df_export, soh, cell, cfg, paths, minio_client)
     if cfg.get("export_pulse"):
         export_pulse(df_export, soh, cell, cfg, paths, minio_client, bronze_path)
     if cfg.get("export_qocv"):
