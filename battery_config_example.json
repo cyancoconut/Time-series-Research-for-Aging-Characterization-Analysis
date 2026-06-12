@@ -53,6 +53,10 @@
     "classifier_model_path": "models/vtc_classifier.joblib",
     "classifier_meta_path": "models/vtc_classifier_meta.json",
 
+    "llm_provider": "openai",
+    "llm_model": "gpt-5.2",
+    "llm_base_url": "https://chat.kiconnect.nrw/api/v1",
+
     "download_from": "local",
     "upload_to": "local",
     "minio_endpoint": "your-minio-host:9000",

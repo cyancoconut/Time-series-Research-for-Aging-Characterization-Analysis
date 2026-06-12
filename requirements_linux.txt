@@ -1,5 +1,6 @@
 absl-py==2.1.0
 annotated-types==0.7.0
+anthropic==0.109.1
 argon2-cffi==23.1.0
 argon2-cffi-bindings==21.2.0
 asttokens==2.4.1
@@ -79,6 +80,7 @@ natsort==8.4.0
 nbformat==5.10.4
 nest-asyncio==1.6.0
 numpy==2.0.0
+openai==2.41.1
 openpyxl==3.1.5
 opt_einsum==3.4.0
 optree==0.14.0
