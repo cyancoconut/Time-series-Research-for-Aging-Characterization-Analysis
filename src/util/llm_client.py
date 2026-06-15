@@ -21,7 +21,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
-DEFAULT_OPENAI_MODEL = "gpt-5.2"
+DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 
 
@@ -79,10 +79,19 @@ Label format — SHORT, essentials only: "<procedure>" or "<procedure>_<crate>" 
 in snake_case. Procedure is one of: "full_charge", "full_discharge", \
 "partial_cha", "partial_dch", "pulse", "qocv", "rest", "artifact". Do NOT \
 distinguish qocv charge from discharge, or test pulses from restore pulses — \
-both are just "qocv" / "pulse". Use "full_charge" / "full_discharge" when true_voltage_range is close to 1. \
-Use "partial_cha" / "partial_dch" when true_voltage_range is substantially \
-less than 1. Use "qocv" when true_voltage_range is close to 1 at a very low \
-C-rate; a low-rate sweep over a partial window is "partial_cha"/"partial_dch". Append the C-rate only when it is meaningful \
+both are just "qocv" / "pulse". \
+Decide the label in this STRICT ORDER. STEP 1 — full vs partial, by \
+true_voltage_range ALONE, hard cutoff 0.9: true_voltage_range >= 0.9 = FULL \
+(spans essentially the whole SoC window); true_voltage_range < 0.9 = PARTIAL. \
+Nothing else changes this — not duration, not C-rate. A long, low-rate sweep \
+that only covers part of the window is PARTIAL. STEP 2 — only now look at \
+C-rate. If PARTIAL: the label is "partial_cha" (charge) or "partial_dch" \
+(discharge), FULL STOP — a partial segment is NEVER "qocv", "full_charge" or \
+"full_discharge", however low its current or however long it lasts. If FULL \
+and the C-rate is very low (~C/20 or below): "qocv". If FULL and the C-rate is \
+higher: "full_charge" / "full_discharge". So "qocv" REQUIRES true_voltage_range \
+>= 0.9; a low-rate quasi-OCV-looking sweep with true_voltage_range < 0.9 is \
+"partial_cha"/"partial_dch", not "qocv". Append the C-rate only when it is meaningful \
 and well-defined, written as "c2" (= C/2), "1c", "c20" etc., e.g. \
 "full_discharge_c2", "full_discharge_1c", "qocv_c20", "partial_cha_c3". \
 If the cluster mixes distinct behaviors beyond that, prefix "mixed_" on the \
