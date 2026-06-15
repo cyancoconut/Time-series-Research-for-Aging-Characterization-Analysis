@@ -220,7 +220,9 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
             cfg, minio_client, classifier_path, meta_path, cell
         )
         logging.info(f"{cell}: classifying segments via {classifier_path}")
-        X_silver = predict_targets(X_features, classifier_path, meta_path)
+        X_silver = predict_targets(
+            X_features, classifier_path, meta_path, cap_rate=cfg.get("cap_rate")
+        )
         df_silver = model_and_supervise.merge_target(dismembered_df, X_silver)
         for col in df_silver.columns:
             if df_silver[col].dtype == "object":
