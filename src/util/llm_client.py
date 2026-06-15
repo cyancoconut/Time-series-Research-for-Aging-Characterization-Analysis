@@ -26,10 +26,10 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 
 
 class ClusterLabel(BaseModel):
-    # Free-form: the LLM invents its own concise snake_case name for the
-    # cluster (e.g. "cap_discharge_c2", "full_discharge_1c", "qocv_cha_c20").
-    # Deliberately NOT constrained to the pipeline taxonomy, so the
-    # interpretation is an independent second opinion next to `target`.
+    # Short snake_case name: "<procedure>[_<crate>]" (e.g. "full_discharge_1c",
+    # "qocv_c20", "pulse", "partial_cha_c3"). Deliberately NOT constrained to
+    # the pipeline taxonomy, so the interpretation is an independent second
+    # opinion next to `target`.
     label: str
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str
@@ -53,26 +53,43 @@ Feature semantics (all scale-free / chemistry-portable):
 - Current_mean: signed mean current normalized by nominal capacity, i.e. a \
 C-rate. Positive = charge, negative = discharge. abs_Current_mean = |.|.
 - Voltage_max / Voltage_min / Voltage_range: segment voltage edges normalized \
-by the cell's (V_max - V_min) window. Voltage_range ~ SoC swing of the segment.
+by the cell's (V_max - V_min) window. Voltage_range is the within-segment \
+swing, but is distorted for charges/discharges because a PAU pause between \
+procedures lets the cell voltage relax toward OCV before the segment starts. \
+- true_voltage_range: the corrected SoC swing — for charges: \
+Voltage_max - prev_end_voltage_norm; for discharges: \
+prev_end_voltage_norm - Voltage_min. Use this (not Voltage_range) to judge \
+whether the segment is full or partial. Falls back to Voltage_range when \
+prev_end_voltage_norm = -1 (no predecessor).
 - Duration_minutes: segment length. Duration_quartile = log1p(Duration_minutes).
 - prev_end_voltage_norm: end-of-segment voltage of the nearest preceding \
-non-pause segment, / V_max. ~1.0 means the segment started from a full cell.
+non-pause segment, normalized the same way as Voltage features: \
+(V - V_min) / (V_max - V_min), so 0 = bottom rail, 1 = top rail. \
+-1 means no predecessor exists (first segment of a cell). ~1.0 means the \
+segment started from a full cell. \
+Use prev_end_voltage_norm (not Voltage_min/Voltage_max) to judge the cell's \
+SoC at the start of this segment — between procedures there is always a PAU \
+pause where the cell relaxes toward OCV, so Voltage_min of a charge segment \
+reflects the relaxed OCV, not the predecessor's end SoC.
 - n_segments: cluster member count. majority_target: label the rule-based \
 pipeline gave most members. bootstrap_label: weak rule-based name for \
 leftover clusters.
 
-Invent your OWN concise snake_case label that best describes the physical \
-procedure the cluster is — do not limit yourself to any fixed taxonomy. Name \
-what the numbers show, and put the characteristic quantities in the name when \
-they matter, e.g. "cap_discharge_c2", "full_discharge_1c", "pulse_test", \
-"pulse_restore", "qocv_charge_c20", "qocv_discharge_c20", "prep_charge", \
-"cv_topoff_hold", "soc_adjust_partial_charge", "rest", "data_artifact". \
-Typical procedures in a check-up are capacity tests, pulse tests (with \
-restore pulses), quasi-OCV sweeps, preparation charges, SoC adjustments and \
-rests — but name precisely what you see, not the nearest familiar thing: a 1C \
-full discharge is "full_discharge_1c", not a C/2 capacity test. If the \
-cluster mixes distinct behaviors (e.g. both current signs), say so in the \
-name (prefix "mixed_") and explain in the rationale.
+Label format — SHORT, essentials only: "<procedure>" or "<procedure>_<crate>" \
+in snake_case. Procedure is one of: "full_charge", "full_discharge", \
+"partial_cha", "partial_dch", "pulse", "qocv", "rest", "artifact". Do NOT \
+distinguish qocv charge from discharge, or test pulses from restore pulses — \
+both are just "qocv" / "pulse". Use "full_charge" / "full_discharge" when true_voltage_range is close to 1. \
+Use "partial_cha" / "partial_dch" when true_voltage_range is substantially \
+less than 1. Use "qocv" when true_voltage_range is close to 1 at a very low \
+C-rate; a low-rate sweep over a partial window is "partial_cha"/"partial_dch". Append the C-rate only when it is meaningful \
+and well-defined, written as "c2" (= C/2), "1c", "c20" etc., e.g. \
+"full_discharge_c2", "full_discharge_1c", "qocv_c20", "partial_cha_c3". \
+If the cluster mixes distinct behaviors beyond that, prefix "mixed_" on the \
+closest procedure. Nothing else goes in the label — no SoC windows, no \
+delta-V, no qualifiers; put every detail in the rationale. Name what the \
+numbers show, not the nearest familiar thing: a 1C full discharge is \
+"full_discharge_1c", not a C/2 capacity test.
 
 Judge from the numbers, not from majority_target / bootstrap_label — those \
 report what a rule-based pipeline thinks, and second-guessing them is the \

@@ -57,6 +57,7 @@ _SIGNATURE_COLS = [
     "Voltage_max",
     "Voltage_min",
     "Voltage_range",
+    "true_voltage_range",
     "Duration_minutes",
     "Duration_quartile",
     "prev_end_voltage_norm",
