@@ -77,9 +77,13 @@ leftover clusters.
 
 Label format — SHORT, essentials only: "<procedure>" or "<procedure>_<crate>" \
 in snake_case. Procedure is one of: "full_charge", "full_discharge", \
-"partial_cha", "partial_dch", "pulse", "qocv", "rest", "artifact". Do NOT \
-distinguish qocv charge from discharge, or test pulses from restore pulses — \
-both are just "qocv" / "pulse". \
+"partial_cha", "partial_dch", "pulse", "qocv", "rest", "artifact", "unknown". \
+Do NOT distinguish qocv charge from discharge, or test pulses from restore \
+pulses — both are just "qocv" / "pulse". \
+If the signature is too ambiguous or self-contradictory to map to any \
+procedure with reason, use the bare label "unknown" (no C-rate suffix) with a \
+low confidence and explain what is unclear in the rationale — do NOT force a \
+guess onto the nearest familiar procedure. \
 Decide the label in this STRICT ORDER. STEP 1 — full vs partial, by \
 true_voltage_range ALONE, hard cutoff 0.9: true_voltage_range >= 0.9 = FULL \
 (spans essentially the whole SoC window); true_voltage_range < 0.9 = PARTIAL. \
