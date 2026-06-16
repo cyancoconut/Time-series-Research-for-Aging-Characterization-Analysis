@@ -28,7 +28,7 @@ The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` still 
 - Tab 3 → `main.py <battery_cfg> [--cells …] [--overwrite] [--clustering …]`. A **Clustering** toggle (Auto / HDBSCAN / Classifier) maps to `--clustering`, so HDBSCAN can be forced even when the config sets `classifier_model_path`. A separate **Interpret clusters (LLM)** button runs `cluster.interpret_clusters` (label-only) on the existing CSVs.
 - Tab 4 → `python -m monitor.aging_status <battery_cfg> [-o …]`
 - Tab 5 → a checklist of evaluation outputs run in sequence by one "Run evaluation" button: **Fleet-wide capacity aggregation** → `python -m evaluation.export_cap_pulse <battery_cfg>`; **Capacity evaluation (Alterungsmatrix)** → `python -m evaluation.aging_matrix <battery_cfg>`. Pulse / qOCV evaluations are placeholder checkboxes (disabled) for future stages. The "Run all 1→2→3→4→5" chain runs stages 1–4 then every ticked Tab 5 evaluation.
-- Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …]`
+- Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …] [--labels …]`. A **Labels** toggle (Config / target / llm) maps to `--labels`; `Config` omits it so the config's `classifier_label_source` (default `target`) decides.
 
 The Download tab's "Save JSON" matches `download/get_user_input.py`; full-pipeline runs auto-write it to `.metabatt_ui_download.json` (gitignored).
 

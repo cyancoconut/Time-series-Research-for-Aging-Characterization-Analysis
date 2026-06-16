@@ -478,6 +478,15 @@ class PipelineUI(ctk.CTk):
         self.tr_model_out = s.add_path("Model out (optional):", is_dir=False)
         self.tr_meta_out = s.add_path("Meta out (optional):", is_dir=False)
 
+        lbl = ctk.CTkFrame(s, fg_color="transparent")
+        lbl.grid(sticky="w", padx=4, pady=(2, 2))
+        ctk.CTkLabel(lbl, text="Labels:").pack(side="left", padx=(0, 6))
+        self.tr_labels = ctk.CTkSegmentedButton(
+            lbl, values=["Config", "target", "llm"],
+        )
+        self.tr_labels.set("Config")
+        self.tr_labels.pack(side="left")
+
         ctk.CTkLabel(
             parent,
             text=(
@@ -488,7 +497,10 @@ class PipelineUI(ctk.CTk):
                 "Any override still gets a _<timestamp> suffix, so runs are never "
                 "overwritten. Uploaded to <minio_prefix>/60_classifier/models/ when "
                 "upload_to includes minio. Not part of 'Run all' — train after the "
-                "HDBSCAN pipeline has produced the CSVs."
+                "HDBSCAN pipeline has produced the CSVs. Labels: Config uses the "
+                "config's classifier_label_source (default 'target'); 'target' trains "
+                "on HDBSCAN final labels + bootstrap; 'llm' trains on the free-form "
+                "llm_label column (run Interpret clusters first)."
             ),
             text_color="#888",
             wraplength=900,
@@ -521,6 +533,7 @@ class PipelineUI(ctk.CTk):
             self.ev_capacity_eval.select()
         self.tr_model_out.insert(0, s.get("tr_model_out", ""))
         self.tr_meta_out.insert(0, s.get("tr_meta_out", ""))
+        self.tr_labels.set(s.get("tr_labels", "Config"))
 
         dl = {**DEFAULT_DOWNLOAD_CFG, **s.get("download_cfg", {})}
         self._apply_download_cfg(dl)
@@ -538,6 +551,7 @@ class PipelineUI(ctk.CTk):
             "ev_capacity_eval": bool(self.ev_capacity_eval.get()),
             "tr_model_out": self.tr_model_out.get(),
             "tr_meta_out": self.tr_meta_out.get(),
+            "tr_labels": self.tr_labels.get(),
             "download_cfg": self._collect_download_cfg(),
         })
         _save_ui_state(self._state)
@@ -790,6 +804,9 @@ class PipelineUI(ctk.CTk):
         meta_out = self.tr_meta_out.get().strip()
         if meta_out:
             argv += ["--meta-out", meta_out]
+        labels = {"target": "target", "llm": "llm"}.get(self.tr_labels.get())
+        if labels:
+            argv += ["--labels", labels]
         return argv
 
     # --------------------------------------------------------------- run paths
