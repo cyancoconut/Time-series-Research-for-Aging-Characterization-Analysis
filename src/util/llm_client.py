@@ -56,11 +56,13 @@ C-rate. Positive = charge, negative = discharge. abs_Current_mean = |.|.
 by the cell's (V_max - V_min) window. Voltage_range is the within-segment \
 swing, but is distorted for charges/discharges because a PAU pause between \
 procedures lets the cell voltage relax toward OCV before the segment starts. \
-- true_voltage_range: the corrected SoC swing — for charges: \
-Voltage_max - prev_end_voltage_norm; for discharges: \
-prev_end_voltage_norm - Voltage_min. Use this (not Voltage_range) to judge \
-whether the segment is full or partial. Falls back to Voltage_range when \
-prev_end_voltage_norm = -1 (no predecessor).
+- true_voltage_range: the corrected SoC swing, ALREADY COMPUTED for you in the \
+signature — use the supplied value, do NOT recompute it. (It is \
+Voltage_max - prev_end_voltage_norm for charges and \
+prev_end_voltage_norm - Voltage_min for discharges, given only so you can \
+interpret it; it falls back to Voltage_range when prev_end_voltage_norm = -1, \
+i.e. no predecessor.) This — not Voltage_range, not Voltage_max/Voltage_min — \
+is the SOLE determinant of whether a segment is full or partial.
 - Duration_minutes: segment length. Duration_quartile = log1p(Duration_minutes).
 - prev_end_voltage_norm: end-of-segment voltage of the nearest preceding \
 non-pause segment, normalized the same way as Voltage features: \
@@ -91,7 +93,14 @@ Decide the label in this STRICT ORDER. STEP 1 — full vs partial, by \
 true_voltage_range ALONE, hard cutoff 0.9: true_voltage_range >= 0.9 = FULL \
 (spans essentially the whole SoC window); true_voltage_range < 0.9 = PARTIAL. \
 Nothing else changes this — not duration, not C-rate. A long, low-rate sweep \
-that only covers part of the window is PARTIAL. STEP 2 — only now look at \
+that only covers part of the window is PARTIAL. Voltage_max/Voltage_min \
+touching a rail does NOT make a segment full — only true_voltage_range does. A \
+positive-current charge that starts already full (prev_end_voltage_norm ~ 1.0) \
+and ends at Voltage_max ~ 1.0 has true_voltage_range ~ 0: it is a PARTIAL \
+top-up / CV hold, NEVER full_charge, however close Voltage_max is to 1.0. \
+Symmetrically, a discharge starting already empty (prev_end_voltage_norm ~ 0) \
+ending at Voltage_min ~ 0 has true_voltage_range ~ 0 and is PARTIAL, not \
+full_discharge. STEP 2 — only now look at \
 C-rate. If PARTIAL: the label is "partial_cha" (charge) or "partial_dch" \
 (discharge), FULL STOP — a partial segment is NEVER "full_charge" or \
 "full_discharge", however low its current or however long it lasts. If FULL: \
