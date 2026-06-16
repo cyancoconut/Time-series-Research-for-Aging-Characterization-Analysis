@@ -103,7 +103,10 @@ ending at Voltage_min ~ 0 has true_voltage_range ~ 0 and is PARTIAL, not \
 full_discharge. STEP 2 — only now look at \
 C-rate. If PARTIAL: the label is "partial_cha" (charge) or "partial_dch" \
 (discharge), FULL STOP — a partial segment is NEVER "full_charge" or \
-"full_discharge", however low its current or however long it lasts. If FULL: \
+"full_discharge", however low its current or however long it lasts. ALWAYS \
+append the C-rate to a partial label (e.g. "partial_cha_c3", "partial_dch_c2") \
+— the rate is the main thing that distinguishes one partial segment from \
+another, so do not omit it for partials. If FULL: \
 "full_charge" (charge) or "full_discharge" (discharge) by the sign of \
 Current_mean, at WHATEVER C-rate — a very low-rate, full-window quasi-OCV-style \
 sweep is still "full_discharge"/"full_charge", just with a low crate suffix; do \
