@@ -5,16 +5,18 @@ from feature_extraction import classification
 import duckdb
 
 
-def prev_end_voltage_norm(dismembered_df, V_max):
+def prev_end_voltage_norm(dismembered_df, V_max, V_min):
     """Per-segment context feature: end-of-segment voltage of the most recent
-    non-PAU predecessor, normalized by ``V_max``.
+    non-PAU predecessor, normalized on the same scale as Voltage features:
+    ``(V - V_min) / (V_max - V_min)`` → 0 = bottom rail, 1 = top rail.
 
     Mirrors ``post_cluster_filter.previous_voltage`` exactly (walk back up to 4
     procedure steps, skip PAU stubs, read the predecessor's *last* row voltage)
     so a learned classifier sees the same signal the CAP rule keys on: a true
     CAP discharge is preceded by a fully charged segment, a prep discharge is
-    not. Returns ``{ID: value}``; ``0.0`` when no predecessor is found.
+    not. Returns ``{ID: value}``; ``-1`` when no predecessor is found.
     """
+    v_window = V_max - V_min
     id_summary = (
         dismembered_df.groupby("ID", sort=False)
         .agg(first_target=("target", "first"), last_voltage=("Voltage", "last"))
@@ -22,7 +24,7 @@ def prev_end_voltage_norm(dismembered_df, V_max):
     )
     out = {}
     for seg_id in id_summary:
-        value = 0.0
+        value = -1.0
         try:
             group, proc = seg_id.split("_")[0], int(seg_id.split("_")[1])
             for step in range(1, 5):
@@ -31,10 +33,10 @@ def prev_end_voltage_norm(dismembered_df, V_max):
                     continue
                 if str(prev["first_target"]) == "PAU":
                     continue
-                value = prev["last_voltage"] / V_max
+                value = (prev["last_voltage"] - V_min) / v_window
                 break
         except Exception:
-            value = 0.0
+            value = -1.0
         out[seg_id] = value
     return out
 
@@ -83,10 +85,27 @@ def feature_extraction(
 
     # Context feature for the learned classifier: predecessor end-of-charge
     # voltage. Inert for HDBSCAN (it clusters on a fixed 3-column subset).
-    prev_map = prev_end_voltage_norm(dismembered_df, V_max)
+    prev_map = prev_end_voltage_norm(dismembered_df, V_max, V_min)
     X_unlabeled_features["prev_end_voltage_norm"] = (
-        X_unlabeled_features["ID"].map(prev_map).fillna(0.0)
+        X_unlabeled_features["ID"].map(prev_map).fillna(-1.0)
     )
+
+    # True SoC swing: predecessor end-voltage to this segment's voltage rail.
+    # Voltage_range (max-min within segment) understates the swing for charges
+    # because PAU relaxation raises the OCV before the segment starts.
+    # For charges: Voltage_max - prev_end_voltage_norm (bottom → top).
+    # For discharges: prev_end_voltage_norm - Voltage_min (top → bottom).
+    # Falls back to Voltage_range when no predecessor (sentinel -1).
+    has_prev = X_unlabeled_features["prev_end_voltage_norm"] != -1.0
+    is_charge = X_unlabeled_features["Current_mean"] > 0
+    true_range = X_unlabeled_features["Voltage_range"].copy()
+    true_range[has_prev & is_charge] = (
+        X_unlabeled_features["Voltage_max"] - X_unlabeled_features["prev_end_voltage_norm"]
+    )[has_prev & is_charge]
+    true_range[has_prev & ~is_charge] = (
+        X_unlabeled_features["prev_end_voltage_norm"] - X_unlabeled_features["Voltage_min"]
+    )[has_prev & ~is_charge]
+    X_unlabeled_features["true_voltage_range"] = true_range
 
     # Add target column
     X_unlabeled_features["target"] = np.nan

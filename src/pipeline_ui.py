@@ -382,9 +382,20 @@ class PipelineUI(ctk.CTk):
         )
         self.mn_overwrite = s.add_checkbox("--overwrite (reprocess cells with existing GOLD)")
 
+        clu = ctk.CTkFrame(s, fg_color="transparent")
+        clu.grid(sticky="w", padx=4, pady=(2, 2))
+        ctk.CTkLabel(clu, text="Clustering:").pack(side="left", padx=(0, 6))
+        self.mn_clustering = ctk.CTkSegmentedButton(
+            clu, values=["Auto (config)", "HDBSCAN", "Classifier"],
+        )
+        self.mn_clustering.set("Auto (config)")
+        self.mn_clustering.pack(side="left")
+
         ctk.CTkLabel(
             parent,
-            text="Reads its parameters from the shared battery config above.",
+            text="Reads its parameters from the shared battery config above. "
+                 "Clustering: Auto uses the config; HDBSCAN forces clustering even if "
+                 "a classifier_model_path is set; Classifier requires one.",
             text_color="#888",
         ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 6))
 
@@ -394,6 +405,11 @@ class PipelineUI(ctk.CTk):
             btns, text="▶ Run main pipeline", width=180, command=self._run_pipeline,
         )
         self.mn_run_btn.pack(side="right", padx=4)
+        self.mn_interpret_btn = ctk.CTkButton(
+            btns, text="▶ Interpret clusters (LLM)", width=200,
+            command=self._run_interpret,
+        )
+        self.mn_interpret_btn.pack(side="right", padx=4)
 
     def _build_monitor_tab(self, parent):
         parent.grid_columnconfigure(0, weight=1)
@@ -497,6 +513,7 @@ class PipelineUI(ctk.CTk):
         self.mn_cells.insert(0, s.get("mn_cells", ""))
         if s.get("mn_overwrite"):
             self.mn_overwrite.select()
+        self.mn_clustering.set(s.get("mn_clustering", "Auto (config)"))
         self.mo_output.insert(0, s.get("mo_output", ""))
         if s.get("ev_capacity_agg", True):
             self.ev_capacity_agg.select()
@@ -515,6 +532,7 @@ class PipelineUI(ctk.CTk):
             "br_overwrite": bool(self.br_overwrite.get()),
             "mn_cells": self.mn_cells.get(),
             "mn_overwrite": bool(self.mn_overwrite.get()),
+            "mn_clustering": self.mn_clustering.get(),
             "mo_output": self.mo_output.get(),
             "ev_capacity_agg": bool(self.ev_capacity_agg.get()),
             "ev_capacity_eval": bool(self.ev_capacity_eval.get()),
@@ -693,6 +711,23 @@ class PipelineUI(ctk.CTk):
             argv += ["--cells", *cells]
         if self.mn_overwrite.get():
             argv.append("--overwrite")
+        clustering = {"HDBSCAN": "hdbscan", "Classifier": "classifier"}.get(
+            self.mn_clustering.get()
+        )
+        if clustering:
+            argv += ["--clustering", clustering]
+        return argv
+
+    def _build_interpret_argv(self) -> list[str] | None:
+        cfg = self._battery_cfg_or_warn()
+        if not cfg:
+            return None
+        argv = [sys.executable, "-m", "cluster.interpret_clusters", cfg]
+        cells = self.mn_cells.get().strip().split()
+        if cells:
+            argv += ["--cells", *cells]
+        if self.mn_overwrite.get():
+            argv.append("--overwrite")
         return argv
 
     def _build_monitor_argv(self) -> list[str] | None:
@@ -773,6 +808,11 @@ class PipelineUI(ctk.CTk):
         argv = self._build_pipeline_argv()
         if argv:
             self._launch(argv, label="main pipeline")
+
+    def _run_interpret(self):
+        argv = self._build_interpret_argv()
+        if argv:
+            self._launch(argv, label="interpret clusters")
 
     def _run_monitor(self):
         argv = self._build_monitor_argv()
@@ -907,7 +947,7 @@ class PipelineUI(ctk.CTk):
         self.status_label.configure(text=status_text if running else f"idle ({status_text})")
         new_state = "disabled" if running else "normal"
         for btn in (
-            self.dl_run_btn, self.br_run_btn, self.mn_run_btn,
+            self.dl_run_btn, self.br_run_btn, self.mn_run_btn, self.mn_interpret_btn,
             self.mo_run_btn, self.ev_run_btn, self.tr_run_btn, self.runall_btn,
         ):
             btn.configure(state=new_state)

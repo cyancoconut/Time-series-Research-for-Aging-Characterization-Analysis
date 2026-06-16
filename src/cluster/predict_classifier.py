@@ -37,6 +37,34 @@ _LABEL_TO_TAGGED = {
 }
 
 
+def _map_llm_label_to_tagged(label: str, abs_crate, cap_rate, cap_tol: float) -> str:
+    """Map a free-form LLM cluster name (`full_discharge_c2`, `pulse`, `qocv_c20`,
+    `mixed_*`, …) to the cluster-tagged form calculate/ matches on.
+
+    Only the labels that drive a numeric result are translated; everything else
+    (full_charge, partial_*, rest, artifact, …) passes through unchanged into the
+    GOLD `target` (informational, no numeric effect — like PREP_CHA today).
+
+    - ``*pulse*`` -> ``PUL*``   (update_pulse re-splits test/restore downstream)
+    - ``*qocv*``  -> ``QOCV*``  (update_qOCV re-splits DCH/CHA by sign)
+    - ``*full_discharge*`` -> ``CAP*`` **iff** the segment's measured C-rate
+      (``abs_Current_mean``, already ÷ Nom_Capacity) sits within
+      ``cap_rate * (1 ± cap_tol)`` — i.e. it is a full discharge at the
+      configured capacity rate, not a full discharge at some other rate. Matching
+      the measured current (rather than re-parsing the label's crate suffix) is
+      the same signal the rule-based CAP filter keys on.
+    """
+    low = label.lower()
+    if "pulse" in low:
+        return "PUL*"
+    if "qocv" in low:
+        return "QOCV*"
+    if "full_discharge" in low and cap_rate and abs_crate is not None:
+        if cap_rate * (1 - cap_tol) <= abs(abs_crate) <= cap_rate * (1 + cap_tol):
+            return "CAP*"
+    return label
+
+
 def _load(model_path: str, meta_path: str):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Classifier model not found: {model_path}")
@@ -48,13 +76,30 @@ def _load(model_path: str, meta_path: str):
     return model, meta
 
 
-def predict_targets(X_features: pd.DataFrame, model_path: str, meta_path: str) -> pd.DataFrame:
+def predict_targets(
+    X_features: pd.DataFrame,
+    model_path: str,
+    meta_path: str,
+    cap_rate=None,
+    cap_tol: float = 0.05,
+) -> pd.DataFrame:
     """Replace the `target` column in X_features with classifier predictions
     (translated to cluster-tagged form) and add a `cluster_id` column holding
     the raw (untagged) predicted label. Returns a new DataFrame; input is not
-    modified."""
+    modified.
+
+    Two label spaces are supported, distinguished by ``meta["label_source"]``:
+
+    - ``"target"`` (default / legacy): the model predicts the fixed pipeline
+      vocabulary (CAP/PUL/qOCV_*/…) and :data:`_LABEL_TO_TAGGED` maps it.
+    - ``"llm"``: the model predicts free-form LLM cluster names; each prediction
+      is mapped by :func:`_map_llm_label_to_tagged`, which needs ``cap_rate``
+      (the config ``cap_rate``) to confirm a full-discharge CAP segment by its
+      measured C-rate. If ``cap_rate`` is None no segment can become CAP*.
+    """
     model, meta = _load(model_path, meta_path)
     feature_cols = meta["feature_columns"]
+    label_source = meta.get("label_source", "target")
 
     missing = set(feature_cols) - set(X_features.columns)
     if missing:
@@ -77,5 +122,19 @@ def predict_targets(X_features: pd.DataFrame, model_path: str, meta_path: str) -
     # collapses qOCV_DCH/qOCV_CHA -> QOCV* and PUL -> PUL*, so the DCH/CHA and
     # restore distinctions are preserved for training provenance.
     X_out["cluster_id"] = preds.fillna("-1").astype(object)
-    X_out["target"] = preds.map(_LABEL_TO_TAGGED).fillna("-1").astype(object)
+
+    if label_source == "llm":
+        if not cap_rate:
+            logging.warning(
+                "classifier label_source='llm' but cap_rate is unset — no segment "
+                "can be tagged CAP* (capacity will not be computed)"
+            )
+        crate = X_out["abs_Current_mean"] if "abs_Current_mean" in X_out else None
+        tagged = []
+        for idx, lbl in preds.fillna("-1").items():
+            c = float(crate.loc[idx]) if crate is not None and pd.notna(crate.loc[idx]) else None
+            tagged.append(_map_llm_label_to_tagged(str(lbl), c, cap_rate, cap_tol))
+        X_out["target"] = pd.Series(tagged, index=preds.index).astype(object)
+    else:
+        X_out["target"] = preds.map(_LABEL_TO_TAGGED).fillna("-1").astype(object)
     return X_out

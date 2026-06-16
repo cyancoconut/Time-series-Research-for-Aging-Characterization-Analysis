@@ -103,6 +103,32 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
     return exceptions
 
 
+def _interpret_x_silver(X_silver, cell, cfg):
+    """Optional LLM cluster interpretation, run inline on the in-memory
+    per-segment table.
+
+    Adds ``llm_label`` / ``llm_confidence`` / ``llm_rationale`` columns in
+    place — augment-only: ``target``, ``cluster_id`` and every numeric column
+    are untouched, so GOLD (built from ``df_silver``, which has no ``llm_*``
+    columns) is unaffected. This is the same labeling as
+    :mod:`cluster.interpret_clusters`, folded into the pipeline so the labels
+    land directly in the ``with_features_post_labeled`` CSV the classifier
+    trains on. Gated by ``cfg['llm_interpret']`` (HDBSCAN path only).
+    """
+    from cluster.interpret_clusters import _add_bootstrap_column, interpret_cell
+    from util.llm_client import make_llm_client
+
+    if "cluster_id" not in X_silver.columns:
+        logging.warning(f"{cell}: no cluster_id — skipping LLM interpretation")
+        return
+    n_clusters = X_silver["cluster_id"].nunique(dropna=False)
+    logging.info(f"{cell}: LLM-interpreting {n_clusters} clusters")
+    client = make_llm_client(cfg)
+    _add_bootstrap_column(X_silver)
+    interpret_cell(X_silver, client, cache={})
+    X_silver.drop(columns=["bootstrap_label"], inplace=True, errors="ignore")
+
+
 def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
     working_path = cfg.get("working_path")
     download_from = cfg.get("download_from", "local")
@@ -220,7 +246,9 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
             cfg, minio_client, classifier_path, meta_path, cell
         )
         logging.info(f"{cell}: classifying segments via {classifier_path}")
-        X_silver = predict_targets(X_features, classifier_path, meta_path)
+        X_silver = predict_targets(
+            X_features, classifier_path, meta_path, cap_rate=cfg.get("cap_rate")
+        )
         df_silver = model_and_supervise.merge_target(dismembered_df, X_silver)
         for col in df_silver.columns:
             if df_silver[col].dtype == "object":
@@ -244,6 +272,16 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
             return
 
     _validate(df_silver, "silver")
+
+    # Label-only LLM interpretation route: add llm_* to the per-segment table,
+    # write the CSV, and stop. No GOLD, no capacity/pulse/qOCV exports — the sole
+    # output is the with_features_post_labeled CSV the classifier trains on.
+    # HDBSCAN path only (the classifier route's CSV is not training data).
+    if cfg.get("llm_interpret") and not classifier_path:
+        _interpret_x_silver(X_silver, cell, cfg)
+        _write_x_silver(X_silver, cell, cfg, paths, minio_client)
+        logging.info(f"{cell}: llm_interpret route — wrote CSV with llm_* only, skipping GOLD/exports")
+        return
 
     _write_x_silver(X_silver, cell, cfg, paths, minio_client)
 
@@ -517,8 +555,35 @@ if __name__ == "__main__":
         action="store_true",
         help="Reprocess cells even if GOLD already exists",
     )
+    parser.add_argument(
+        "--interpret",
+        action="store_true",
+        help="After HDBSCAN, LLM-label each cluster into the per-segment CSV "
+             "(llm_* columns, label-only — skips GOLD/exports). Forces the "
+             "HDBSCAN path and sets config 'llm_interpret'.",
+    )
+    parser.add_argument(
+        "--clustering",
+        choices=["auto", "hdbscan", "classifier"],
+        default="auto",
+        help="Clustering path: 'auto' (config classifier_model_path decides), "
+             "'hdbscan' (force HDBSCAN, ignore classifier_model_path), or "
+             "'classifier' (require classifier_model_path).",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+
+    # Path override: let the CLI/UI force HDBSCAN even when the config names a
+    # classifier model (or require the classifier).
+    if args.clustering == "hdbscan":
+        cfg["classifier_model_path"] = None
+    elif args.clustering == "classifier" and not cfg.get("classifier_model_path"):
+        parser.error("--clustering classifier needs classifier_model_path in the config")
+
+    if args.interpret:
+        # Interpretation names HDBSCAN clusters, so it always runs the HDBSCAN path.
+        cfg["llm_interpret"] = True
+        cfg["classifier_model_path"] = None
 
     run_pipeline(cfg, target_specimen=args.cells, overwrite=args.overwrite)

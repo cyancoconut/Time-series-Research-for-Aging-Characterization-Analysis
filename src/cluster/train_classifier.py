@@ -5,7 +5,16 @@ Reads every per-segment CSV in `<working_path>/with_features_post_labeled/`
 the prep / SOC-adjust leftovers and a `cluster_id` column), treats the `target`
 column as ground truth, weak-labels the obvious leftover families (PREP_CHA /
 PREP_DCH), runs leave-one-cell-out CV to report per-class precision/recall, then
-refits on all data and writes (stem from config `type_cell`, timestamped so runs
+refits on all data and writes the model.
+
+Label source (``--labels`` / config ``classifier_label_source``):
+- ``target`` (default): the flow above — HDBSCAN final labels + leftover bootstrap.
+- ``llm``: train on the free-form ``llm_label`` column written by
+  ``interpret_clusters`` (no taxonomy collapse, no bootstrap); segments with no
+  ``llm_label`` are dropped. ``predict_classifier`` maps the free-form prediction
+  back to CAP*/PUL*/QOCV* at inference. ``_meta.json["label_source"]`` records it.
+
+Outputs (stem from config `type_cell`, timestamped so runs
 are kept side by side and never overwritten; also uploaded to MinIO when the
 config's `upload_to` includes minio, untagged under
 `<minio_prefix>/60_classifier/models/`):
@@ -123,20 +132,45 @@ def _iter_cell_csvs(cfg: dict, source: str):
         yield os.path.basename(f).replace(".csv", ""), pd.read_csv(f)
 
 
-def _load_cell_csvs(cfg: dict, source: str) -> pd.DataFrame:
+def _load_cell_csvs(cfg: dict, source: str, label_source: str = "target") -> pd.DataFrame:
     frames = []
     for cell, df in _iter_cell_csvs(cfg, source):
         df["cell"] = cell
         frames.append(df)
     df = pd.concat(frames, ignore_index=True)
 
-    df["target"] = df["target"].astype(str)
-    # Merge restore pulses into the pulse class: predict_classifier maps both
-    # PUL and PUL*RES back to "PUL*", and update_pulse re-identifies PUL*RES
-    # downstream by proc-num adjacency/sign. So the classifier only needs to
-    # recognize "pulse"; keeping them apart just adds a hard confusion pair.
-    df.loc[df["target"] == "PUL*RES", "target"] = "PUL"
-    df = bootstrap_leftover_labels(df)
+    if label_source == "llm":
+        # Train directly on the LLM's free-form cluster names (the `llm_label`
+        # column written by interpret_clusters). No collapse to the pipeline
+        # taxonomy: the classifier learns the LLM vocabulary as-is, and
+        # predict_classifier maps the prediction back to CAP*/PUL*/QOCV* at
+        # inference. The LLM already merges restore/test pulses and qOCV
+        # DCH/CHA, so no PUL*RES merge or bootstrap is needed here.
+        if "llm_label" not in df.columns:
+            raise ValueError(
+                "label source 'llm' requested but no 'llm_label' column found. "
+                "Run `python -m cluster.interpret_clusters <cfg>` first so the "
+                "with_features_post_labeled CSVs carry the llm_* columns."
+            )
+        df["target"] = df["llm_label"].astype("string").str.strip()
+        before = len(df)
+        df = df[
+            df["target"].notna()
+            & (df["target"] != "")
+            & (df["target"].str.lower() != "nan")
+        ].copy()
+        dropped = before - len(df)
+        if dropped:
+            logging.info(f"dropped {dropped} segments with no llm_label (uninterpreted)")
+        df["target"] = df["target"].astype(str)
+    else:
+        df["target"] = df["target"].astype(str)
+        # Merge restore pulses into the pulse class: predict_classifier maps both
+        # PUL and PUL*RES back to "PUL*", and update_pulse re-identifies PUL*RES
+        # downstream by proc-num adjacency/sign. So the classifier only needs to
+        # recognize "pulse"; keeping them apart just adds a hard confusion pair.
+        df.loc[df["target"] == "PUL*RES", "target"] = "PUL"
+        df = bootstrap_leftover_labels(df)
 
     missing = set(FEATURE_COLS) - set(df.columns)
     if missing:
@@ -217,15 +251,21 @@ def _resolve_out_paths(cfg: dict, model_out, meta_out, ts: str):
     return model_out, meta_out
 
 
-def train(config_path: str, model_out=None, meta_out=None) -> None:
+def train(config_path: str, model_out=None, meta_out=None, label_source=None) -> None:
     with open(config_path) as f:
         cfg = json.load(f)
     source = cfg.get("download_from", "local")
+    label_source = label_source or cfg.get("classifier_label_source", "target")
+    if label_source not in ("target", "llm"):
+        raise ValueError(f"Unknown label source {label_source!r} (expected 'target' or 'llm')")
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
     model_out, meta_out = _resolve_out_paths(cfg, model_out, meta_out, ts)
 
-    df = _load_cell_csvs(cfg, source)
-    logging.info(f"Loaded {len(df)} segments from {df['cell'].nunique()} cells ({source})")
+    df = _load_cell_csvs(cfg, source, label_source)
+    logging.info(
+        f"Loaded {len(df)} segments from {df['cell'].nunique()} cells "
+        f"({source}, label_source={label_source})"
+    )
     logging.info(f"Class counts:\n{df['target'].value_counts().to_string()}")
 
     _loco_cv(df)
@@ -238,6 +278,7 @@ def train(config_path: str, model_out=None, meta_out=None) -> None:
 
     meta = {
         "feature_columns": FEATURE_COLS,
+        "label_source": label_source,
         "classes": sorted(df["target"].unique().tolist()),
         "training_cells": sorted(df["cell"].unique().tolist()),
         "n_segments": int(len(df)),
@@ -282,6 +323,11 @@ if __name__ == "__main__":
     parser.add_argument("--meta-out", default=None,
                         help="Override meta path stem; a _<timestamp> suffix is always added. "
                              "Default: <working_path>/60_classifier/models/<type_cell>_classifier_<timestamp>_meta.json")
+    parser.add_argument("--labels", choices=["target", "llm"], default=None,
+                        help="Training target source: 'target' (HDBSCAN final labels + "
+                             "leftover bootstrap, default) or 'llm' (the free-form llm_label "
+                             "column from interpret_clusters). Overrides config "
+                             "'classifier_label_source'.")
     args = parser.parse_args()
 
-    train(args.config, args.model_out, args.meta_out)
+    train(args.config, args.model_out, args.meta_out, args.labels)
