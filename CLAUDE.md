@@ -28,7 +28,7 @@ The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` still 
 - Tab 3 → `main.py <battery_cfg> [--cells …] [--overwrite] [--clustering …]`. A **Clustering** toggle (Auto / HDBSCAN / Classifier) maps to `--clustering`, so HDBSCAN can be forced even when the config sets `classifier_model_path`. A separate **Interpret clusters (LLM)** button runs `cluster.interpret_clusters` (label-only) on the existing CSVs.
 - Tab 4 → `python -m monitor.aging_status <battery_cfg> [-o …]`
 - Tab 5 → `python -m evaluation.export_cap_pulse <battery_cfg> [-o …]`
-- Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …]`
+- Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …] [--labels …]`. A **Labels** toggle (Config / target / llm) maps to `--labels`; `Config` omits it so the config's `classifier_label_source` (default `target`) decides.
 
 The Download tab's "Save JSON" matches `download/get_user_input.py`; full-pipeline runs auto-write it to `.metabatt_ui_download.json` (gitignored).
 
