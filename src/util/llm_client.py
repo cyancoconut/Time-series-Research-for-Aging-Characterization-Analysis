@@ -27,7 +27,7 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 
 class ClusterLabel(BaseModel):
     # Short snake_case name: "<procedure>[_<crate>]" (e.g. "full_discharge_1c",
-    # "qocv_c20", "pulse", "partial_cha_c3"). Deliberately NOT constrained to
+    # "full_charge_c20", "pulse", "partial_cha_c3"). Deliberately NOT constrained to
     # the pipeline taxonomy, so the interpretation is an independent second
     # opinion next to `target`.
     label: str
@@ -77,9 +77,12 @@ leftover clusters.
 
 Label format — SHORT, essentials only: "<procedure>" or "<procedure>_<crate>" \
 in snake_case. Procedure is one of: "full_charge", "full_discharge", \
-"partial_cha", "partial_dch", "pulse", "qocv", "rest", "artifact", "unknown". \
-Do NOT distinguish qocv charge from discharge, or test pulses from restore \
-pulses — both are just "qocv" / "pulse". \
+"partial_cha", "partial_dch", "pulse", "rest", "artifact", "unknown". \
+Do NOT distinguish test pulses from restore pulses — both are just "pulse". \
+There is NO "qocv" label: a full charge/discharge at any C-rate, including a \
+very low-rate quasi-OCV-style sweep, is "full_charge"/"full_discharge" with its \
+crate suffix (the pipeline decides quasi-OCV vs capacity downstream from the \
+measured rate). \
 If the signature is too ambiguous or self-contradictory to map to any \
 procedure with reason, use the bare label "unknown" (no C-rate suffix) with a \
 low confidence and explain what is unclear in the rationale — do NOT force a \
@@ -90,14 +93,14 @@ true_voltage_range ALONE, hard cutoff 0.9: true_voltage_range >= 0.9 = FULL \
 Nothing else changes this — not duration, not C-rate. A long, low-rate sweep \
 that only covers part of the window is PARTIAL. STEP 2 — only now look at \
 C-rate. If PARTIAL: the label is "partial_cha" (charge) or "partial_dch" \
-(discharge), FULL STOP — a partial segment is NEVER "qocv", "full_charge" or \
-"full_discharge", however low its current or however long it lasts. If FULL \
-and the C-rate is very low (~C/20 or below): "qocv". If FULL and the C-rate is \
-higher: "full_charge" / "full_discharge". So "qocv" REQUIRES true_voltage_range \
->= 0.9; a low-rate quasi-OCV-looking sweep with true_voltage_range < 0.9 is \
-"partial_cha"/"partial_dch", not "qocv". Append the C-rate only when it is meaningful \
+(discharge), FULL STOP — a partial segment is NEVER "full_charge" or \
+"full_discharge", however low its current or however long it lasts. If FULL: \
+"full_charge" (charge) or "full_discharge" (discharge) by the sign of \
+Current_mean, at WHATEVER C-rate — a very low-rate, full-window quasi-OCV-style \
+sweep is still "full_discharge"/"full_charge", just with a low crate suffix; do \
+NOT down-rank it to a partial. Append the C-rate only when it is meaningful \
 and well-defined, written as "c2" (= C/2), "1c", "c20" etc., e.g. \
-"full_discharge_c2", "full_discharge_1c", "qocv_c20", "partial_cha_c3". \
+"full_discharge_c2", "full_discharge_1c", "full_charge_c20", "partial_cha_c3". \
 If the cluster mixes distinct behaviors beyond that, prefix "mixed_" on the \
 closest procedure. Nothing else goes in the label — no SoC windows, no \
 delta-V, no qualifiers; put every detail in the rationale. Name what the \

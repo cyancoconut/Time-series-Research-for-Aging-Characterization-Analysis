@@ -37,30 +37,42 @@ _LABEL_TO_TAGGED = {
 }
 
 
-def _map_llm_label_to_tagged(label: str, abs_crate, cap_rate, cap_tol: float) -> str:
+def _map_llm_label_to_tagged(
+    label: str, abs_crate, cap_rate, cap_tol: float, qocv_rate=None, qocv_tol: float = 0.2
+) -> str:
     """Map a free-form LLM cluster name (`full_discharge_c2`, `pulse`, `qocv_c20`,
     `mixed_*`, …) to the cluster-tagged form calculate/ matches on.
 
     Only the labels that drive a numeric result are translated; everything else
-    (full_charge, partial_*, rest, artifact, …) passes through unchanged into the
-    GOLD `target` (informational, no numeric effect — like PREP_CHA today).
+    (partial_*, rest, artifact, …) passes through unchanged into the GOLD
+    `target` (informational, no numeric effect — like PREP_CHA today).
 
     - ``*pulse*`` -> ``PUL*``   (update_pulse re-splits test/restore downstream)
     - ``*qocv*``  -> ``QOCV*``  (update_qOCV re-splits DCH/CHA by sign)
-    - ``*full_discharge*`` -> ``CAP*`` **iff** the segment's measured C-rate
-      (``abs_Current_mean``, already ÷ Nom_Capacity) sits within
-      ``cap_rate * (1 ± cap_tol)`` — i.e. it is a full discharge at the
-      configured capacity rate, not a full discharge at some other rate. Matching
-      the measured current (rather than re-parsing the label's crate suffix) is
-      the same signal the rule-based CAP filter keys on.
+    - a ``full_charge`` / ``full_discharge`` is resolved by its **measured**
+      C-rate (``abs_Current_mean``, already ÷ Nom_Capacity) — the same signal the
+      rule filters key on — rather than trusting the LLM's full-vs-qocv call or
+      re-parsing the label's crate suffix:
+        * ``abs_crate <= qocv_rate * (1 + qocv_tol)`` -> ``QOCV*`` (a full sweep
+          at/below the configured quasi-OCV C-rate, charge or discharge).
+        * else a ``full_discharge`` within ``cap_rate * (1 ± cap_tol)`` -> ``CAP*``.
+      ``qOCV_CRate`` << ``cap_rate``, so the two bands never overlap; qocv is
+      checked first. With either rate unset that branch is skipped.
     """
     low = label.lower()
     if "pulse" in low:
         return "PUL*"
     if "qocv" in low:
         return "QOCV*"
-    if "full_discharge" in low and cap_rate and abs_crate is not None:
-        if cap_rate * (1 - cap_tol) <= abs(abs_crate) <= cap_rate * (1 + cap_tol):
+    if ("full_discharge" in low or "full_charge" in low) and abs_crate is not None:
+        ac = abs(abs_crate)
+        if qocv_rate and ac <= qocv_rate * (1 + qocv_tol):
+            return "QOCV*"
+        if (
+            "full_discharge" in low
+            and cap_rate
+            and cap_rate * (1 - cap_tol) <= ac <= cap_rate * (1 + cap_tol)
+        ):
             return "CAP*"
     return label
 
@@ -82,6 +94,8 @@ def predict_targets(
     meta_path: str,
     cap_rate=None,
     cap_tol: float = 0.05,
+    qocv_rate=None,
+    qocv_tol: float = 0.2,
 ) -> pd.DataFrame:
     """Replace the `target` column in X_features with classifier predictions
     (translated to cluster-tagged form) and add a `cluster_id` column holding
@@ -93,9 +107,11 @@ def predict_targets(
     - ``"target"`` (default / legacy): the model predicts the fixed pipeline
       vocabulary (CAP/PUL/qOCV_*/…) and :data:`_LABEL_TO_TAGGED` maps it.
     - ``"llm"``: the model predicts free-form LLM cluster names; each prediction
-      is mapped by :func:`_map_llm_label_to_tagged`, which needs ``cap_rate``
-      (the config ``cap_rate``) to confirm a full-discharge CAP segment by its
-      measured C-rate. If ``cap_rate`` is None no segment can become CAP*.
+      is mapped by :func:`_map_llm_label_to_tagged`, which resolves a full
+      charge/discharge by its measured C-rate: ``qocv_rate`` (config
+      ``qocv_crate``) tags a full sweep at/below the quasi-OCV rate as QOCV*, and
+      ``cap_rate`` (config ``cap_rate``) tags a full discharge at the capacity
+      rate as CAP*. With a rate unset, the corresponding tag is never produced.
     """
     model, meta = _load(model_path, meta_path)
     feature_cols = meta["feature_columns"]
@@ -133,7 +149,9 @@ def predict_targets(
         tagged = []
         for idx, lbl in preds.fillna("-1").items():
             c = float(crate.loc[idx]) if crate is not None and pd.notna(crate.loc[idx]) else None
-            tagged.append(_map_llm_label_to_tagged(str(lbl), c, cap_rate, cap_tol))
+            tagged.append(
+                _map_llm_label_to_tagged(str(lbl), c, cap_rate, cap_tol, qocv_rate, qocv_tol)
+            )
         X_out["target"] = pd.Series(tagged, index=preds.index).astype(object)
     else:
         X_out["target"] = preds.map(_LABEL_TO_TAGGED).fillna("-1").astype(object)
