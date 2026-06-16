@@ -67,6 +67,99 @@ FEATURE_COLS = [
 # candidate for weak-labeling, then falls back to "-1" (OTHER).
 KNOWN_LABELS = {"CAP", "PUL", "PUL*RES", "qOCV_DCH", "qOCV_CHA", "-1"}
 
+# full vs partial cut on the corrected SoC swing — identical to the LLM prompt's
+# STEP 1 (util/llm_client.py: true_voltage_range >= 0.9 = FULL).
+FULL_VOLTAGE_RANGE_THRESHOLD = 0.9
+
+
+def _crate_suffix(ac: float) -> str:
+    """C-rate suffix in the pipeline/LLM vocabulary: ``cN`` = C/N for sub-1C,
+    ``Nc`` = N·C for >=1C. ``ac`` is ``abs_Current_mean`` (already / Nom_Capacity,
+    i.e. a C-rate)."""
+    if not np.isfinite(ac) or ac <= 0:
+        return "cNA"
+    if ac >= 0.95:
+        return f"{int(round(ac))}c"
+    return f"c{int(round(1.0 / ac))}"
+
+
+def _canonicalize_llm_labels(
+    df: pd.DataFrame, cap_rate=None, qocv_rate=None,
+    cap_tol: float = 0.05, qocv_tol: float = 0.2,
+) -> pd.DataFrame:
+    """Collapse the free-form ``llm_label`` training targets (now in ``target``)
+    into the resolved space the pipeline actually acts on, deterministically from
+    each segment's own features. Modifies and returns ``df``.
+
+    The LLM's ``label`` field is unreliable for training: it sometimes contradicts
+    its own ``true_voltage_range >= 0.9`` rationale on the full-vs-partial cut, and
+    it fragments C-rates / pulses into unlearnable singletons (pulse vs pulse_c1,
+    full_charge_c20 vs full_discharge_c20 vs mixed_*_c20). What matters downstream
+    is only CAP / QOCV / PUL, so we rebuild each segment's label from its sign,
+    ``true_voltage_range`` and measured C-rate — the same signals (and the same
+    cfg rates + tolerances) ``predict_classifier._map_llm_label_to_tagged`` uses,
+    so a training label and the inference tag agree.
+
+    Per segment:
+    - any ``*pulse*``                       -> ``pulse``   (=> PUL*; folds
+      pulse_c1 / pulse_c2 / mixed_pulse together)
+    - full sweep (``true_voltage_range >= 0.9``) at/below the qOCV band, either
+      sign                                  -> ``qocv``    (=> QOCV*; folds
+      full_charge / full_discharge at the qOCV rate and mixed_*_c20 together —
+      mixed_* dissolves because each member is resolved from its own sign)
+    - full **discharge** in the capacity band -> ``cap``   (=> CAP*)
+    - any other full sweep                  -> ``full_charge_<crate>`` /
+      ``full_discharge_<crate>``            (informational, e.g. the C/2 prep charge)
+    - partial (``true_voltage_range < 0.9``) -> ``partial_cha_<crate>`` /
+      ``partial_dch_<crate>``               (kept, with direction + crate)
+    - unknown / rest / artifact / sign-ambiguous, and rows missing
+      ``true_voltage_range`` / ``Current_mean`` / ``abs_Current_mean``: left as-is.
+    """
+    needed = {"true_voltage_range", "Current_mean", "abs_Current_mean"}
+    if needed - set(df.columns):
+        logging.warning(
+            f"canonicalize: missing one of {needed} — leaving llm labels unchanged"
+        )
+        return df
+
+    def canon(row):
+        lab = str(row["target"]).strip()
+        low = lab.lower()
+        if "pulse" in low:
+            return "pulse"
+        directional = (
+            low.startswith("full_")
+            or low.startswith("partial_")
+            or low.startswith("mixed_")
+            or "qocv" in low
+        )
+        if not directional:
+            return lab  # unknown / rest / artifact — not a charge/discharge
+        tvr, cm, ac = row["true_voltage_range"], row["Current_mean"], row["abs_Current_mean"]
+        if not (np.isfinite(tvr) and np.isfinite(cm) and np.isfinite(ac)):
+            return lab  # can't resolve deterministically — keep the LLM label
+        is_charge = cm > 0
+        if tvr >= FULL_VOLTAGE_RANGE_THRESHOLD:
+            if qocv_rate and ac <= qocv_rate * (1 + qocv_tol):
+                return "qocv"
+            if (
+                not is_charge
+                and cap_rate
+                and cap_rate * (1 - cap_tol) <= ac <= cap_rate * (1 + cap_tol)
+            ):
+                return "cap"
+            return f"full_{'charge' if is_charge else 'discharge'}_{_crate_suffix(ac)}"
+        return f"partial_{'cha' if is_charge else 'dch'}_{_crate_suffix(ac)}"
+
+    before = df["target"].to_numpy().copy()
+    df["target"] = df.apply(canon, axis=1).astype(str)
+    n_changed = int((df["target"].to_numpy() != before).sum())
+    logging.info(
+        f"canonicalized {n_changed}/{len(df)} llm labels into the resolved space "
+        f"(cap/qocv/pulse/partial_*/full_*)"
+    )
+    return df
+
 
 def bootstrap_leftover_labels(df: pd.DataFrame, min_prep_current: float = 0.1) -> pd.DataFrame:
     """Weak-label the obvious leftover (non-final-labeled) segments by scale-free
@@ -140,12 +233,13 @@ def _load_cell_csvs(cfg: dict, source: str, label_source: str = "target") -> pd.
     df = pd.concat(frames, ignore_index=True)
 
     if label_source == "llm":
-        # Train directly on the LLM's free-form cluster names (the `llm_label`
-        # column written by interpret_clusters). No collapse to the pipeline
-        # taxonomy: the classifier learns the LLM vocabulary as-is, and
-        # predict_classifier maps the prediction back to CAP*/PUL*/QOCV* at
-        # inference. The LLM already merges restore/test pulses and qOCV
-        # DCH/CHA, so no PUL*RES merge or bootstrap is needed here.
+        # Train on the LLM's free-form cluster names (the `llm_label` column from
+        # interpret_clusters), then canonicalize them into the resolved space the
+        # pipeline acts on (cap/qocv/pulse/partial_*/full_*) via
+        # _canonicalize_llm_labels — the LLM's raw label fragments crates/pulses
+        # and is unreliable on the full-vs-partial cut, so we rebuild each segment
+        # deterministically from its own features. predict_classifier maps the
+        # prediction back to CAP*/PUL*/QOCV* at inference using the same rates.
         if "llm_label" not in df.columns:
             raise ValueError(
                 "label source 'llm' requested but no 'llm_label' column found. "
@@ -163,6 +257,9 @@ def _load_cell_csvs(cfg: dict, source: str, label_source: str = "target") -> pd.
         if dropped:
             logging.info(f"dropped {dropped} segments with no llm_label (uninterpreted)")
         df["target"] = df["target"].astype(str)
+        df = _canonicalize_llm_labels(
+            df, cap_rate=cfg.get("cap_rate"), qocv_rate=cfg.get("qocv_crate")
+        )
     else:
         df["target"] = df["target"].astype(str)
         # Merge restore pulses into the pulse class: predict_classifier maps both

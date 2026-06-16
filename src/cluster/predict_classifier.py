@@ -49,6 +49,11 @@ def _map_llm_label_to_tagged(
 
     - ``*pulse*`` -> ``PUL*``   (update_pulse re-splits test/restore downstream)
     - ``*qocv*``  -> ``QOCV*``  (update_qOCV re-splits DCH/CHA by sign)
+    - bare ``cap`` -> ``CAP*``  (resolved-space label: when the classifier was
+      trained on the canonicalized label space — see
+      ``train_classifier._canonicalize_llm_labels`` — full discharges in the
+      capacity band arrive pre-resolved as ``cap`` / ``qocv``, so they map
+      straight through rather than via the measured-rate branch below).
     - a ``full_charge`` / ``full_discharge`` is resolved by its **measured**
       C-rate (``abs_Current_mean``, already ÷ Nom_Capacity) — the same signal the
       rule filters key on — rather than trusting the LLM's full-vs-qocv call or
@@ -64,6 +69,8 @@ def _map_llm_label_to_tagged(
         return "PUL*"
     if "qocv" in low:
         return "QOCV*"
+    if low == "cap":
+        return "CAP*"
     if ("full_discharge" in low or "full_charge" in low) and abs_crate is not None:
         ac = abs(abs_crate)
         if qocv_rate and ac <= qocv_rate * (1 + qocv_tol):
