@@ -133,6 +133,7 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 | `cap_temp` | Target temperature(s) in °C for CAP segments. Scalar or list; each matches `Temperature_mean` within ±3 °C, OR-combined. |
 | `qOCV_CRate` | C-rate threshold for quasi-OCV (`0.05` → C/20, ~1200 min) |
 | `tolerances.qocv_duration_tolerance` | Multiplier on nominal qOCV duration (`60/qOCV_CRate` min) for `find_qocv`'s upper bound (default `1.2`) |
+| `tolerances.qocv_std_tolerance` | Max current std for a qOCV in `fetch_qOCV`, as a C-rate (× `Nom_Capacity` → Amps; default `0.002`). Replaces the old absolute `0.001 A` cap that didn't scale with cell size. |
 | `pau_duration` | Pause threshold (min) for procedure boundaries (default 9.9) |
 | `min_rows` | Min rows to keep a segment (default 20) |
 | `qocv_procedure_filter` | Optional substring; inside matching procedures every `Zustand` change cuts a boundary (splits qOCV DCH/CHA). Omit to disable. |

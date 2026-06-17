@@ -310,6 +310,9 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         pulse_duration_tolerance=cfg.get("tolerances", {}).get(
             "pulse_duration_tolerance", 1.08
         ),
+        qocv_std_tolerance=cfg.get("tolerances", {}).get(
+            "qocv_std_tolerance", 0.002
+        ),
         features=X_silver,
     )
     df_gold = df_silver.copy()
