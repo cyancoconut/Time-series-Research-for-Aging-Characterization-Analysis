@@ -123,7 +123,7 @@ class calculation:
             calculated_capacity = self.Ah_calculation(group)
             if (
                 calculated_capacity < self.Nom_Capacity * 0.5
-                or calculated_capacity > self.Nom_Capacity * 1.05
+                or calculated_capacity > self.Nom_Capacity * 1.1
             ):
                 print("Outlier found at ID: ", ID, "Ah:", calculated_capacity)
                 group["target"] = "-1"
@@ -164,7 +164,7 @@ class calculation:
         print("Calculating Capacity at ID: ", ID, calculated_capacity)
         if (
             calculated_capacity < self.Nom_Capacity * 0.5
-            or calculated_capacity > self.Nom_Capacity * 1.05
+            or calculated_capacity > self.Nom_Capacity * 1.1
         ):
             group["Capacity_py"] = np.nan
             print("Outlier found at ID: ", ID, "Ah:", calculated_capacity)
