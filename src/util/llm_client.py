@@ -26,13 +26,19 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 
 
 class ClusterLabel(BaseModel):
+    # Field order is deliberate and load-bearing: structured output is generated
+    # in declaration order, so `rationale` MUST come first — the model works
+    # through the STEP 0->1->2 decision here, then commits `label` to match its
+    # own conclusion. With `label` first the model locked a guess before
+    # reasoning, producing labels that contradicted their rationale (e.g. a
+    # 40 s pulse reasoned as "pulse" but labelled `partial_dch_c2`).
+    rationale: str
     # Short snake_case name: "<procedure>[_<crate>]" (e.g. "full_discharge_1c",
     # "full_charge_c20", "pulse", "partial_cha_c3"). Deliberately NOT constrained to
     # the pipeline taxonomy, so the interpretation is an independent second
     # opinion next to `target`.
     label: str
     confidence: float = Field(ge=0.0, le=1.0)
-    rationale: str
 
 
 class LLMClient(Protocol):
@@ -133,7 +139,15 @@ numbers show, not the nearest familiar thing: a 1C full discharge is \
 
 Judge from the numbers, not from majority_target / bootstrap_label — those \
 report what a rule-based pipeline thinks, and second-guessing them is the \
-point. Be honest in confidence: 0.9+ only for unambiguous signatures."""
+point. Be honest in confidence: 0.9+ only for unambiguous signatures.
+
+Output order is fixed: write `rationale` FIRST, working through STEP 0 -> 1 -> \
+2 explicitly, THEN set `label` to exactly the procedure your rationale \
+concludes. The `label` and the `rationale` MUST agree — never let `label` \
+disagree with the procedure you reasoned out. In particular, if STEP 0 applies \
+(brief segment with real current), `label` must be exactly "pulse" (no C-rate \
+suffix), not "partial_cha"/"partial_dch" — even when the small \
+true_voltage_range or the C-rate might suggest a partial step."""
 
 
 class AnthropicLLMClient:
