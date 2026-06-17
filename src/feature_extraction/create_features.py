@@ -98,14 +98,24 @@ def feature_extraction(
     # Falls back to Voltage_range when no predecessor (sentinel -1).
     has_prev = X_unlabeled_features["prev_end_voltage_norm"] != -1.0
     is_charge = X_unlabeled_features["Current_mean"] > 0
-    true_range = X_unlabeled_features["Voltage_range"].copy()
-    true_range[has_prev & is_charge] = (
+    charge_swing = (
         X_unlabeled_features["Voltage_max"] - X_unlabeled_features["prev_end_voltage_norm"]
-    )[has_prev & is_charge]
-    true_range[has_prev & ~is_charge] = (
+    )
+    discharge_swing = (
         X_unlabeled_features["prev_end_voltage_norm"] - X_unlabeled_features["Voltage_min"]
-    )[has_prev & ~is_charge]
-    X_unlabeled_features["true_voltage_range"] = true_range
+    )
+    # Vectorized in one pass (avoids the in-place masked assignment that trips
+    # pandas' incompatible-dtype FutureWarning): charge swing where a charge has
+    # a predecessor, discharge swing where a discharge does, else Voltage_range.
+    X_unlabeled_features["true_voltage_range"] = np.where(
+        has_prev & is_charge,
+        charge_swing,
+        np.where(
+            has_prev & ~is_charge,
+            discharge_swing,
+            X_unlabeled_features["Voltage_range"],
+        ),
+    )
 
     # Add target column
     X_unlabeled_features["target"] = np.nan
