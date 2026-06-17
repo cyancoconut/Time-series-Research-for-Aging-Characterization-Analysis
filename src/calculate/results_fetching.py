@@ -22,6 +22,7 @@ class calculation:
         qocv_current_tolerance=0.01,
         restore_current_tolerance=0.05,
         pulse_duration_tolerance=1.08,
+        qocv_std_tolerance=0.002,
         features=None,
     ):
 
@@ -37,12 +38,19 @@ class calculation:
         self.qocv_current_tolerance = qocv_current_tolerance
         self.restore_current_tolerance = restore_current_tolerance
         self.pulse_duration_tolerance = pulse_duration_tolerance
+        # Max current std for a qOCV, as a C-rate (fraction of Nom_Capacity).
+        # The absolute 0.001 A cap it replaces did not scale with cell size: on
+        # a ~11 Ah cell even a clean C/20 sweep has std ~0.0014 A and a harmless
+        # interior low-current dip lifts it further. As a C-rate this passes a
+        # constant-current sweep on any cell while still rejecting a varying
+        # load (a pulse train's std is ~its mean current, far above this).
+        self.qocv_std_tolerance = qocv_std_tolerance
         # Per-ID lookup of the precomputed segment features (trimmed [2:-1] +
         # normalized ÷ Nom_Capacity in create_features). The qOCV current guard
         # reads from here so it sees the same statistics as the rest of the
         # pipeline instead of recomputing on the untrimmed segment, where
-        # stationary edge rows inflate the std past the 0.001 A threshold and
-        # silently drop a valid qOCV (see _qocv_current_amps).
+        # stationary edge rows inflate the std past the cap and silently drop a
+        # valid qOCV (see _qocv_current_amps).
         self.feature_lookup = None
         if features is not None and "ID" in getattr(features, "columns", []):
             cols = [
@@ -79,10 +87,10 @@ class calculation:
         current statistics on the trimmed ``[2:-1]`` window (dropping the
         "faulty stationary values" at the segment edges) and normalizes them by
         ``Nom_Capacity``. Multiplying back by ``Nom_Capacity`` recovers Amps, so
-        the guard's existing thresholds are unchanged but fed the same trimmed
-        statistics the rest of the pipeline uses — keeping qOCV DCH/CHA
-        symmetric. Falls back to recomputing on the same trimmed window when no
-        feature row is available (legacy/notebook callers without ``features``).
+        the guard is fed the same trimmed statistics the rest of the pipeline
+        uses — keeping qOCV DCH/CHA symmetric. Falls back to recomputing on the
+        same trimmed window when no feature row is available (legacy/notebook
+        callers without ``features``).
         """
         feats = self.feature_lookup.get(ID) if self.feature_lookup else None
         if feats is not None:
@@ -111,7 +119,7 @@ class calculation:
         abs_current_mean, current_std = self._qocv_current_amps(group, ID)
         if (
             abs_current_mean < (self.qOCV_CRate * self.Nom_Capacity) + self.qocv_current_tolerance
-        ) & (abs(current_std) < 1 / 1000):
+        ) & (abs(current_std) < self.qocv_std_tolerance * self.Nom_Capacity):
             calculated_capacity = self.Ah_calculation(group)
             if (
                 calculated_capacity < self.Nom_Capacity * 0.5
