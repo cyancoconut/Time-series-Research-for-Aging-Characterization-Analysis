@@ -24,7 +24,8 @@
         "pulse_cluster_tolerance": 3.0,
         "restore_current_tolerance": 0.05,
         "qocv_current_tolerance": 0.01,
-        "qocv_duration_tolerance": 1.2
+        "qocv_duration_tolerance": 1.2,
+        "qocv_std_tolerance": 0.002
     },
 
     "min_rows": 20,

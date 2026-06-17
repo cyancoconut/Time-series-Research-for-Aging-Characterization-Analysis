@@ -27,7 +27,7 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 
 class ClusterLabel(BaseModel):
     # Short snake_case name: "<procedure>[_<crate>]" (e.g. "full_discharge_1c",
-    # "qocv_c20", "pulse", "partial_cha_c3"). Deliberately NOT constrained to
+    # "full_charge_c20", "pulse", "partial_cha_c3"). Deliberately NOT constrained to
     # the pipeline taxonomy, so the interpretation is an independent second
     # opinion next to `target`.
     label: str
@@ -56,11 +56,13 @@ C-rate. Positive = charge, negative = discharge. abs_Current_mean = |.|.
 by the cell's (V_max - V_min) window. Voltage_range is the within-segment \
 swing, but is distorted for charges/discharges because a PAU pause between \
 procedures lets the cell voltage relax toward OCV before the segment starts. \
-- true_voltage_range: the corrected SoC swing — for charges: \
-Voltage_max - prev_end_voltage_norm; for discharges: \
-prev_end_voltage_norm - Voltage_min. Use this (not Voltage_range) to judge \
-whether the segment is full or partial. Falls back to Voltage_range when \
-prev_end_voltage_norm = -1 (no predecessor).
+- true_voltage_range: the corrected SoC swing, ALREADY COMPUTED for you in the \
+signature — use the supplied value, do NOT recompute it. (It is \
+Voltage_max - prev_end_voltage_norm for charges and \
+prev_end_voltage_norm - Voltage_min for discharges, given only so you can \
+interpret it; it falls back to Voltage_range when prev_end_voltage_norm = -1, \
+i.e. no predecessor.) This — not Voltage_range, not Voltage_max/Voltage_min — \
+is the SOLE determinant of whether a segment is full or partial.
 - Duration_minutes: segment length. Duration_quartile = log1p(Duration_minutes).
 - prev_end_voltage_norm: end-of-segment voltage of the nearest preceding \
 non-pause segment, normalized the same way as Voltage features: \
@@ -77,9 +79,12 @@ leftover clusters.
 
 Label format — SHORT, essentials only: "<procedure>" or "<procedure>_<crate>" \
 in snake_case. Procedure is one of: "full_charge", "full_discharge", \
-"partial_cha", "partial_dch", "pulse", "qocv", "rest", "artifact", "unknown". \
-Do NOT distinguish qocv charge from discharge, or test pulses from restore \
-pulses — both are just "qocv" / "pulse". \
+"partial_cha", "partial_dch", "pulse", "rest", "artifact", "unknown". \
+Do NOT distinguish test pulses from restore pulses — both are just "pulse". \
+There is NO "qocv" label: a full charge/discharge at any C-rate, including a \
+very low-rate quasi-OCV-style sweep, is "full_charge"/"full_discharge" with its \
+crate suffix (the pipeline decides quasi-OCV vs capacity downstream from the \
+measured rate). \
 If the signature is too ambiguous or self-contradictory to map to any \
 procedure with reason, use the bare label "unknown" (no C-rate suffix) with a \
 low confidence and explain what is unclear in the rationale — do NOT force a \
@@ -88,16 +93,26 @@ Decide the label in this STRICT ORDER. STEP 1 — full vs partial, by \
 true_voltage_range ALONE, hard cutoff 0.9: true_voltage_range >= 0.9 = FULL \
 (spans essentially the whole SoC window); true_voltage_range < 0.9 = PARTIAL. \
 Nothing else changes this — not duration, not C-rate. A long, low-rate sweep \
-that only covers part of the window is PARTIAL. STEP 2 — only now look at \
+that only covers part of the window is PARTIAL. Voltage_max/Voltage_min \
+touching a rail does NOT make a segment full — only true_voltage_range does. A \
+positive-current charge that starts already full (prev_end_voltage_norm ~ 1.0) \
+and ends at Voltage_max ~ 1.0 has true_voltage_range ~ 0: it is a PARTIAL \
+top-up / CV hold, NEVER full_charge, however close Voltage_max is to 1.0. \
+Symmetrically, a discharge starting already empty (prev_end_voltage_norm ~ 0) \
+ending at Voltage_min ~ 0 has true_voltage_range ~ 0 and is PARTIAL, not \
+full_discharge. STEP 2 — only now look at \
 C-rate. If PARTIAL: the label is "partial_cha" (charge) or "partial_dch" \
-(discharge), FULL STOP — a partial segment is NEVER "qocv", "full_charge" or \
-"full_discharge", however low its current or however long it lasts. If FULL \
-and the C-rate is very low (~C/20 or below): "qocv". If FULL and the C-rate is \
-higher: "full_charge" / "full_discharge". So "qocv" REQUIRES true_voltage_range \
->= 0.9; a low-rate quasi-OCV-looking sweep with true_voltage_range < 0.9 is \
-"partial_cha"/"partial_dch", not "qocv". Append the C-rate only when it is meaningful \
+(discharge), FULL STOP — a partial segment is NEVER "full_charge" or \
+"full_discharge", however low its current or however long it lasts. ALWAYS \
+append the C-rate to a partial label (e.g. "partial_cha_c3", "partial_dch_c2") \
+— the rate is the main thing that distinguishes one partial segment from \
+another, so do not omit it for partials. If FULL: \
+"full_charge" (charge) or "full_discharge" (discharge) by the sign of \
+Current_mean, at WHATEVER C-rate — a very low-rate, full-window quasi-OCV-style \
+sweep is still "full_discharge"/"full_charge", just with a low crate suffix; do \
+NOT down-rank it to a partial. Append the C-rate only when it is meaningful \
 and well-defined, written as "c2" (= C/2), "1c", "c20" etc., e.g. \
-"full_discharge_c2", "full_discharge_1c", "qocv_c20", "partial_cha_c3". \
+"full_discharge_c2", "full_discharge_1c", "full_charge_c20", "partial_cha_c3". \
 If the cluster mixes distinct behaviors beyond that, prefix "mixed_" on the \
 closest procedure. Nothing else goes in the label — no SoC windows, no \
 delta-V, no qualifiers; put every detail in the rationale. Name what the \

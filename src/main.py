@@ -247,7 +247,11 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         )
         logging.info(f"{cell}: classifying segments via {classifier_path}")
         X_silver = predict_targets(
-            X_features, classifier_path, meta_path, cap_rate=cfg.get("cap_rate")
+            X_features,
+            classifier_path,
+            meta_path,
+            cap_rate=cfg.get("cap_rate"),
+            qocv_rate=cfg.get("qocv_crate"),
         )
         df_silver = model_and_supervise.merge_target(dismembered_df, X_silver)
         for col in df_silver.columns:
@@ -306,6 +310,10 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         pulse_duration_tolerance=cfg.get("tolerances", {}).get(
             "pulse_duration_tolerance", 1.08
         ),
+        qocv_std_tolerance=cfg.get("tolerances", {}).get(
+            "qocv_std_tolerance", 0.002
+        ),
+        features=X_silver,
     )
     df_gold = df_silver.copy()
     df_gold.update(calc.update_pulse())
