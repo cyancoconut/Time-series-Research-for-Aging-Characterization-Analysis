@@ -63,7 +63,9 @@ prev_end_voltage_norm - Voltage_min for discharges, given only so you can \
 interpret it; it falls back to Voltage_range when prev_end_voltage_norm = -1, \
 i.e. no predecessor.) This — not Voltage_range, not Voltage_max/Voltage_min — \
 is the SOLE determinant of whether a segment is full or partial.
-- Duration_minutes: segment length. Duration_quartile = log1p(Duration_minutes).
+- Duration_minutes: segment length. Duration_quartile = log1p(Duration_minutes). \
+A pulse lasts only seconds to about a minute; charges, discharges and even \
+partial steps are much longer.
 - prev_end_voltage_norm: end-of-segment voltage of the nearest preceding \
 non-pause segment, normalized the same way as Voltage features: \
 (V - V_min) / (V_max - V_min), so 0 = bottom rail, 1 = top rail. \
@@ -89,10 +91,20 @@ If the signature is too ambiguous or self-contradictory to map to any \
 procedure with reason, use the bare label "unknown" (no C-rate suffix) with a \
 low confidence and explain what is unclear in the rationale — do NOT force a \
 guess onto the nearest familiar procedure. \
-Decide the label in this STRICT ORDER. STEP 1 — full vs partial, by \
+Decide the label in this STRICT ORDER. STEP 0 — pulse first, by DURATION. A \
+pulse is a brief current excitation (a resistance test): a short segment \
+lasting only seconds to about a minute (Duration_minutes well below ~1) that \
+carries appreciable current (abs_Current_mean clearly > 0), in EITHER \
+direction. If the segment is this brief AND carries real current, label it \
+"pulse" regardless of true_voltage_range, sign, or C-rate — it is NEVER \
+"partial_cha"/"partial_dch"/"full_charge"/"full_discharge". (A brief segment \
+with ~0 current is "rest"/"artifact", not a pulse.) Apply STEP 0 BEFORE STEP 1; \
+only a segment that is NOT this brief continues to STEP 1. STEP 1 — full vs \
+partial, by \
 true_voltage_range ALONE, hard cutoff 0.9: true_voltage_range >= 0.9 = FULL \
 (spans essentially the whole SoC window); true_voltage_range < 0.9 = PARTIAL. \
-Nothing else changes this — not duration, not C-rate. A long, low-rate sweep \
+For these (non-pulse) segments nothing else changes the full/partial cut — not \
+duration, not C-rate. A long, low-rate sweep \
 that only covers part of the window is PARTIAL. Voltage_max/Voltage_min \
 touching a rail does NOT make a segment full — only true_voltage_range does. A \
 positive-current charge that starts already full (prev_end_voltage_norm ~ 1.0) \
