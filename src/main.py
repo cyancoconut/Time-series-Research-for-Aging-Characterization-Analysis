@@ -335,14 +335,11 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
 
     _write_x_silver(X_silver, cell, cfg, paths, minio_client)
 
-    # Classifier route: the per-segment CSV (written to 60_classifier/ above) is
-    # the sole output. Skip GOLD, capacity, and pulse/qOCV exports so a classifier
-    # run never overwrites the HDBSCAN GOLD/exports — it produces only the
-    # comparison CSV. The calculate step already ran, so the CSV carries final
-    # labels (CAP / PUL / qOCV_DCH / qOCV_CHA).
-    if classifier_path:
-        logging.info(f"{cell}: classifier route — wrote CSV only, skipping GOLD/exports")
-        return
+    # Both paths continue to GOLD. The classifier is a drop-in for HDBSCAN: its
+    # segment CSV is namespaced under 60_classifier/ (kept out of the training
+    # set), but GOLD + capacity/pulse/qOCV exports land in the shared locations,
+    # so a classifier run produces the same downstream outputs as an HDBSCAN run
+    # (and overwrites them for that cell).
 
     # TODO: consider moving the labeling and schedule preparation steps to a separate visualization module that takes the GOLD output as input, to keep the core pipeline focused on data processing and calculation. For now, we'll include it here for simplicity.
     # try:
