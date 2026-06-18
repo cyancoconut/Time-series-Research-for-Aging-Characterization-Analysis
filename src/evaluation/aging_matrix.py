@@ -2,7 +2,9 @@
 
 Port of the exploratory `alterungsmatrix.ipynb` notebook. Aggregates per-cell
 capacity loss, normalized by Ah throughput, into a matrix indexed by
-(C_Rate, Temperature, DOD, SOC) and renders it as interactive plots.
+(C_Rate, Temperature, DOD, SOC) and renders it as interactive plots. The HTML
+also leads with a fleet capacity-fade plot (normalized capacity vs equivalent
+full cycle, faceted by DOD) ported from the `alterungsmatrix.ipynb` notebook.
 
 Per cell:
     capacity_lost       = max - min of Capacity_py across the cell's check-ups
@@ -35,6 +37,7 @@ import os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from scipy.spatial import cKDTree
 
 from evaluation.export_cap_pulse import EVAL_DIRNAME, build_capacity_table
@@ -51,6 +54,11 @@ GROUP_KEYS = ["C_Rate", "Temperature", "DOD", "SOC"]
 # back to the plotly default palette.
 TEMP_COLORS = {15: "skyblue", 25: "seagreen", 35: "goldenrod", 45: "tomato"}
 _FALLBACK_COLORS = ["mediumpurple", "darkorange", "teal", "crimson", "slategray"]
+
+# Capacity-fade plot: DOD facets, temperature colors, C-rate marker symbols.
+DOD_SUBPLOT_POSITIONS = {20: (1, 1), 40: (1, 2), 60: (2, 1), 80: (2, 2), 100: (3, 1)}
+FADE_TEMP_COLORS = {15: "#1f77b4", 25: "#2ca02c", 35: "#d39e00", 45: "#d62728"}
+_MARKER_SYMBOLS = ["circle", "square", "diamond", "cross", "x", "triangle-up"]
 
 
 def build_cell_table(df_all):
@@ -104,6 +112,85 @@ def build_matrix(df_cells):
 # --------------------------------------------------------------------------- #
 # Plotting
 # --------------------------------------------------------------------------- #
+
+def _capacity_fade_figure(df_all, c_nom):
+    """3x2 DOD-faceted capacity-vs-EFC fade plot across the fleet.
+
+    Port of the notebook `plot_plotly`: per cell, normalized capacity
+    (``Capacity_py / Nom_Capacity``) over equivalent full cycles
+    (``Ah_throughput / Nom_Capacity``), faceted by DOD, one lines+markers
+    trace per (cell, temperature, SOC, C-rate) sorted by EFC, colored by
+    temperature, marker symbol by aging C-rate. Self-contained — no
+    ``rwth_colors`` dependency, no ``fig.show()``, no hardcoded output path.
+    """
+    df = df_all.copy()
+    df["Name_prefix"] = df["Name"].astype(str).str.split("-").str[0]
+    df["cap_norm"] = df["Capacity_py"] / c_nom
+    df["EFC"] = df["Ah_throughput"] / c_nom
+    if "Time" not in df.columns:
+        df["Time"] = pd.NaT
+
+    fig = make_subplots(
+        rows=3, cols=2,
+        subplot_titles=["DOD = 20%", "DOD = 40%", "DOD = 60%",
+                        "DOD = 80%", "DOD = 100%", ""],
+        vertical_spacing=0.1, horizontal_spacing=0.08,
+        specs=[[{}, {}], [{}, {}], [{}, None]],
+    )
+
+    crates = sorted(df["C_Rate"].dropna().astype(str).unique())
+    crate_symbol = {
+        c: _MARKER_SYMBOLS[i % len(_MARKER_SYMBOLS)] for i, c in enumerate(crates)
+    }
+    seen_temps = set()
+
+    for dod, (row, col) in DOD_SUBPLOT_POSITIONS.items():
+        sub = df[df["DOD"] == dod]
+        for (name, temp, soc, crate), g in sub.groupby(
+            ["Name_prefix", "Temperature", "SOC", "C_Rate"], dropna=False
+        ):
+            g = g.sort_values("EFC")
+            if g.empty:
+                continue
+            color = FADE_TEMP_COLORS.get(temp, "#7f7f7f")
+            show = temp not in seen_temps
+            seen_temps.add(temp)
+            fig.add_trace(
+                go.Scatter(
+                    x=g["EFC"], y=g["cap_norm"],
+                    mode="lines+markers",
+                    name=f"{temp}°C",
+                    legendgroup=str(temp),
+                    showlegend=show,
+                    line=dict(color=color),
+                    marker=dict(color=color, size=7,
+                                symbol=crate_symbol.get(str(crate), "circle")),
+                    customdata=g[["Name_prefix", "SOC", "C_Rate", "Time"]].to_numpy(),
+                    hovertemplate=(
+                        "<b>%{customdata[0]}</b><br>"
+                        f"Temp: {temp}°C<br>"
+                        "SOC: %{customdata[1]}%<br>"
+                        f"DOD: {dod}%<br>"
+                        "C-Rate: %{customdata[2]}<br>"
+                        "EFC: %{x:.1f}<br>Capacity: %{y:.3f}<br>"
+                        "Time: %{customdata[3]}<extra></extra>"
+                    ),
+                ),
+                row=row, col=col,
+            )
+        fig.update_xaxes(title_text="Equivalent Full Cycle", row=row, col=col,
+                         showgrid=True, gridwidth=1, gridcolor="lightgrey")
+        fig.update_yaxes(title_text="Capacity (norm.)", row=row, col=col,
+                         showgrid=True, gridwidth=1, gridcolor="lightgrey")
+
+    fig.update_layout(
+        title="Battery capacity vs equivalent full cycle, by DOD",
+        legend_title="Temperature",
+        width=1400, height=1000,
+        plot_bgcolor="white", paper_bgcolor="white",
+    )
+    return fig
+
 
 def _variance_figure(sub, title):
     """2D SOC x DOD scatter colored by cell-to-cell capacity-loss spread."""
@@ -233,9 +320,14 @@ def _layout_3d(fig, title):
     )
 
 
-def render_html(matrix, title="Battery aging matrix"):
+def render_html(matrix, df_all=None, c_nom=None, title="Battery aging matrix"):
     """Assemble all plots into one self-contained HTML string."""
     sections = []  # (heading, figure)
+    if df_all is not None and not df_all.empty:
+        sections.append(
+            ("Capacity fade — capacity vs equivalent full cycle",
+             _capacity_fade_figure(df_all, c_nom))
+        )
     for (c_rate, temp), sub in matrix.groupby(["C_Rate", "Temperature"], dropna=False):
         if sub.empty:
             continue
@@ -268,8 +360,8 @@ def render_html(matrix, title="Battery aging matrix"):
 # Output routing
 # --------------------------------------------------------------------------- #
 
-def _write_outputs(matrix, cfg, out_dir):
-    html = render_html(matrix)
+def _write_outputs(matrix, cfg, out_dir, df_all=None):
+    html = render_html(matrix, df_all=df_all, c_nom=cfg["nom_capacity"])
 
     if io_router.writes_local(cfg) and out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -330,7 +422,7 @@ def main():
     out_dir = args.output_dir or os.path.join(
         cfg.get("working_path", "."), EVAL_DIRNAME
     )
-    _write_outputs(matrix, cfg, out_dir)
+    _write_outputs(matrix, cfg, out_dir, df_all=df_all)
 
 
 if __name__ == "__main__":
