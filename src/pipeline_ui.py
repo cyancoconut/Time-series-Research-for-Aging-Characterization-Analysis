@@ -358,6 +358,9 @@ class PipelineUI(ctk.CTk):
             placeholder="optional, space-separated, e.g. VTC_cell01 VTC_cell02",
         )
         self.br_overwrite = s.add_checkbox("--overwrite (rebuild even if output exists)")
+        self.br_incremental = s.add_checkbox(
+            "--incremental (append only new test files to existing BRONZE_CU)"
+        )
 
         ctk.CTkLabel(
             parent,
@@ -522,6 +525,8 @@ class PipelineUI(ctk.CTk):
         self.br_cells.insert(0, s.get("br_cells", ""))
         if s.get("br_overwrite"):
             self.br_overwrite.select()
+        if s.get("br_incremental"):
+            self.br_incremental.select()
         self.mn_cells.insert(0, s.get("mn_cells", ""))
         if s.get("mn_overwrite"):
             self.mn_overwrite.select()
@@ -543,6 +548,7 @@ class PipelineUI(ctk.CTk):
             "battery_cfg": self.battery_cfg_entry.get(),
             "br_cells": self.br_cells.get(),
             "br_overwrite": bool(self.br_overwrite.get()),
+            "br_incremental": bool(self.br_incremental.get()),
             "mn_cells": self.mn_cells.get(),
             "mn_overwrite": bool(self.mn_overwrite.get()),
             "mn_clustering": self.mn_clustering.get(),
@@ -713,6 +719,8 @@ class PipelineUI(ctk.CTk):
             argv += ["--cells", *cells]
         if self.br_overwrite.get():
             argv.append("--overwrite")
+        if self.br_incremental.get():
+            argv.append("--incremental")
         return argv
 
     def _build_pipeline_argv(self) -> list[str] | None:
