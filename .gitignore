@@ -17,3 +17,5 @@ dig2mat.log
 # (<working_path>/60_classifier/models/); the repo /models/ is only the
 # fallback when working_path is unset and must not be committed.
 /models/
+# Generated analysis plots
+/plots/
