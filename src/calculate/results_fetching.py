@@ -121,31 +121,23 @@ class calculation:
             abs_current_mean < (self.qOCV_CRate * self.Nom_Capacity) + self.qocv_current_tolerance
         ) & (abs(current_std) < self.qocv_std_tolerance * self.Nom_Capacity):
             calculated_capacity = self.Ah_calculation(group)
-            if (
-                calculated_capacity < self.Nom_Capacity * 0.5
-                or calculated_capacity > self.Nom_Capacity * 1.1
-            ):
-                print("Outlier found at ID: ", ID, "Ah:", calculated_capacity)
-                group["target"] = "-1"
-            else:
-
-                if np.sign(group["Current"].iloc[-1]) == 1:
-                    if group["target"].iloc[-1] == "qOCV_CHA":
-                        print("qOCV already added at ID: ", ID)
-                    else:
-                        group["target"] = "qOCV_CHA"
-                        print("Added qOCV with Capacity: ", calculated_capacity)
+            if np.sign(group["Current"].iloc[-1]) == 1:
+                if group["target"].iloc[-1] == "qOCV_CHA":
+                    print("qOCV already added at ID: ", ID)
                 else:
-                    if group["target"].iloc[-1] == "qOCV_DCH":
-                        print("qOCV already added at ID: ", ID)
-                    else:
-                        group["target"] = "qOCV_DCH"
-                        print(
-                            "Added qOCV at ID ",
-                            ID,
-                            " with Capacity: ",
-                            calculated_capacity,
-                        )
+                    group["target"] = "qOCV_CHA"
+                    print("Added qOCV with Capacity: ", calculated_capacity)
+            else:
+                if group["target"].iloc[-1] == "qOCV_DCH":
+                    print("qOCV already added at ID: ", ID)
+                else:
+                    group["target"] = "qOCV_DCH"
+                    print(
+                        "Added qOCV at ID ",
+                        ID,
+                        " with Capacity: ",
+                        calculated_capacity,
+                    )
         else:
             group["target"] = "-1"
         return group
@@ -162,17 +154,8 @@ class calculation:
     def fetch_capacity(self, group, ID):
         calculated_capacity = self.Ah_calculation(group)
         print("Calculating Capacity at ID: ", ID, calculated_capacity)
-        if (
-            calculated_capacity < self.Nom_Capacity * 0.5
-            or calculated_capacity > self.Nom_Capacity * 1.1
-        ):
-            group["Capacity_py"] = np.nan
-            print("Outlier found at ID: ", ID, "Ah:", calculated_capacity)
-            group["target"] = "-1"
-
-        else:
-            group["Capacity_py"] = calculated_capacity
-            group["target"] = "CAP"
+        group["Capacity_py"] = calculated_capacity
+        group["target"] = "CAP"
         return group
 
     def fetch_pulse(self, group, ID):
