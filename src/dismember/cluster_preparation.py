@@ -51,10 +51,20 @@ class DismemblerFunctions:
 
         # Within each BM_Programm...
         for programm_name, programm_df in df_cell.groupby("BM_Programm"):
-            # Check if the Programm is empty or too short
-            if len(programm_df) == 1:
+            # Cyclic-data stubs: non-CU (aging) files are stored as just their
+            # first+last row (1–2 rows), carrying the aging procedure name in
+            # Prozedur. Keep these tiny programms so that name reaches GOLD, but
+            # skip segmentation and exclude them from clustering — route them to
+            # the discard bucket and pre-label them "AGING" (target != -1).
+            # Without this they hit the <MIN_ROWS drop below and the aging name
+            # is lost (it only reached GOLD before when a stub incidentally
+            # shared an Ahjo_Test_ID group large enough to clear MIN_ROWS).
+            if len(programm_df) <= 2:
+                programm_df = programm_df.copy()
                 programm_df["BM_Programm_procedure"] = 0
+                programm_df["pre_target"] = "AGING"
                 processed_dfs.append(programm_df)
+                continue
 
             if programm_df.empty or len(programm_df) < self.MIN_ROWS:
                 print(
@@ -236,16 +246,20 @@ def allocate_IDs(result_df, start_date=None, end_date=None):
         lambda x: "EIS" if x.isna().any() else -1
     ).astype(object)
 
-    # Propagate the dismember-time PAU pre-label to every row of the affected IDs.
-    # `pre_target == "PAU"` is set in DismembererFunctions.dismember() right after the
-    # PAU group handling and before the too-short discard sweep. Promoting per-ID here
-    # ensures contaminating rows later dumped into the same ID (typically <BM>_0) still
-    # carry target="PAU" so the discard bucket is excluded from clustering wholesale.
+    # Propagate dismember-time pre-labels to every row of the affected IDs.
+    # `pre_target` is set in DismembererFunctions.dismember():
+    #   PAU   — long-pause stubs (set after the PAU group handling, before the
+    #           too-short discard sweep, so bucket-0 holds only PAU rows then)
+    #   AGING — cyclic-data stubs (kept whole programms of ≤2 rows)
+    # Promoting per-ID here ensures contaminating rows later dumped into the same
+    # ID (typically <BM>_0) still carry the label, so the discard bucket is
+    # excluded from clustering wholesale.
     if "pre_target" in result_df.columns:
-        pau_id_mask = result_df.groupby("ID")["pre_target"].transform(
-            lambda x: (x == "PAU").any()
-        )
-        result_df.loc[pau_id_mask, "target"] = "PAU"
+        for label in ("PAU", "AGING"):
+            id_mask = result_df.groupby("ID")["pre_target"].transform(
+                lambda x, lbl=label: (x == lbl).any()
+            )
+            result_df.loc[id_mask, "target"] = label
         result_df = result_df.drop(columns=["pre_target"])
 
     # Calculate the duration of each ID
