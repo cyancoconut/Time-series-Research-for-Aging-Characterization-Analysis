@@ -5,7 +5,9 @@ aggregation will be handled by a separate evaluation script.
 
 Inputs (driven by `download_from` in the battery config):
     <working_path or minio_prefix>/40_capacity_monitore/<cell_stem>_capacity.csv
-    <working_path or minio_prefix>/[10_TRACY/]GOLD/<cell_stem>.parquet  (Prozedur column only)
+    <working_path or minio_prefix>/BRONZE_CU/<cell_stem>_manifest.json
+        (the `processed` list of test filenames; the aging procedure name is
+        the 4th '='-delimited filename field of the cyclic files)
 
 Outputs (driven by `upload_to`):
     <working_path>/50_evaluation/capacity_results.csv
@@ -24,7 +26,6 @@ import logging
 import os
 
 import pandas as pd
-import pyarrow.parquet as pq
 
 from output.add_information_Hina import add_additional_information
 from util import io_router
@@ -39,7 +40,8 @@ def _make_readers(cfg, source):
 
     cells: list of `<stem>_capacity.csv` filenames.
     fetch_capacity(name) -> DataFrame (the capacity CSV).
-    fetch_procedures(stem) -> list[str] unique Prozedur values from GOLD, or [].
+    fetch_procedures(stem) -> list[str] procedure names from the BRONZE_CU
+        manifest's `processed` filenames (aging + check-up), or [].
     """
     if source == "local":
         wp = cfg["working_path"]
@@ -51,10 +53,12 @@ def _make_readers(cfg, source):
             return pd.read_csv(os.path.join(cap_dir, name))
 
         def fetch_procedures(stem):
-            path = os.path.join(wp, "GOLD", f"{stem}.parquet")
+            path = os.path.join(wp, "BRONZE_CU", f"{stem}_manifest.json")
             if not os.path.exists(path):
+                logging.warning(f"{stem}: no BRONZE_CU manifest at {path}")
                 return []
-            return _read_unique_prozedur(path)
+            with open(path) as f:
+                return _procedure_names_from_manifest(json.load(f))
 
         return cells, fetch_capacity, fetch_procedures
 
@@ -79,37 +83,35 @@ def _make_readers(cfg, source):
         return pd.read_csv(io.BytesIO(data))
 
     def fetch_procedures(stem):
+        key = f"{cfg['minio_prefix']}/BRONZE_CU/{stem}_manifest.json"
         try:
-            f = io_router.open_gold_range(client, cfg, f"{stem}.parquet")
-        except Exception:
+            response = client.get_object(bucket, key)
+            try:
+                manifest = json.loads(response.read())
+            finally:
+                response.close()
+                response.release_conn()
+        except Exception as e:
+            logging.warning(f"{stem}: no BRONZE_CU manifest ({type(e).__name__})")
             return []
-        try:
-            return _read_unique_prozedur(f)
-        finally:
-            f.close()
+        return _procedure_names_from_manifest(manifest)
 
     return cells, fetch_capacity, fetch_procedures
 
 
-def _read_unique_prozedur(source):
-    """Read the unique non-null `Prozedur` values from a GOLD parquet.
+def _procedure_names_from_manifest(manifest):
+    """Procedure names from a BRONZE_CU manifest's `processed` filenames.
 
-    Reads the whole column in a single pass so pyarrow can coalesce range
-    reads — much faster over MinIO than per-row-group reads, which each
-    trigger their own HTTP GET.
+    Each processed test filename is '='-delimited; the 4th field is the
+    procedure name (cyclic/aging or check-up). The aging name is selected
+    downstream by `add_information.select_aging_name`.
     """
-    pf = pq.ParquetFile(source, pre_buffer=True)
-    if "Prozedur" not in pf.schema_arrow.names or pf.num_row_groups == 0:
-        return []
-    col = pf.read(columns=["Prozedur"]).column("Prozedur")
-    seen = []
-    seen_set = set()
-    for chunk in col.chunks:
-        for v in chunk.drop_null().unique().to_pylist():
-            if v not in seen_set:
-                seen_set.add(v)
-                seen.append(v)
-    return seen
+    names = []
+    for fname in manifest.get("processed", []):
+        parts = os.path.basename(fname).split("=")
+        if len(parts) > 3:
+            names.append(parts[3])
+    return names
 
 
 def build_capacity_table(cfg, source="local"):
