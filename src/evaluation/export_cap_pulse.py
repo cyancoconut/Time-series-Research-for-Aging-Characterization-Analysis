@@ -26,7 +26,7 @@ import os
 import pandas as pd
 import pyarrow.parquet as pq
 
-from output.add_information_METABATT import add_additional_information
+from output.add_information_Hina import add_additional_information
 from util import io_router
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
