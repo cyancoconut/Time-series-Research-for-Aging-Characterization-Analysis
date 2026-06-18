@@ -26,13 +26,19 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 
 
 class ClusterLabel(BaseModel):
+    # Field order is deliberate and load-bearing: structured output is generated
+    # in declaration order, so `rationale` MUST come first — the model works
+    # through the STEP 0->1->2 decision here, then commits `label` to match its
+    # own conclusion. With `label` first the model locked a guess before
+    # reasoning, producing labels that contradicted their rationale (e.g. a
+    # 40 s pulse reasoned as "pulse" but labelled `partial_dch_c2`).
+    rationale: str
     # Short snake_case name: "<procedure>[_<crate>]" (e.g. "full_discharge_1c",
     # "full_charge_c20", "pulse", "partial_cha_c3"). Deliberately NOT constrained to
     # the pipeline taxonomy, so the interpretation is an independent second
     # opinion next to `target`.
     label: str
     confidence: float = Field(ge=0.0, le=1.0)
-    rationale: str
 
 
 class LLMClient(Protocol):
@@ -63,7 +69,9 @@ prev_end_voltage_norm - Voltage_min for discharges, given only so you can \
 interpret it; it falls back to Voltage_range when prev_end_voltage_norm = -1, \
 i.e. no predecessor.) This — not Voltage_range, not Voltage_max/Voltage_min — \
 is the SOLE determinant of whether a segment is full or partial.
-- Duration_minutes: segment length. Duration_quartile = log1p(Duration_minutes).
+- Duration_minutes: segment length. Duration_quartile = log1p(Duration_minutes). \
+A pulse lasts only seconds to about a minute; charges, discharges and even \
+partial steps are much longer.
 - prev_end_voltage_norm: end-of-segment voltage of the nearest preceding \
 non-pause segment, normalized the same way as Voltage features: \
 (V - V_min) / (V_max - V_min), so 0 = bottom rail, 1 = top rail. \
@@ -89,10 +97,20 @@ If the signature is too ambiguous or self-contradictory to map to any \
 procedure with reason, use the bare label "unknown" (no C-rate suffix) with a \
 low confidence and explain what is unclear in the rationale — do NOT force a \
 guess onto the nearest familiar procedure. \
-Decide the label in this STRICT ORDER. STEP 1 — full vs partial, by \
+Decide the label in this STRICT ORDER. STEP 0 — pulse first, by DURATION. A \
+pulse is a brief current excitation (a resistance test): a short segment \
+lasting only seconds to about a minute (Duration_minutes well below ~1) that \
+carries appreciable current (abs_Current_mean clearly > 0), in EITHER \
+direction. If the segment is this brief AND carries real current, label it \
+"pulse" regardless of true_voltage_range, sign, or C-rate — it is NEVER \
+"partial_cha"/"partial_dch"/"full_charge"/"full_discharge". (A brief segment \
+with ~0 current is "rest"/"artifact", not a pulse.) Apply STEP 0 BEFORE STEP 1; \
+only a segment that is NOT this brief continues to STEP 1. STEP 1 — full vs \
+partial, by \
 true_voltage_range ALONE, hard cutoff 0.9: true_voltage_range >= 0.9 = FULL \
 (spans essentially the whole SoC window); true_voltage_range < 0.9 = PARTIAL. \
-Nothing else changes this — not duration, not C-rate. A long, low-rate sweep \
+For these (non-pulse) segments nothing else changes the full/partial cut — not \
+duration, not C-rate. A long, low-rate sweep \
 that only covers part of the window is PARTIAL. Voltage_max/Voltage_min \
 touching a rail does NOT make a segment full — only true_voltage_range does. A \
 positive-current charge that starts already full (prev_end_voltage_norm ~ 1.0) \
@@ -121,7 +139,15 @@ numbers show, not the nearest familiar thing: a 1C full discharge is \
 
 Judge from the numbers, not from majority_target / bootstrap_label — those \
 report what a rule-based pipeline thinks, and second-guessing them is the \
-point. Be honest in confidence: 0.9+ only for unambiguous signatures."""
+point. Be honest in confidence: 0.9+ only for unambiguous signatures.
+
+Output order is fixed: write `rationale` FIRST, working through STEP 0 -> 1 -> \
+2 explicitly, THEN set `label` to exactly the procedure your rationale \
+concludes. The `label` and the `rationale` MUST agree — never let `label` \
+disagree with the procedure you reasoned out. In particular, if STEP 0 applies \
+(brief segment with real current), `label` must be exactly "pulse" (no C-rate \
+suffix), not "partial_cha"/"partial_dch" — even when the small \
+true_voltage_range or the C-rate might suggest a partial step."""
 
 
 class AnthropicLLMClient:
