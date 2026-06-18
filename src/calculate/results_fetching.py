@@ -159,15 +159,8 @@ class calculation:
         return group
 
     def fetch_pulse(self, group, ID):
-        duration = calculation.get_duration(self, group)
-        if (
-            duration < (self.pulse_type * self.target_pulse_duration) * self.pulse_duration_tolerance
-        ):
-            print("Pulse labeled at ID: ", ID)
-            group["target"] = "PUL"
-        else:
-            print("Outlier found at ID: ", ID, duration)
-            group["target"] = "-1"
+        print("Pulse labeled at ID: ", ID)
+        group["target"] = "PUL"
         return group
 
     def update_qOCV(self):
