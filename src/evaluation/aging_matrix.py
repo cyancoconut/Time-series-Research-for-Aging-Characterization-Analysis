@@ -123,7 +123,6 @@ def _capacity_fade_figure(df_all, c_nom):
     temperature, marker symbol by aging C-rate. Self-contained — no
     ``rwth_colors`` dependency, no ``fig.show()``, no hardcoded output path.
     """
-    c_nom = c_nom or 1.0
     df = df_all.copy()
     df["Name_prefix"] = df["Name"].astype(str).str.split("-").str[0]
     df["cap_norm"] = df["Capacity_py"] / c_nom
@@ -362,7 +361,7 @@ def render_html(matrix, df_all=None, c_nom=None, title="Battery aging matrix"):
 # --------------------------------------------------------------------------- #
 
 def _write_outputs(matrix, cfg, out_dir, df_all=None):
-    html = render_html(matrix, df_all=df_all, c_nom=cfg.get("Nom_Capacity"))
+    html = render_html(matrix, df_all=df_all, c_nom=cfg["Nom_Capacity"])
 
     if io_router.writes_local(cfg) and out_dir:
         os.makedirs(out_dir, exist_ok=True)
