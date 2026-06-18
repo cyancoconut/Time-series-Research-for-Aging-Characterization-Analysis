@@ -1,7 +1,7 @@
 import pandas as pd
 import dask.dataframe as dd
-import numpy as np
-from scipy import integrate
+
+from util.add_ah_throughput import add_ah_throughput
 
 
 class DismemblerFunctions:
@@ -26,23 +26,10 @@ class DismemblerFunctions:
 
     def add_ah_throughput(self, df_cell):
         # BRONZE_CU now carries Ah_throughput from the build step (full timeline).
-        # Only recompute if it's missing (e.g. legacy parquet without the column).
-        if "Ah_throughput" in df_cell.columns:
-            return df_cell
-        else:
-            # Calculate time difference in hours
-            time_h = df_cell["Time_UTC"].diff().dt.total_seconds()
-            time_h = np.cumsum(time_h).values / 3600
-            time_h[0] = 0
-
-            # Calculate cumulative Ah throughput using the absolute current values
-            AhThroughput = integrate.cumulative_trapezoid(
-                abs(df_cell["Current"].values), x=time_h, initial=0
-            )
-
-            # Add the calculated values as a new column to your dataframe
-            df_cell["Ah_throughput"] = AhThroughput
-            return df_cell
+        # Only recompute if it's missing (e.g. legacy parquet without the
+        # column). Delegate to the shared util so the gap-masking (no phantom Ah
+        # over dead time between files) is applied here too.
+        return add_ah_throughput(df_cell)
 
     def dismembling(self, df_cell):
         processed_dfs = []
