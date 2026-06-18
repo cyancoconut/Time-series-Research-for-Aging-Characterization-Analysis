@@ -1,0 +1,23 @@
+# Keep the build context (and image) small and free of host-specific cruft.
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+*.egg-info
+src/ahjo_dl.egg-info
+
+# Notebooks and generated artifacts are not needed by the CLI image.
+**/*.ipynb
+plots/
+dist/
+models/
+
+# Secrets / host config: never bake into the image. Mount these at runtime.
+config.json
+config_SE.json
+.metabatt_ui_download.json
+
+# Docs / misc
+*.svg
+*.log

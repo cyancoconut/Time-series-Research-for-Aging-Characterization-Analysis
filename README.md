@@ -86,6 +86,42 @@ python main.py /path/to/battery_config.json --cells VTC_cell01 VTC_cell02
 python main.py /path/to/battery_config.json --overwrite
 ```
 
+## Running with Docker
+
+A headless image runs the CLI pipeline (and the other `python -m ...` entry points) without a local Python setup. The `customtkinter` GUI (`pipeline_ui.py`) is **not** included — the image is CLI-only — and `tensorflow`/`keras` are excluded (the HDBSCAN path never calls the autoencoder methods that import them), so the image uses `requirements_docker.txt` rather than `requirements_linux.txt`.
+
+Data, the battery config, and secrets are **bind-mounted at runtime** — nothing data-related or secret is baked into the image.
+
+```bash
+# Build
+docker build -t metabatt:latest .
+```
+
+Inside the container the data directory is mounted at `/data`, so set **`"working_path": "/data"`** in the battery config you mount.
+
+**With docker compose** (host paths are overridable via `METABATT_DATA` / `METABATT_CONFIG` / `METABATT_SECRETS`):
+
+```bash
+docker compose build
+docker compose run --rm metabatt /app/battery_config.json --cells VTC_cell01
+
+# A different entry point (evaluation, monitor, ...):
+docker compose run --rm --entrypoint python metabatt \
+    -m evaluation.aging_matrix /app/battery_config.json
+```
+
+**With plain `docker run`:**
+
+```bash
+docker run --rm \
+  -v /home/ann/Documents/Data_Metabatt:/data \
+  -v $(pwd)/battery_config_VTC_linux.json:/app/battery_config.json:ro \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  metabatt:latest /app/battery_config.json --cells VTC_cell01
+```
+
+During active development you can run live host code without rebuilding by also mounting `src/` (uncomment the `./src:/app/src` line in `docker-compose.yml`, or add `-v $(pwd)/src:/app/src` to `docker run`).
+
 ## Project structure
 
 ```
