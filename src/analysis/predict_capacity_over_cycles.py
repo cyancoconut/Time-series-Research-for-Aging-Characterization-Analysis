@@ -122,6 +122,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--every", type=int, default=5, help="predict on every Nth partial cycle")
     ap.add_argument("--ref-bm", type=int, default=7, help="reference check-up BM (OCV shape + RC)")
+    ap.add_argument("--skip-settling", type=int, default=10,
+                    help="skip this many leading (post-check-up settling) cycles before anchoring the calibration")
     args = ap.parse_args()
 
     rc, _, grid, ocv = load_reference(CELL, args.ref_bm)
@@ -140,12 +142,15 @@ def main():
     picks = cycles[:: args.every]
     rows = [predict_from_partial(c, soc_grid, ocv, rc) for c in picks]
     res = pd.DataFrame(rows)
-    # one-time calibration: anchor the first predicted cycle to the "before"
+    # one-time calibration: anchor a *post-settling* cycle to the "before"
     # check-up's C/2 capacity (a constant offset; the predicted *fade* is
-    # unchanged). Removes the systematic OCV-hysteresis/plateau bias.
-    offset = before["cap_Ah"] - res["cap"].iloc[0]
+    # unchanged). Removes the systematic OCV-hysteresis/plateau bias. The first
+    # ~10 cycles after a check-up are a settling transient (v_relax_post drift),
+    # so anchoring on cycle 0 is unreliable -- skip them first.
+    anchor = next((j for j in range(len(picks)) if j * args.every >= args.skip_settling), 0)
+    offset = before["cap_Ah"] - res["cap"].iloc[anchor]
     res["cap_cal"] = res["cap"] + offset
-    offset_rc = before["cap_Ah"] - res["cap_rc"].iloc[0]
+    offset_rc = before["cap_Ah"] - res["cap_rc"].iloc[anchor]
     res["cap_rc_cal"] = res["cap_rc"] + offset_rc
 
     print(f"reference BM{args.ref_bm}: qOCV cap {cap_ref:.3f} Ah, "
@@ -155,7 +160,8 @@ def main():
           f"BM{before['bm']} {before['date']:%Y-%m-%d} {before['cap_Ah']:.3f} Ah  ->  "
           f"BM{after['bm']} {after['date']:%Y-%m-%d} {after['cap_Ah']:.3f} Ah")
     print(f"{len(cycles)} partial cycles, predicting every {args.every} -> {len(picks)} cycles")
-    print(f"calibration offset to BM{before['bm']}: {offset:+.3f} Ah\n")
+    print(f"calibration anchor: cycle {anchor * args.every} ({res['time'].iloc[anchor]:%m-%d %H:%M}), "
+          f"skipping first {args.skip_settling} settling cycles\n")
     show = res.copy()
     show["time"] = show["time"].dt.strftime("%m-%d %H:%M")
     print(show[["time", "v0", "v1", "d_ah", "soc0", "soc1", "cap", "cap_rc", "cap_cal"]].round(3).to_string(index=False))
@@ -182,6 +188,8 @@ def main():
     for b, c in ((before, "C0"), (after, "C2")):
         ax.scatter(b["date"], b["cap_Ah"], color=c, s=90, zorder=5,
                    label=f"BM{b['bm']} C/2 capacity = {b['cap_Ah']:.3f} Ah")
+    ax.axvline(res["time"].iloc[anchor], color="0.4", ls=":", lw=1,
+               label=f"calibration anchor (cycle {anchor * args.every})")
     ax.set_xlabel("date")
     ax.set_ylabel("capacity (Ah)")
     ax.set_title(f"{CELL}: full capacity predicted from partial cycles vs C/2 check-ups")
