@@ -24,8 +24,12 @@ Pipeline
    The 20 s pulse alone cannot resolve the slow tau and the relaxation alone
    under-weights R0; fitting both together identifies all six parameters.
    ``OCV`` is a fit parameter (the relaxation asymptote), so a pulse missing its
-   *pre*-relaxation is fine. R0 is cross-checked against the ohmic voltage jump
-   at pulse termination (and onset, where a pre-rest exists). C_k = tau_k / R_k.
+   *pre*-relaxation is fine. ``R0`` is **not** fit: it is pinned to the DC pulse
+   resistance R_DC,Δt = ΔU/ΔI (Ludwig et al., J. Power Sources 490 (2021)
+   229523) — measured over a fixed Δt (default 0.5 s) from the onset using the
+   actual current step, which is reproducible across check-ups and ramp-robust.
+   The termination R_DC and the instantaneous jumps are reported as cross-checks
+   (``R0_consistent`` flags onset vs termination R_DC agreement). C_k = tau_k/R_k.
 
 Standalone analysis utility — does not touch the pipeline. Run from ``src/``::
 
@@ -48,13 +52,23 @@ DEFAULT_SOC = "50%"  # used when a cell lacks len(SOC_ORDER) distinct cycles
 REMOVE_PULSE_BEFORE_MIN = 0       # drop pulses earlier than this into a cycle
                                   # (0 = keep all; kept inert here)
 # Pulses to exclude from the fit by their ``Zustand/Current`` identity. The
-# lead DCH/-1.5 pulse has no pre-pulse relaxed voltage (the file starts
-# mid-pulse) and is distorted, so it is dropped by label rather than by timing.
+# lead DCH/-1.5 pulse has no pre-pulse pause, so its onset-R0 cross-check is
+# unavailable and only the termination jump remains; the RC fit then degenerates
+# (the step is undersampled at ~0.2 s, so the early double-layer region the RC
+# needs is unmeasured). Dropped by label rather than by timing.
 EXCLUDE_ZUSTAND_CURRENT = ["DCH/-1.5"]
 CYCLE_ACTIVE_LIMIT_HOUR = 4.0     # time_diff > this starts a new cycle
 STD_LIMIT_1P5A = 0.1              # max current std (A) for a 1.5 A pulse
 STD_LIMIT_3A = 0.1               # max current std (A) for a 3.0 A pulse
 REST_CURRENT_A = 0.05            # |Current| below this counts as rest
+# Resistance-calculation-period for the DC pulse resistance R_DC,Δt, after
+# Ludwig et al. (J. Power Sources 490 (2021) 229523): R_DC,Δt = ΔU/ΔI measured
+# Δt s after a current change, using the *actual* current step. They constrain
+# t_rise < Δt < 1 s (charge transfer + diffusion creep in past 1 s; the rise
+# time must be cleared first). At our ~0.2 s cadence 0.5 s is the smoothest
+# choice inside that window; 10-100 ms (their temperature-optimal band) needs
+# ms sampling we do not have.
+R_DC_DELTA_T = 0.5
 
 DEFAULT_FILE = (
     "/home/ann/Documents/Data_Metabatt/20_export_pulse/"
@@ -240,6 +254,58 @@ def _v_2rc(t, ocv_post, r0, r1, tau1, r2, tau2, *, i_pulse, t_p, ocv_pre):
     return ocv_t + ohmic + eta1 + eta2
 
 
+def _onset_step_voltage(t, v, t_p, i_pulse, slope_k=0.005):
+    """Voltage at the end of the onset ohmic step, robust to current ramp-up.
+
+    The first logged pulse sample can land *mid-ramp* (current not yet at its
+    plateau, voltage still settling toward the IR step), which under-measures the
+    onset jump and produces spurious R0 dips. Reading ``v[0]`` blindly is the
+    failure mode; a plain current-plateau gate misses it too (the current can
+    already read ~99 % while the voltage is still moving).
+
+    Instead, find the **knee**: the onset step shows a large ``dV/dt`` spike that
+    collapses into the gentle RC decay once the IR step is complete. Return the
+    voltage at the first early sample (within the first ``min(2 s, t_p)``) whose
+    ``|dV/dt|`` has dropped below ``slope_k * |i_pulse|`` (V/s) — the threshold
+    scales with current so it auto-adapts across C-rates. Falls back to ``v[0]``
+    when there are too few early samples to form a slope.
+    """
+    t = np.asarray(t, dtype=float)
+    v = np.asarray(v, dtype=float)
+    early = np.where((t > 0) & (t <= min(2.0, t_p)))[0]
+    if len(early) < 1:
+        return float(v[0])
+    dvdt = np.abs((v[early] - v[early - 1]) / (t[early] - t[early - 1]))
+    below = early[dvdt < slope_k * abs(i_pulse)]
+    k = below[0] if len(below) else early[-1]
+    return float(v[k])
+
+
+def _r_dc_delta_t(t, v, i_arr, t_change, dt, u_ref, i_ref):
+    """DC pulse resistance R_DC,Δt after Ludwig et al. (2021), eq. R_DC,Δt=ΔU/ΔI.
+
+    Measures the resistance over a fixed *resistance-calculation-period* ``dt``
+    following a current change at ``t_change`` (seconds, same clock as ``t``)::
+
+        R_DC,Δt = |(u_ref - U(t_change+dt)) / (i_ref - I(t_change+dt))|
+
+    ``u_ref`` / ``i_ref`` are the voltage / current just before the change.
+    Crucially the denominator uses the **measured** current step, not the nominal
+    pulse current, so a ramped / imperfect current edge does not bias R0 (the
+    failure mode behind the aged-state R0 dips). A *fixed* ``dt`` (vs. the first
+    available sample) also makes the resistance reproducible across check-ups.
+    Returns ``np.nan`` when there is no sample at ``t_change+dt`` or the current
+    step is too small to divide by.
+    """
+    k = int(np.searchsorted(t, t_change + dt))
+    if k >= len(t):
+        return np.nan
+    d_i = i_ref - float(i_arr[k])
+    if abs(d_i) < 1e-6:
+        return np.nan
+    return abs((u_ref - float(v[k])) / d_i)
+
+
 def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v):
     """Fit the 2RC model to one pulse window. Returns a result dict or None."""
     t = (window["Time"] - window["Time"].iloc[0]).dt.total_seconds().to_numpy()
@@ -248,8 +314,9 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
         return None
 
     v_rest = float(window["Voltage"].iloc[-1])      # ~settled OCV guess
-    v_span = float(np.ptp(v)) or 0.05
-    # R0 guess from the termination ohmic jump (current step -> 0)
+    i_arr = window["Current"].to_numpy(dtype=float)
+    # Model-free instantaneous ohmic jumps (first sample after the step), kept as
+    # timescale diagnostics next to R_DC,Δt (the paper stresses Δt-dependence).
     r0_term = abs((v_relax_first - v_pulse_last) / i_pulse)
     r0_guess = max(r0_term, 1e-3)
 
@@ -257,13 +324,27 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
     # the relaxation tail (-> zero ramp = constant OCV) when no pre-rest exists.
     ocv_pre = pre_rest_v if pre_rest_v is not None else v_rest
 
+    # DC pulse resistance R_DC,Δt (Ludwig et al. 2021): ΔU/ΔI over a fixed Δt,
+    # using the measured current step. Onset (rested reference) and termination
+    # (current-off) give two estimates; both are smooth across aging. The last
+    # under-load sample supplies the termination reference current.
+    i_load_last = float(i_arr[t <= t_p][-1]) if np.any(t <= t_p) else i_pulse
+    r_dc_onset = (
+        _r_dc_delta_t(t, v, i_arr, 0.0, R_DC_DELTA_T, pre_rest_v, 0.0)
+        if pre_rest_v is not None else np.nan
+    )
+    r_dc_term = _r_dc_delta_t(t, v, i_arr, t_p, R_DC_DELTA_T, v_pulse_last, i_load_last)
+
     tau2_hi = 6000.0
-    # Fix R0 to the model-free termination jump (the instantaneous IR step).
-    # It is smooth/monotonic across aging, so pinning it removes R0 as a fit
-    # degree of freedom entirely -> no R0-vs-fast-RC degeneracy (which otherwise
-    # makes the fitted R0 hop between check-ups at high SOC). Only the RC pairs
-    # and the OCV asymptote are fit.
-    r0 = r0_term
+    # Pin R0 to R_DC,Δt (onset preferred -> rested reference). Pinning removes the
+    # R0-vs-fast-RC fit degeneracy (which otherwise makes a fitted R0 hop between
+    # check-ups); Δt=0.5 s sits well below the fitted RC time constants (15-200 s)
+    # so R0 absorbs only the sub-second resistance and does not double-count the
+    # RC branches. Fall back to the termination R_DC, then the jump, if needed.
+    r0 = next(
+        (x for x in (r_dc_onset, r_dc_term, r0_term) if x is not None and np.isfinite(x)),
+        r0_term,
+    )
 
     def model(tt, ocv_post, r1, tau1, r2, tau2):
         return _v_2rc(
@@ -300,9 +381,20 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
     # flag a collapsed 2nd RC (railed slow branch / vanishing R2) as unreliable
     degenerate = bool(tau2 >= 0.999 * tau2_hi or r2 <= 1e-4)
 
+    # instantaneous onset jump (dV/dt-knee voltage, ramp-robust) — diagnostic
     r0_onset = (
-        abs((window["Voltage"].iloc[0] - pre_rest_v) / i_pulse)
+        abs((_onset_step_voltage(t, v, t_p, i_pulse) - pre_rest_v) / i_pulse)
         if pre_rest_v is not None
+        else np.nan
+    )
+    # cross-check the onset vs termination R_DC,Δt (the two pinning candidates);
+    # they estimate the same resistance and should agree within 10 %.
+    r0_consistent = (
+        bool(
+            np.isfinite(r_dc_onset) and r_dc_onset > 0
+            and abs(r_dc_onset - r_dc_term) <= 0.1 * max(r_dc_onset, r_dc_term)
+        )
+        if np.isfinite(r_dc_onset) and np.isfinite(r_dc_term)
         else np.nan
     )
     return {
@@ -316,8 +408,12 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
         "R2_ohm": round(r2, 5),
         "tau2_s": round(tau2, 2),
         "C2_F": round(tau2 / r2, 1) if r2 else np.nan,
+        "R_DC_dt_s": R_DC_DELTA_T,
+        "R_DC_onset_ohm": round(r_dc_onset, 5) if np.isfinite(r_dc_onset) else np.nan,
+        "R_DC_term_ohm": round(r_dc_term, 5) if np.isfinite(r_dc_term) else np.nan,
         "R0_jump_term_ohm": round(r0_term, 5),
         "R0_jump_onset_ohm": round(r0_onset, 5) if not np.isnan(r0_onset) else np.nan,
+        "R0_consistent": r0_consistent,
         "rmse_mV": round(rmse_mv, 3),
         "degenerate": degenerate,
         "n_points": int(len(t)),
