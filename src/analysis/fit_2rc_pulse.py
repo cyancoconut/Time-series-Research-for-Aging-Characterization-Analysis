@@ -325,6 +325,128 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
     }
 
 
+def _v_relax(t, ocv, v1_0, v2_0, tau1, tau2):
+    """Terminal voltage of a 2RC cell relaxing at zero current.
+
+    ``t`` is seconds from the current-off instant. ``v1_0`` / ``v2_0`` are the
+    two RC overvoltages at that instant (signed: positive after a charge, the
+    cell sits above OCV and decays down). No ohmic term — current is zero.
+    """
+    t = np.asarray(t, dtype=float)
+    return ocv + v1_0 * np.exp(-t / tau1) + v2_0 * np.exp(-t / tau2)
+
+
+def fit_one_relaxation(relax_rows, i_prev, v_cycle_last, *, t0=None, t_prev=None):
+    """Fit the 2RC model to a *rest* curve (e.g. the pause between two cycles).
+
+    Unlike ``fit_one_pulse``, the window carries no current, so:
+
+    * OCV is a single constant (the relaxation asymptote) — there is no
+      ``ocv_pre -> ocv_post`` ramp, because SOC does not move during the rest.
+    * The fit yields ``{OCV, V1(0), V2(0), tau1, tau2}``. The RC *resistances*
+      come from the current that built the polarisation up — ``i_prev``, the
+      signed mean current of the cycle step that **ended** at this pause::
+
+          R_k = V_k(0) / (i_prev * (1 - e^{-t_prev/tau_k}))
+
+      With ``t_prev`` unset the step is assumed fully developed (factor -> 1),
+      i.e. ``R_k = V_k(0) / i_prev`` (good when the preceding cycle half is long
+      vs tau_k, which it usually is).
+    * **R0 is reverse-calculated**, not fit. At current-off the ohmic term
+      ``i_prev*R0`` vanishes instantly while the RC voltages do not, so the
+      ohmic step is ``v_cycle_last - V(0)``:
+
+          R0 (primary)  = (v_cycle_last - (OCV + V1(0) + V2(0))) / i_prev   # fit-extrapolated to t=0
+          R0 (jump)     = (v_cycle_last - v_first_rest) / i_prev            # model-free, 2 samples
+
+      The fit-extrapolated form removes the sampling-lag bias in the raw jump
+      (the first rest sample is logged after the fast RC has already started
+      decaying). ``R0_consistent`` flags when the two agree within 10 %.
+
+    Parameters
+    ----------
+    relax_rows : DataFrame with ``Time`` and ``Voltage`` (the rest, current ~0),
+        sorted by time.
+    i_prev : signed mean current (A) of the preceding cycle step.
+    v_cycle_last : last terminal voltage (V) under current at the end of that step.
+    t0 : Timestamp of the current-off instant (defaults to the first rest sample).
+    t_prev : duration (s) of the preceding step, for the development factor
+        (defaults to None -> assume fully developed).
+
+    Returns a result dict (same key style as ``fit_one_pulse``) or ``None``.
+    """
+    rr = relax_rows.sort_values("Time")
+    if len(rr) < 8 or abs(i_prev) < REST_CURRENT_A:
+        return None
+    origin = t0 if t0 is not None else rr["Time"].iloc[0]
+    t = (rr["Time"] - origin).dt.total_seconds().to_numpy(dtype=float)
+    v = rr["Voltage"].to_numpy(dtype=float)
+
+    v_first_rest = float(v[0])
+    v_settled = float(v[-1])                          # ~OCV guess (rest tail)
+    amp0 = (v_first_rest - v_settled)                 # total overvoltage at t~0
+
+    tau2_hi = 6000.0
+    bounds = (
+        [v_settled - 0.5, -0.5, -0.5, 0.2, 20.0],
+        [v_settled + 0.5, 0.5, 0.5, 60.0, tau2_hi],
+    )
+    # Multi-start over (tau1, tau2) seeds — same 1RC local-minimum trap as the
+    # pulse fit (R2 -> 0, tau2 rails) when the two time constants are close.
+    best_popt, best_rmse = None, np.inf
+    for tau1_0, tau2_0 in [(5.0, 200.0), (2.0, 30.0), (8.0, 60.0), (3.0, 100.0)]:
+        p0 = [v_settled, amp0 / 2, amp0 / 2, tau1_0, tau2_0]
+        try:
+            popt, _ = curve_fit(_v_relax, t, v, p0=p0, bounds=bounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((_v_relax(t, *popt) - v) ** 2)))
+        if rmse < best_rmse:
+            best_popt, best_rmse = popt, rmse
+    if best_popt is None:
+        logging.warning("relaxation fit failed for all seeds")
+        return None
+
+    ocv, v1_0, v2_0, tau1, tau2 = best_popt
+    # order so tau1 < tau2 (fast then slow), carrying the amplitudes along
+    if tau1 > tau2:
+        v1_0, tau1, v2_0, tau2 = v2_0, tau2, v1_0, tau1
+    degenerate = bool(tau2 >= 0.999 * tau2_hi)
+
+    # amplitudes -> resistances via the preceding-step current (+ development)
+    dev1 = (1.0 - np.exp(-t_prev / tau1)) if t_prev else 1.0
+    dev2 = (1.0 - np.exp(-t_prev / tau2)) if t_prev else 1.0
+    r1 = v1_0 / (i_prev * dev1) if dev1 else np.nan
+    r2 = v2_0 / (i_prev * dev2) if dev2 else np.nan
+
+    # reverse-calculate R0: ohmic step at current-off
+    v_relax0 = ocv + v1_0 + v2_0                       # fit extrapolated to t=0
+    r0 = abs((v_cycle_last - v_relax0) / i_prev)
+    r0_jump = abs((v_cycle_last - v_first_rest) / i_prev)
+    r0_consistent = bool(
+        r0 > 0 and abs(r0 - r0_jump) <= 0.1 * max(r0, r0_jump)
+    )
+
+    return {
+        "OCV_V": round(ocv, 4),
+        "R0_ohm": round(r0, 5),
+        "R1_ohm": round(r1, 5) if np.isfinite(r1) else np.nan,
+        "tau1_s": round(tau1, 3),
+        "C1_F": round(tau1 / r1, 1) if np.isfinite(r1) and r1 else np.nan,
+        "R2_ohm": round(r2, 5) if np.isfinite(r2) else np.nan,
+        "tau2_s": round(tau2, 2),
+        "C2_F": round(tau2 / r2, 1) if np.isfinite(r2) and r2 else np.nan,
+        "V1_0_mV": round(v1_0 * 1000, 2),
+        "V2_0_mV": round(v2_0 * 1000, 2),
+        "R0_jump_ohm": round(r0_jump, 5),
+        "R0_consistent": r0_consistent,
+        "rmse_mV": round(best_rmse * 1000, 3),
+        "degenerate": degenerate,
+        "n_points": int(len(t)),
+        "_t": t, "_v": v, "_vfit": _v_relax(t, *best_popt),  # for plotting
+    }
+
+
 def _proc_id(id_str, delta):
     """``5_21`` + delta=+1 -> ``5_22`` (the BM_Programm prefix is preserved)."""
     bm, _, proc = str(id_str).rpartition("_")
@@ -410,7 +532,109 @@ def fit_2rc(labeled, seg_ids, nom_capacity):
 
 
 # ---------------------------------------------------------------------------
-def plot_fits(curves, results, out_png):
+# Relaxation (inter-cycle pause) fit
+# ---------------------------------------------------------------------------
+def build_relax_pairs(df, file_name):
+    """Label a cycling series into rest / charge / discharge runs.
+
+    Unlike ``label_time_diff`` this does **not** need a ``Zustand`` column — the
+    state is derived from current sign/magnitude, so it works on generic cycling
+    parquets. A new segment starts on a state change (rest<->cha<->dch) or a time
+    gap > ``CYCLE_ACTIVE_LIMIT_HOUR`` (so a step never spans a cycle boundary).
+    Returns the labeled frame with a ``state`` and ``seg_id`` column.
+    """
+    out = df.copy()
+    out["File"] = file_name
+    out["SOH"] = _parse_soh(os.path.splitext(os.path.basename(file_name))[0])
+    out["Time"] = pd.to_datetime(out["Time"], utc=True, errors="coerce")
+    out["Current"] = pd.to_numeric(out["Current"], errors="coerce")
+    out["Voltage"] = pd.to_numeric(out["Voltage"], errors="coerce")
+    out = out.dropna(subset=["Time", "Current", "Voltage"]).copy()
+    out = out.sort_values("Time").reset_index(drop=True)
+
+    out["state"] = np.where(
+        out["Current"].abs() < REST_CURRENT_A, "rest",
+        np.where(out["Current"] > 0, "cha", "dch"),
+    )
+    gap_h = out["Time"].diff() / pd.Timedelta(hours=1)
+    new_seg = (
+        out["state"].ne(out["state"].shift())
+        | gap_h.isna()
+        | (gap_h > CYCLE_ACTIVE_LIMIT_HOUR)
+    )
+    out["seg_id"] = new_seg.cumsum().astype(int)
+    return out
+
+
+def fit_relax(df, file_name, nom_capacity):
+    """Fit every active-step -> following-rest pair in a cycling file.
+
+    For each charge/discharge segment immediately followed by a rest segment,
+    the rest curve is fit with ``fit_one_relaxation``; the preceding step
+    supplies ``i_prev`` (median current), ``v_cycle_last``, the current-off time
+    ``t0`` and the step duration ``t_prev``. Returns a results DataFrame and the
+    per-pair fit curves (keyed on the active segment's ``seg_id``).
+    """
+    labeled = build_relax_pairs(df, file_name)
+    segs = list(labeled.groupby("seg_id", sort=True))
+    rows, curves = [], []
+    for (a_id, a), (_, r) in zip(segs, segs[1:]):
+        if a["state"].iloc[0] == "rest" or r["state"].iloc[0] != "rest":
+            continue
+        if len(r) < 8:
+            continue
+        i_prev = float(a["Current"].median())          # CC level (robust to a CV tail)
+        if abs(i_prev) < REST_CURRENT_A:
+            continue
+        v_cycle_last = float(a["Voltage"].iloc[-1])
+        t0 = a["Time"].iloc[-1]
+        t_prev = (a["Time"].iloc[-1] - a["Time"].iloc[0]).total_seconds()
+        res = fit_one_relaxation(r, i_prev, v_cycle_last, t0=t0, t_prev=t_prev)
+        if res is None:
+            continue
+        curves.append((a_id, res.pop("_t"), res.pop("_v"), res.pop("_vfit")))
+        meta = a.iloc[0]
+        rows.append({
+            "File": meta["File"],
+            "SOH": meta["SOH"],
+            "seg_id": a_id,
+            "direction": "CHA" if i_prev > 0 else "DCH",
+            "I_A": round(i_prev, 3),
+            "C_rate": round(i_prev / nom_capacity, 3),
+            "step_dur_s": round(t_prev, 1),
+            **res,
+        })
+    return pd.DataFrame(rows), curves
+
+
+def fit_relax_folder(folder, nom_capacity):
+    """Fit relaxations in every ``*.parquet`` under ``folder``; one combined table.
+
+    ``seg_id`` is namespaced per file (``<stem>#<seg_id>``) so ids stay unique
+    across the folder. Adds ``SOH_num`` for plotting vs aging where filenames
+    carry an SOH tag.
+    """
+    files = sorted(glob.glob(os.path.join(folder, "*.parquet")))
+    all_results = []
+    for f in files:
+        name = os.path.basename(f)
+        res, _ = fit_relax(pd.read_parquet(f), name, nom_capacity)
+        if res.empty:
+            logging.warning("%s: no relaxations fit", name)
+            continue
+        stem = os.path.splitext(name)[0]
+        res["seg_id"] = stem + "#" + res["seg_id"].astype(str)
+        all_results.append(res)
+        logging.info("%s: fit %d relaxation(s)", name, len(res))
+    if not all_results:
+        return pd.DataFrame()
+    out = pd.concat(all_results, ignore_index=True)
+    out["SOH_num"] = pd.to_numeric(out["SOH"], errors="coerce")
+    return out
+
+
+# ---------------------------------------------------------------------------
+def plot_fits(curves, results, out_png, id_col="pulse_segment_id"):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -423,7 +647,7 @@ def plot_fits(curves, results, out_png):
     nrow = (n + ncol - 1) // ncol
     fig, axes = plt.subplots(nrow, ncol, figsize=(11, 3.2 * nrow), squeeze=False)
     for ax, (seg_id, t, v, vfit) in zip(axes.ravel(), curves):
-        row = results[results["pulse_segment_id"] == seg_id].iloc[0]
+        row = results[results[id_col] == seg_id].iloc[0]
         ax.plot(t, v, ".", ms=2, label="measured", color="0.5")
         ax.plot(t, vfit, "-", lw=1.5, label="2RC fit", color="C3")
         ax.set_title(
@@ -632,7 +856,45 @@ def main():
         "--validate", action="store_true",
         help="leave-one-out validation: predict each pulse from the others' params",
     )
+    ap.add_argument(
+        "--relax", action="store_true",
+        help="fit the inter-cycle rest curves instead of pulses: pair each "
+        "charge/discharge step with the pause that follows it, fit "
+        "{OCV,R1,tau1,R2,tau2} from the relaxation and reverse-calc R0.",
+    )
     args = ap.parse_args()
+
+    # Relaxation mode: fit rest curves (cycling data), not HPPC pulses.
+    if args.relax:
+        if os.path.isdir(args.parquet):
+            results = fit_relax_folder(args.parquet, args.nom_capacity)
+            if results.empty:
+                logging.warning("no relaxations fit in %s", args.parquet)
+                return
+            out_csv = args.out or os.path.join(args.parquet, "relax_2RC.csv")
+        else:
+            results, curves = fit_relax(
+                pd.read_parquet(args.parquet),
+                os.path.basename(args.parquet),
+                args.nom_capacity,
+            )
+            if results.empty:
+                logging.warning("no relaxations fit")
+                return
+            stem = os.path.splitext(args.parquet)[0]
+            out_csv = args.out or f"{stem}_relax_2RC.csv"
+            if args.plot:
+                plot_fits(curves, results, f"{stem}_relax_2RC.png", id_col="seg_id")
+        pd.set_option("display.width", 200, "display.max_columns", 30)
+        cols = ["File", "seg_id", "direction", "I_A", "OCV_V", "R0_ohm",
+                "R0_jump_ohm", "R0_consistent", "R1_ohm", "tau1_s", "R2_ohm",
+                "tau2_s", "rmse_mV", "degenerate"]
+        cols = [c for c in cols if c in results.columns]
+        print("\n=== 2RC relaxation fit results ===")
+        print(results[cols].to_string(index=False))
+        results.to_csv(out_csv, index=False)
+        logging.info("results -> %s", out_csv)
+        return
 
     # Folder mode: fit every pulse file and plot the parameters vs SOH.
     if os.path.isdir(args.parquet):
