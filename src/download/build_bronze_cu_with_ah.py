@@ -223,6 +223,7 @@ def _compute_ah(
     offset: float = 0.0,
     seed_zeit=None,
     seed_strom=None,
+    gap_threshold_s=None,
 ) -> pd.DataFrame:
     """Cumulative Ah throughput over `ah_frames`, returning a df with Zeit +
     Ah_throughput (+ Current/Time_UTC).
@@ -232,6 +233,12 @@ def _compute_ah(
     previously-processed sample, and `offset` (the prior cumulative total) is
     added. The seed row is dropped before returning. For the full path,
     `offset=0` and `seed_zeit=None`.
+
+    `gap_threshold_s` is forwarded to `add_ah_throughput` to zero out the
+    phantom throughput integrated across the dead time between test files (see
+    that function). It applies identically on the seed→first-new-row bridge, so
+    a real parking gap there contributes nothing while `offset` still carries
+    the prior cumulative total forward.
     """
     df_all = pd.concat(ah_frames, ignore_index=True)
     if seed_zeit is not None:
@@ -248,7 +255,7 @@ def _compute_ah(
         df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_localize("UTC")
     else:
         df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_convert("UTC")
-    df_ah = add_ah_throughput(df_ah)
+    df_ah = add_ah_throughput(df_ah, gap_threshold_s=gap_threshold_s)
     if offset:
         df_ah["Ah_throughput"] = df_ah["Ah_throughput"] + offset
     if seed_zeit is not None:
@@ -265,10 +272,12 @@ def _ah_watermark(df_ah: pd.DataFrame) -> tuple:
     )
 
 
-def _build_full(tests: list, ah_frames: list, cell: str) -> tuple:
+def _build_full(
+    tests: list, ah_frames: list, cell: str, gap_threshold_s=None
+) -> tuple:
     bronze = _normalize_tests(tests)
     if ah_frames:
-        df_ah = _compute_ah(ah_frames)
+        df_ah = _compute_ah(ah_frames, gap_threshold_s=gap_threshold_s)
         bronze = bronze.merge(df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left")
         ah_total, last_zeit, last_strom = _ah_watermark(df_ah)
     else:
@@ -279,14 +288,21 @@ def _build_full(tests: list, ah_frames: list, cell: str) -> tuple:
 
 
 def _build_incremental(
-    tests: list, ah_frames: list, existing_bronze: pd.DataFrame, manifest: dict
+    tests: list,
+    ah_frames: list,
+    existing_bronze: pd.DataFrame,
+    manifest: dict,
+    gap_threshold_s=None,
 ) -> tuple:
     new_rows = _normalize_tests(tests)
     offset = manifest.get("ah_total") or 0.0
     seed_zeit = manifest.get("last_zeit")
     seed_strom = manifest.get("last_strom")
     if ah_frames:
-        df_ah = _compute_ah(ah_frames, offset, seed_zeit, seed_strom)
+        df_ah = _compute_ah(
+            ah_frames, offset, seed_zeit, seed_strom,
+            gap_threshold_s=gap_threshold_s,
+        )
         new_rows = new_rows.merge(
             df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left"
         )
@@ -460,12 +476,21 @@ def process_cell(
         print(f"{cell} - no data loaded.")
         return
 
+    # Mask the trapezoid contribution over inter-file gaps so dead time between
+    # test files doesn't book phantom Ah. Default (None) auto-derives the gap
+    # cut from the cell's sampling cadence; set `ah_gap_threshold_s` to pin a
+    # fixed seconds value instead.
+    gap_threshold_s = cfg.get("ah_gap_threshold_s")
+
     if manifest is not None:
         bronze, ah_total, last_zeit, last_strom = _build_incremental(
-            tests, ah_frames, existing_bronze, manifest
+            tests, ah_frames, existing_bronze, manifest,
+            gap_threshold_s=gap_threshold_s,
         )
     else:
-        bronze, ah_total, last_zeit, last_strom = _build_full(tests, ah_frames, cell)
+        bronze, ah_total, last_zeit, last_strom = _build_full(
+            tests, ah_frames, cell, gap_threshold_s=gap_threshold_s
+        )
 
     if out_bronze_cu:
         _save_local_parquet(bronze, out_bronze_cu)
