@@ -107,7 +107,7 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 
 ## Evaluation
 
-**Fleet-wide capacity** — `evaluation/export_cap_pulse.py` (`python -m evaluation.export_cap_pulse <cfg> [-o …]`): aggregates `40_capacity_monitore/*_capacity.csv` + the `Prozedur` column from each GOLD parquet into one table. Aging metadata (`DOD/SOC/C_Rate/Temperature`) parsed from procedure names via `output.add_information_METABATT`. Output (driven by `upload_to`): `<working_path>/50_evaluation/capacity_results.csv` (full CAP history), MinIO `<prefix>/50_evaluation/capacity_results.csv` (untagged).
+**Fleet-wide capacity** — `evaluation/export_cap_pulse.py` (`python -m evaluation.export_cap_pulse <cfg> [-o …]`): aggregates `40_capacity_monitore/*_capacity.csv` + the procedure names from each cell's BRONZE_CU manifest (`BRONZE_CU/<stem>_manifest.json`) into one table. Aging metadata (`DOD/SOC/C_Rate/Temperature`) parsed from procedure names via `output.add_information_METABATT`. Output (driven by `upload_to`): `<working_path>/50_evaluation/capacity_results.csv` (full CAP history), MinIO `<prefix>/50_evaluation/capacity_results.csv` (untagged).
 
 **Aging matrix** — `evaluation/aging_matrix.py` (`python -m evaluation.aging_matrix <cfg> [-o …]`): per-cell capacity loss normalized by Ah throughput, aggregated over the design space. Reuses `export_cap_pulse.build_capacity_table`; needs `Ah_throughput` (aborts otherwise). Per cell: `capacity_lost` = max−min `Capacity_py`, `Delta_Ah_throughput` = max−min `Ah_throughput`. Matrix: group by `(C_Rate, Temperature, DOD, SOC)` → mean/std, `candidate_count`, cell list, `capacity_lost_norm`. Output: `<working_path>/50_evaluation/aging_matrix.{csv,html}` (interactive plotly), MinIO untagged.
 
@@ -138,6 +138,7 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 | `min_rows` | Min rows to keep a segment (default 20) |
 | `qocv_procedure_filter` | Optional substring; inside matching procedures every `Zustand` change cuts a boundary (splits qOCV DCH/CHA). Omit to disable. |
 | `target_pulse_duration` | Expected pulse duration (s, default 20) |
+| `export_gold` | Write the GOLD parquet to disk/MinIO (default true). Set false to skip the GOLD write (downstream evals no longer read GOLD-on-disk; capacity/pulse/qOCV exports use the in-memory `df_gold`). |
 | `export_pulse` / `export_qocv` | Write per-BM_Programm PUL / qOCV parquets (default false) |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |

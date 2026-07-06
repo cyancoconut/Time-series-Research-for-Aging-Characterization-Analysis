@@ -353,7 +353,10 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         if df_gold[col].dtype == "object":
             df_gold[col] = df_gold[col].astype(str)
 
-    _write_gold(df_gold, cell, cfg, paths, minio_client)
+    if cfg.get("export_gold", True):
+        _write_gold(df_gold, cell, cfg, paths, minio_client)
+    else:
+        logging.info(f"{cell}: export_gold=false — skipping GOLD write")
 
     df_export = df_gold[
         df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA", "PAU"])
