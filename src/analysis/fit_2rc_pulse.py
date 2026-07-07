@@ -1209,6 +1209,55 @@ def plot_vs_soh(results, out_png, title=""):
     logging.info("vs-SOH plot -> %s", out_png)
 
 
+def plot_staged_vs_soh(results, out_png, title=""):
+    """Plot the coupled staged decomposition (pure-ohmic R0 + fast/slow branches) vs SOH.
+
+    Companion to ``plot_vs_soh`` (which shows the joint-fit params). Uses the
+    ``R0_staged``/``R1_fast``/``R2_slow`` columns — the physically-separated set —
+    and hides rows where the staged fit did not converge (NaN) or whose full-curve
+    ``staged_rmse_mV`` shows it did not reconstruct the pulse.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if "R0_staged_ohm" not in results.columns:
+        logging.info("staged vs-SOH plot: no staged columns, skipping")
+        return
+    metrics = [
+        ("R0_staged_ohm", "R0 ohmic (mΩ)", 1000),
+        ("R1_fast_ohm", "R1 fast (mΩ)", 1000),
+        ("tau1_fast_s", "τ1 fast (s)", 1),
+        ("R2_slow_ohm", "R2 slow (mΩ)", 1000),
+        ("tau2_slow_s", "τ2 slow (s)", 1),
+        ("staged_rmse_mV", "staged rmse (mV)", 1),
+    ]
+    # keep only rows where the staged fit converged and reconstructed the curve
+    good = results.dropna(subset=["R0_staged_ohm", "R1_fast_ohm", "R2_slow_ohm"])
+    n_drop = len(results) - len(good)
+    if n_drop:
+        logging.info("staged vs-SOH plot: hiding %d non-converged staged fit(s)", n_drop)
+    if good.empty:
+        logging.info("staged vs-SOH plot: nothing to plot")
+        return
+
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    for ax, (col, label, scale) in zip(axes.ravel(), metrics):
+        for ptype, g in good.groupby("pulse_type"):
+            g = g.sort_values("SOH_num")
+            ax.plot(g["SOH_num"], g[col] * scale, "o-", ms=4, label=ptype)
+        ax.set_xlabel("SOH (%)")
+        ax.set_ylabel(label)
+        ax.invert_xaxis()  # aging reads left (fresh) -> right (aged)
+        ax.grid(alpha=0.3)
+    axes.ravel()[0].legend(fontsize=8, title="pulse")
+    fig.suptitle(f"Staged 2RC (pure-ohmic R0 + fast/slow) vs SOH — {title}", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    logging.info("staged vs-SOH plot -> %s", out_png)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Fit a 2RC ECM to HPPC pulse exports.")
     ap.add_argument("parquet", nargs="?", default=DEFAULT_FILE, help="pulse parquet")
@@ -1283,9 +1332,12 @@ def main():
         out_csv = args.out or os.path.join(args.parquet, "2RC_vs_SOH.csv")
         results.to_csv(out_csv, index=False)
         logging.info("combined results -> %s", out_csv)
+        folder_title = os.path.basename(os.path.normpath(args.parquet))
         plot_vs_soh(
-            results, os.path.join(args.parquet, "2RC_vs_SOH.png"),
-            title=os.path.basename(os.path.normpath(args.parquet)),
+            results, os.path.join(args.parquet, "2RC_vs_SOH.png"), title=folder_title,
+        )
+        plot_staged_vs_soh(
+            results, os.path.join(args.parquet, "2RC_staged_vs_SOH.png"), title=folder_title,
         )
         return
 
