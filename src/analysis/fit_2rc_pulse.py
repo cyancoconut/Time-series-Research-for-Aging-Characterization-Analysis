@@ -30,6 +30,23 @@ Pipeline
    actual current step, which is reproducible across check-ups and ramp-robust.
    The termination R_DC and the instantaneous jumps are reported as cross-checks
    (``R0_consistent`` flags onset vs termination R_DC agreement). C_k = tau_k/R_k.
+   ``R0_extrap_onset_ohm`` / ``R0_extrap_term_ohm`` are pure-ohmic R0 estimates:
+   the ohmic step extrapolated back to t=0 from the pulse *rise* (onset, on the
+   dense ~0.18 s cadence — the most reproducible) and from the relaxation *decay*
+   (termination, coarse ~0.8 s side). Neither depends on where a single sample
+   lands; the two agree when both are well-posed, and both read ~1.5-2 mΩ below
+   R_DC,0.5 s (the difference is the RC that develops within 0.5 s).
+
+3. **Coupled staged fit** (``_staged_branches``) — a physically-separated
+   decomposition reported next to the joint fit (``R0_staged``/``R1_fast``/
+   ``tau1_fast``/``R2_slow``/``tau2_slow``/``staged_rmse_mV``). R0 is the onset
+   ohmic; the slow branch is read from the fast-free part of the relaxation; its
+   contribution *during* the pulse (a non-negligible several mV — the slow branch
+   is partly built up by t_p) is reconstructed and subtracted, together with the
+   OCV ramp, before the fast branch is fit on the dense onset residual. Each
+   branch is thus read where the cadence resolves it. It re-simulates the full
+   curve to sub-mV, giving reproducible charge-transfer params for aging while the
+   joint fit stays the (lowest-RMSE) simulation model.
 
 Standalone analysis utility — does not touch the pipeline. Run from ``src/``::
 
@@ -306,6 +323,234 @@ def _r_dc_delta_t(t, v, i_arr, t_change, dt, u_ref, i_ref):
     return abs((u_ref - float(v[k])) / d_i)
 
 
+# Early-relaxation window (s) fit for the extrapolated termination R0. The t=0
+# intercept must be reconstructed from the *fast* decay near current-off; fitting
+# the whole (~30 min) rest lets the two exponentials chase the slow SOC/diffusion
+# drift and biases the intercept high (a ~3 mOhm over-read on VTC6). A short early
+# window isolates the fast+medium branches (the slow tail is ~flat over it and
+# folds into OCV), so the extrapolation converges toward the true ohmic R0.
+EXTRAP_REST_WINDOW_S = 60.0
+
+
+def _extrap_termination_r0(t, v, t_p, i_pulse, v_pulse_last,
+                           window_s=EXTRAP_REST_WINDOW_S):
+    """Fit-extrapolated termination R0 — the ohmic step at current-off, sampling-lag-free.
+
+    The raw termination jump ``(v_relax_first - v_pulse_last)/I`` reads the *first*
+    relaxation sample, which on a coarse rest cadence (here ~0.8 s) lands well
+    after current-off. In that gap the RC overvoltages have already begun to
+    decay, so the raw jump over-reads R0 by the RC that leaked in during the lag
+    (a systematic bias, not averageable). Instead, fit the *early* relaxation
+    (first ``window_s`` s) to the 2RC decay
+    ``V(t') = OCV + V1(0)e^{-t'/tau1} + V2(0)e^{-t'/tau2}`` and reconstruct the
+    voltage **at the current-off instant** ``t'=0``::
+
+        V(0+) = OCV + V1(0) + V2(0)          # RC still full, ohmic already gone
+        R0    = |(v_pulse_last - V(0+)) / i_pulse|
+
+    Because ``V(0+)`` is extrapolated from the decay shape, the result does not
+    depend on where the first rest sample happens to fall — it is reproducible
+    across check-ups regardless of the relaxation cadence. The fit is restricted
+    to ``window_s`` because the t=0 intercept is set by the fast branch; fitting
+    the full rest lets the slow tail dominate and biases R0 high. Mirrors the t=0
+    extrapolation ``fit_one_relaxation`` uses for cycling rest curves.
+    **Caveat**: at a coarse rest cadence the sub-second double-layer decay is
+    unmeasured, so the intercept still carries some window sensitivity — read this
+    as a *true-ohmic* estimate, cross-checked against the (densely sampled) onset.
+    Returns ``np.nan`` when the early rest tail is too short to fit.
+    """
+    t = np.asarray(t, dtype=float)
+    v = np.asarray(v, dtype=float)
+    rest = (t > t_p) & (t - t_p <= window_s)
+    t_rest = t[rest] - t_p
+    v_rest = v[rest]
+    if len(t_rest) < 8:
+        return np.nan
+
+    v_settled = float(v_rest[-1])                     # ~OCV guess (rest tail)
+    amp0 = float(v_rest[0] - v_settled)               # total overvoltage at t'~0
+    tau2_hi = 6000.0
+    bounds = (
+        [v_settled - 0.5, -0.5, -0.5, 0.2, 20.0],
+        [v_settled + 0.5, 0.5, 0.5, 60.0, tau2_hi],
+    )
+    best_popt, best_rmse = None, np.inf
+    for tau1_0, tau2_0 in [(5.0, 200.0), (2.0, 30.0), (8.0, 60.0), (3.0, 100.0)]:
+        p0 = [v_settled, amp0 / 2, amp0 / 2, tau1_0, tau2_0]
+        try:
+            popt, _ = curve_fit(_v_relax, t_rest, v_rest, p0=p0, bounds=bounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((_v_relax(t_rest, *popt) - v_rest) ** 2)))
+        if rmse < best_rmse:
+            best_popt, best_rmse = popt, rmse
+    if best_popt is None:
+        return np.nan
+    ocv, v1_0, v2_0, _, _ = best_popt
+    v0_plus = ocv + v1_0 + v2_0                        # extrapolated to current-off
+    return abs((v_pulse_last - v0_plus) / i_pulse)
+
+
+# Window (s) of the pulse rise used for the onset-extrapolated R0. The whole 20 s
+# pulse is densely sampled (~0.18 s), so the fast rise is well resolved; a window
+# a little longer than a few tau1 anchors the t=0 intercept without letting slow
+# SOC drift over a long pulse bias it.
+EXTRAP_ONSET_WINDOW_S = 20.0
+
+
+def _extrap_onset_r0(t, v, t_p, i_pulse, ocv_pre, window_s=EXTRAP_ONSET_WINDOW_S):
+    """Onset-extrapolated R0 — pure ohmic step read from the *densely-sampled* rise.
+
+    The rest->pulse transition is on the fine (~0.18 s) pulse cadence, so unlike
+    the termination extrapolation (which fights the coarse ~0.8 s rest) the fast
+    branch is directly resolved here. Fit the first ``window_s`` s of the pulse to
+    the 2RC charging curve with OCV anchored at the settled pre-pulse voltage::
+
+        V(t) = ocv_pre + I*R0 + I*R1*(1-e^{-t/tau1}) + I*R2*(1-e^{-t/tau2})
+
+    and read R0 (the t=0 intercept above OCV) directly. Because the intercept is
+    anchored by the dense early samples, this is the most reproducible pure-ohmic
+    R0 for coarse-rest data — cross-checked against ``_extrap_termination_r0`` (the
+    two land on the same value when both are well-posed). Returns ``np.nan`` when
+    the early rise is too short to fit.
+    """
+    t = np.asarray(t, dtype=float)
+    v = np.asarray(v, dtype=float)
+    rise = (t > 0) & (t <= min(t_p, window_s))
+    tt, vv = t[rise], v[rise]
+    if len(tt) < 8:
+        return np.nan
+
+    def model(x, r0, r1, tau1, r2, tau2):
+        eta1 = i_pulse * r1 * (1.0 - np.exp(-x / tau1))
+        eta2 = i_pulse * r2 * (1.0 - np.exp(-x / tau2))
+        return ocv_pre + i_pulse * r0 + eta1 + eta2
+
+    bounds = ([1e-4, 1e-5, 0.2, 1e-5, 20.0], [0.2, 1.0, 60.0, 1.0, 6000.0])
+    best, brmse = None, np.inf
+    for tau1_0, tau2_0 in [(5.0, 200.0), (2.0, 30.0), (8.0, 60.0), (3.0, 100.0)]:
+        try:
+            popt, _ = curve_fit(model, tt, vv, p0=[0.02, 0.01, tau1_0, 0.01, tau2_0],
+                                bounds=bounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((model(tt, *popt) - vv) ** 2)))
+        if rmse < brmse:
+            best, brmse = popt, rmse
+    if best is None:
+        return np.nan
+    return abs(best[0])
+
+
+# Rest time (s) after which the fast branch has effectively decayed, so the
+# relaxation is slow-branch-only — used to isolate R2/tau2 before reconstructing
+# the slow branch's contribution *during* the pulse.
+STAGED_SLOW_CUT_S = 5.0
+
+
+def _staged_branches(t, v, t_p, i_pulse, ocv_pre, r0):
+    """Coupled staged 2RC decomposition — each branch read where it is resolved.
+
+    A fraction of the slow branch already builds up *during* the pulse (up to tens
+    of %  of R2, several mV by t_p), so the dense onset rise is **not** fast-only.
+    This fit removes that overlap explicitly:
+
+    1. **Slow branch from the relaxation.** Past ``STAGED_SLOW_CUT_S`` s the fast
+       branch has decayed, so the (coarsely sampled, but tau2 >> 0.8 s) rest tail
+       is pure slow decay: fit ``V = OCV + A2 e^{-t'/tau2}``. The slow amplitude at
+       current-off is ``A2`` (tau2 >> the cut, so it is ~unchanged over it), giving
+       ``R2 = A2 / (I (1 - e^{-t_p/tau2}))`` via the pulse development factor.
+    2. **Reconstruct the slow ramp in the pulse** ``eta2(t) = I R2 (1-e^{-t/tau2})``
+       and subtract it — with the ohmic ``I*r0`` (onset-extrapolated) — from the
+       dense onset rise.
+    3. **Fast branch from the residual onset** (0.18 s cadence):
+       ``resid(t) = I R1 (1-e^{-t/tau1})`` -> clean R1, tau1.
+
+    Returns ``{R1_fast, tau1_fast, R2_slow, tau2_slow, staged_rmse_mV}`` (the RMSE
+    is the full pulse+relaxation curve re-simulated from the staged params, so it
+    is comparable to the joint fit's rmse) or ``None`` if either stage fails.
+    """
+    t = np.asarray(t, dtype=float)
+    v = np.asarray(v, dtype=float)
+
+    # --- stage 1: slow branch from the fast-free part of the relaxation ---
+    rest = (t > t_p) & (t - t_p >= STAGED_SLOW_CUT_S)
+    tr, vr = t[rest] - t_p, v[rest]
+    if len(tr) < 8:
+        return None
+    v_settled = float(vr[-1])
+
+    def slow(tt, ocv, a2, tau2):
+        return ocv + a2 * np.exp(-tt / tau2)
+
+    sbounds = ([v_settled - 0.5, -0.5, 20.0], [v_settled + 0.5, 0.5, 6000.0])
+    a0 = float(vr[0] - v_settled)
+    best_s, rmse_s = None, np.inf
+    for tau2_0 in (60.0, 150.0, 400.0, 1000.0):
+        try:
+            popt, _ = curve_fit(slow, tr, vr, p0=[v_settled, a0, tau2_0],
+                                bounds=sbounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((slow(tr, *popt) - vr) ** 2)))
+        if rmse < rmse_s:
+            best_s, rmse_s = popt, rmse
+    if best_s is None:
+        return None
+    ocv_post, a2, tau2 = best_s          # ocv_post = relaxation asymptote (settled OCV)
+    # A2 is the slow amplitude at t'=0 (current-off, extrapolated across the cut).
+    # It was built over the pulse: A2 = I*R2*(1 - e^{-t_p/tau2}) -> solve for R2.
+    dev2 = 1.0 - np.exp(-t_p / tau2)
+    if abs(dev2) < 1e-6:
+        return None
+    r2 = a2 / (i_pulse * dev2)
+
+    # --- stage 2+3: subtract ohmic + OCV ramp + reconstructed slow ramp, fit fast ---
+    onset = (t > 0) & (t <= t_p)
+    to, vo = t[onset], v[onset]
+    if len(to) < 8:
+        return None
+    # OCV ramps ocv_pre -> ocv_post over the pulse as SOC moves (matters at low SOC
+    # where the OCV curve is steep); remove it so it does not leak into the fast RC.
+    ocv_ramp = ocv_pre + (ocv_post - ocv_pre) * np.clip(to / t_p, 0.0, 1.0)
+    eta2_pulse = i_pulse * r2 * (1.0 - np.exp(-to / tau2))
+    resid = vo - ocv_ramp - i_pulse * r0 - eta2_pulse
+
+    def fast(tt, r1, tau1):
+        return i_pulse * r1 * (1.0 - np.exp(-tt / tau1))
+
+    fbounds = ([1e-5, 0.2], [1.0, 60.0])
+    best_f, rmse_f = None, np.inf
+    for tau1_0 in (1.0, 2.0, 5.0, 10.0):
+        try:
+            popt, _ = curve_fit(fast, to, resid, p0=[0.01, tau1_0],
+                                bounds=fbounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((fast(to, *popt) - resid) ** 2)))
+        if rmse < rmse_f:
+            best_f, rmse_f = popt, rmse
+    if best_f is None:
+        return None
+    r1, tau1 = best_f
+
+    # order fast < slow (guard against a swapped/degenerate slow branch)
+    if tau1 > tau2:
+        return None
+    # full-curve validation: reconstruct the whole window from the staged params
+    # with the same OCV-ramp model the joint fit uses, so staged_rmse is comparable.
+    vsim = _v_2rc(t, ocv_post, r0, r1, tau1, r2, tau2,
+                  i_pulse=i_pulse, t_p=t_p, ocv_pre=ocv_pre)
+    staged_rmse = float(np.sqrt(np.mean((vsim - v) ** 2)) * 1000)
+    return {
+        "R1_fast_ohm": round(r1, 5),
+        "tau1_fast_s": round(tau1, 3),
+        "R2_slow_ohm": round(r2, 5),
+        "tau2_slow_s": round(tau2, 2),
+        "staged_rmse_mV": round(staged_rmse, 3),
+    }
+
+
 def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v):
     """Fit the 2RC model to one pulse window. Returns a result dict or None."""
     t = (window["Time"] - window["Time"].iloc[0]).dt.total_seconds().to_numpy()
@@ -334,6 +579,25 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
         if pre_rest_v is not None else np.nan
     )
     r_dc_term = _r_dc_delta_t(t, v, i_arr, t_p, R_DC_DELTA_T, v_pulse_last, i_load_last)
+    # Fit-extrapolated termination R0: the ohmic step at current-off with the RC
+    # decay extrapolated back to t=0, so it is free of the raw jump's coarse-rest
+    # sampling-lag bias. Reported as a cadence-independent R0 candidate.
+    r0_extrap_term = _extrap_termination_r0(t, v, t_p, i_pulse, v_pulse_last)
+    # Onset-extrapolated R0: pure ohmic intercept read from the densely-sampled
+    # pulse rise (the fine 0.18 s side), so it does not fight the coarse rest.
+    # Most reproducible pure-ohmic estimate; cross-checks the termination one.
+    r0_extrap_onset = (
+        _extrap_onset_r0(t, v, t_p, i_pulse, pre_rest_v)
+        if pre_rest_v is not None else np.nan
+    )
+    # Coupled staged decomposition: slow branch from the relaxation, its in-pulse
+    # contribution removed from the dense onset, then the fast branch — with R0 at
+    # the onset-extrapolated ohmic value. Physical/reproducible params for aging;
+    # the joint fit above stays the simulation model.
+    staged = (
+        _staged_branches(t, v, t_p, i_pulse, ocv_pre, r0_extrap_onset)
+        if np.isfinite(r0_extrap_onset) else None
+    )
 
     tau2_hi = 6000.0
     # Pin R0 to R_DC,Δt (onset preferred -> rested reference). Pinning removes the
@@ -342,7 +606,8 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
     # so R0 absorbs only the sub-second resistance and does not double-count the
     # RC branches. Fall back to the termination R_DC, then the jump, if needed.
     r0 = next(
-        (x for x in (r_dc_onset, r_dc_term, r0_term) if x is not None and np.isfinite(x)),
+        (x for x in (r_dc_onset, r_dc_term, r0_extrap_term, r0_term)
+         if x is not None and np.isfinite(x)),
         r0_term,
     )
 
@@ -413,6 +678,16 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
         "R_DC_term_ohm": round(r_dc_term, 5) if np.isfinite(r_dc_term) else np.nan,
         "R0_jump_term_ohm": round(r0_term, 5),
         "R0_jump_onset_ohm": round(r0_onset, 5) if not np.isnan(r0_onset) else np.nan,
+        "R0_extrap_term_ohm": round(r0_extrap_term, 5) if np.isfinite(r0_extrap_term) else np.nan,
+        "R0_extrap_onset_ohm": round(r0_extrap_onset, 5) if np.isfinite(r0_extrap_onset) else np.nan,
+        # coupled staged decomposition (R0=onset ohmic, fast from onset, slow from
+        # relaxation); NaN-filled when either stage failed to converge
+        "R0_staged_ohm": round(r0_extrap_onset, 5) if staged is not None else np.nan,
+        "R1_fast_ohm": staged["R1_fast_ohm"] if staged else np.nan,
+        "tau1_fast_s": staged["tau1_fast_s"] if staged else np.nan,
+        "R2_slow_ohm": staged["R2_slow_ohm"] if staged else np.nan,
+        "tau2_slow_s": staged["tau2_slow_s"] if staged else np.nan,
+        "staged_rmse_mV": staged["staged_rmse_mV"] if staged else np.nan,
         "R0_consistent": r0_consistent,
         "rmse_mV": round(rmse_mv, 3),
         "degenerate": degenerate,
