@@ -1,4 +1,5 @@
 import os
+import re
 import glob
 import json
 import logging
@@ -9,6 +10,7 @@ from contextlib import nullcontext
 import pandas as pd
 
 from dismember.dismember_raw_cell import dismember_raw_cell, processing_procedure_filter
+from util.procedure_filter import as_filter_list
 from feature_extraction.create_features import create_features
 from cluster import model_and_supervise, post_cluster_filter
 from cluster.post_cluster_filter import ClusterNotFoundException
@@ -187,10 +189,12 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     _validate(dismembered_df, "preSILVER")
 
     n_progs = 0
-    if procedure_filter is not None:
+    filters = as_filter_list(procedure_filter)
+    if filters is not None:
+        pattern = "|".join(re.escape(f) for f in filters)
         n_progs = int(
             dismembered_df.groupby("BM_Programm")["Prozedur"]
-            .apply(lambda x: x.str.contains(procedure_filter, na=False).any())
+            .apply(lambda x: x.str.contains(pattern, na=False, regex=True).any())
             .sum()
         )
     else:

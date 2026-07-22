@@ -24,6 +24,8 @@ import urllib3
 from minio import Minio
 from minio.error import S3Error
 
+from util.procedure_filter import matches_any
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 MINIO_ENDPOINT = "iseadocker.isea.rwth-aachen.de:9000"
@@ -94,7 +96,7 @@ def download_from_minio(cfg: dict, access_key: str, secret_key: str, export_type
         objects = minio_client.list_objects(BUCKET_NAME, prefix=prefix, recursive=True)
         cell_tests = [obj.object_name for obj in objects if obj.object_name.endswith(".parquet")]
 
-        if not any(procedure_filter in t for t in cell_tests):
+        if not any(matches_any(t, procedure_filter) for t in cell_tests):
             logging.info(f"Skipping {cell} — no '{procedure_filter}' files found")
             continue
 
@@ -111,7 +113,7 @@ def download_from_minio(cfg: dict, access_key: str, secret_key: str, export_type
                 continue
 
             df_first_row = pd.read_parquet(io.BytesIO(data)).head(1)
-            if procedure_filter in programme_name:
+            if matches_any(programme_name, procedure_filter):
                 df = pd.read_parquet(io.BytesIO(data))
             else:
                 df = df_first_row
@@ -150,7 +152,7 @@ def concat_from_local(cfg: dict, rootpath: str) -> None:
         loadpath = os.path.join(rootpath, cell)
         cell_tests = glob.glob("*.parquet", root_dir=loadpath)
 
-        if not any(procedure_filter in t for t in cell_tests):
+        if not any(matches_any(t, procedure_filter) for t in cell_tests):
             logging.info(f"Skipping {cell} — no '{procedure_filter}' files found")
             continue
 
@@ -160,7 +162,7 @@ def concat_from_local(cfg: dict, rootpath: str) -> None:
             filepath = os.path.join(loadpath, test_file)
             try:
                 df_first_row = duckdb.sql(f"SELECT * FROM '{filepath}' LIMIT 1").df()
-                if procedure_filter in programme_name:
+                if matches_any(programme_name, procedure_filter):
                     df = pd.read_parquet(filepath)
                 else:
                     df = df_first_row
