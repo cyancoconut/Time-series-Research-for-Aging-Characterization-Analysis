@@ -33,6 +33,7 @@
     "procedure_filter": "jri_CU",
     "qocv_procedure_filter": null,
 
+    "export_gold": true,
     "export_pulse": false,
     "export_qocv": false,
     "running_window_days": 2,
