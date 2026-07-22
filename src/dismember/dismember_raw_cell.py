@@ -1,6 +1,7 @@
 from .cluster_preparation import DismemblerFunctions
 from .cluster_preparation import allocate_IDs
 from util import bronze_column_filter
+from util.procedure_filter import as_filter_list
 
 import os
 import pandas as pd
@@ -13,13 +14,15 @@ def processing_procedure_filter(source, procedure_filter):
     """Check whether any Prozedur value in the BRONZE parquet matches the filter.
 
     ``source`` may be either a local file path or a seekable file-like object
-    (e.g. ``io_router.open_bronze_range``). Only the ``Prozedur`` column is
-    read, row group by row group, and the scan short-circuits on the first
-    substring match — so on MinIO this fetches only the parquet footer plus
-    one column's data, not the full file.
+    (e.g. ``io_router.open_bronze_range``). ``procedure_filter`` is a substring
+    or a list of substrings — a Prozedur matches when it contains **any** of
+    them. Only the ``Prozedur`` column is read, row group by row group, and the
+    scan short-circuits on the first substring match — so on MinIO this fetches
+    only the parquet footer plus one column's data, not the full file.
     """
     # If no filter is provided, allow all cells
-    if procedure_filter is None:
+    filters = as_filter_list(procedure_filter)
+    if filters is None:
         return True
 
     pf = pq.ParquetFile(source)
@@ -27,7 +30,7 @@ def processing_procedure_filter(source, procedure_filter):
         return False
     for i in range(pf.num_row_groups):
         col = pf.read_row_group(i, columns=["Prozedur"]).column("Prozedur")
-        if pc.any(pc.match_substring(col, procedure_filter)).as_py():
+        if any(pc.any(pc.match_substring(col, f)).as_py() for f in filters):
             return True
     return False
 

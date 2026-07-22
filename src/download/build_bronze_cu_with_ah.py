@@ -56,11 +56,21 @@ from minio.error import S3Error
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from util.add_ah_throughput import add_ah_throughput
 from util import io_router
+from util.procedure_filter import as_filter_list
 
 
-def _is_cu(object_name: str, cu_marker: str) -> bool:
+def _is_cu(object_name: str, cu_marker) -> bool:
+    """True when the test file's programme field matches the CU marker(s).
+
+    ``cu_marker`` is a substring or a list of substrings (the check-up
+    programme name(s)); a file is a CU when its 4th '='-delimited field
+    contains **any** of them.
+    """
     parts = os.path.basename(object_name).split("=")
-    return len(parts) > 3 and cu_marker in parts[3]
+    if len(parts) <= 3:
+        return False
+    markers = as_filter_list(cu_marker) or []
+    return any(m in parts[3] for m in markers)
 
 
 def _programme_name(object_name: str) -> str:
