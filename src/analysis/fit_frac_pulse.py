@@ -237,12 +237,17 @@ def _ml_neg(alpha, x):
 def zarc_step(t, tau, alpha):
     """Unit-current step response of a ZARC: ``1 - E_alpha(-(t/tau)^alpha)``.
 
-    Zero for ``t <= 0`` (causal), rises to 1 (the DC resistance) as t -> inf.
+    Zero for ``t <= 0`` (causal), rises to 1 (the DC resistance) as t -> inf. At
+    ``alpha = 1`` a ZARC is an ordinary RC, so return ``1 - exp(-t/tau)`` exactly
+    (the Cole-Cole DRT quadrature degenerates there: ``sin(alpha pi) -> 0``).
     """
     t = np.asarray(t, dtype=float)
     pos = t > 0
     out = np.zeros_like(t)
     if not np.any(pos):
+        return out
+    if alpha >= 1.0 - 1e-9:
+        out[pos] = 1.0 - np.exp(-t[pos] / tau)
         return out
     x = (t[pos] / tau) ** alpha
     out[pos] = 1.0 - _ml_neg(alpha, x)
@@ -431,7 +436,8 @@ def _initial_guess(t, resid, k_start, i_relax_start, t_p, i_pulse, ocv_e,
 # P5-P9: the sequential decomposition
 # ---------------------------------------------------------------------------
 def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
-                    d_fit1=D_FIT1, d_fit2=D_FIT2, slowest="zarc", verbose=False):
+                    d_fit1=D_FIT1, d_fit2=D_FIT2, slowest="zarc",
+                    fix_alpha=False, verbose=False):
     """Run steps P1-P9 on one pulse+relaxation window.
 
     ``slowest`` selects the slowest element's form: ``"zarc"`` (default) makes the
@@ -440,6 +446,10 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
     response is tiny in the tail, so on a modest slow tail it rails ``R_d`` (seen
     on VTC6 mid-SOC charge pulses); a ZARC's step response decays cleanly and fits
     the same tail without railing, which is why ZARC is the default.
+
+    ``fix_alpha`` pins every ZARC's ``alpha`` to 1, i.e. an ordinary **RC ladder**
+    (a Bruch-style n-RC model) -- the integer-order baseline to compare the
+    fractional fit against.
 
     Returns ``(params, info)`` where ``params`` is
     ``dict(ocv_s, ocv_e, r_s, r_d, tau_d, zarcs=[(R, tau, alpha), ...])`` ordered
@@ -452,6 +462,9 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
     du1, du2 = voltage_limits(float(v[n]), float(v[-1]), d_fit1, d_fit2, noise)
     k1 = find_k1(t, v, n, du1)
     starts = log_sections(t, n, k1, n_max)
+    # alpha search: pinned at 1 (RC ladder) when fix_alpha, else the ZARC range.
+    a_lo, a_hi, a_0 = (1.0 - 1e-9, 1.0, 1.0) if fix_alpha \
+        else (ALPHA_MIN, ALPHA_MAX, 0.8)
     if verbose:
         logging.info(
             "  P2/P4: noise=%.3f mV dU_fit1=%.2f mV dU_fit2=%.2f mV  K1 at "
@@ -470,7 +483,8 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
     else:
         r_d, tau_d = 0.0, np.nan
         ocv_e, slow_zarc, slow_degenerate = _fit_slow_zarc(
-            t, v, i_arr, t_p, i_pulse, ocv_s, starts[0], n, noise, verbose=verbose,
+            t, v, i_arr, t_p, i_pulse, ocv_s, starts[0], n, noise,
+            alpha_bounds=(a_lo, a_hi, a_0), verbose=verbose,
         )
         if slow_zarc is not None:
             zarcs.append(slow_zarc)
@@ -497,7 +511,7 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
         sec = slice(k_start, len(t))
         tau_ini, r_ini = _initial_guess(
             t, resid, k_start, n, t_p, i_pulse, ocv_e,
-            lambda tt, tau: zarc_step(tt, tau, 0.8),
+            lambda tt, tau: zarc_step(tt, tau, a_0),
         )
 
         def _zarc_model(tt, r, tau, alpha, _sec=sec):
@@ -509,9 +523,9 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
         try:
             popt, _ = curve_fit(
                 _zarc_model, t[sec], resid[sec],
-                p0=[r_ini, tau_ini, 0.8],
-                bounds=([R_MIN_OHM, 1e-3, ALPHA_MIN],
-                        [1.0, 1e5, ALPHA_MAX]),
+                p0=[r_ini, tau_ini, a_0],
+                bounds=([R_MIN_OHM, 1e-3, a_lo],
+                        [1.0, 1e5, a_hi]),
                 maxfev=20000,
             )
         except (RuntimeError, ValueError):
@@ -544,7 +558,8 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
     # ---- P9: extend into the pulse; fit R_s and refit the fastest ZARC
     r_s_ini = _ohmic_init(t, v, i_arr, n)
     r_s, zarcs = _fit_series_resistance(
-        t, v, i_arr, t_p, i_pulse, ocv_s, ocv_e, r_d, tau_d, zarcs, r_s_ini
+        t, v, i_arr, t_p, i_pulse, ocv_s, ocv_e, r_d, tau_d, zarcs, r_s_ini,
+        alpha_bounds=(a_lo, a_hi, a_0),
     )
     if verbose:
         logging.info("  P9: R_s=%.2f mOhm (init %.2f mOhm), %d ZARC(s)",
@@ -556,6 +571,7 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
         # has_slow gates the *Warburg* term only; in ZARC mode the slow element is
         # a normal ZARC so has_slow stays False (r_d=0/tau_d=NaN).
         "has_slow": slowest == "warburg" and not slow_degenerate,
+        "fix_alpha": fix_alpha,
     }
     info = {
         "noise_mV": noise * 1e3,
@@ -563,7 +579,7 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
         "k1_t_s": float(t[k1] - t[n]), "n_sections": len(starts),
         "n_sections_skipped": skipped, "i_relax_start": n,
         "r_s_init_ohm": r_s_ini, "slow_degenerate": slow_degenerate,
-        "slowest": slowest,
+        "slowest": slowest, "fix_alpha": fix_alpha,
     }
     return params, info
 
@@ -660,7 +676,7 @@ def _fit_slow_branch(t, v, i_arr, t_p, i_pulse, ocv_s, k1, n, noise, *,
 
 
 def _fit_slow_zarc(t, v, i_arr, t_p, i_pulse, ocv_s, k1, n, noise, *,
-                   verbose=False):
+                   alpha_bounds=(ALPHA_MIN, ALPHA_MAX, 0.9), verbose=False):
     """P5 (ZARC mode) — fit the slowest **ZARC** + pin ``U_OCVe`` on ``[K1, M]``.
 
     Returns ``(ocv_e, (R, tau, alpha) | None, slow_degenerate)``. Same structure
@@ -684,10 +700,11 @@ def _fit_slow_zarc(t, v, i_arr, t_p, i_pulse, ocv_s, k1, n, noise, *,
                          window_drop * 1e3, SLOW_SIGNAL_NOISE_MULT, v_end)
         return v_end, None, True
 
+    a_lo, a_hi, a_0 = alpha_bounds
     sec = slice(k1, len(t))
     rest_len = float(t[-1] - t[n])
     tau_ini, r_ini = _initial_guess(
-        t, v, k1, n, t_p, i_pulse, v_end, lambda tt, tau: zarc_step(tt, tau, 0.9),
+        t, v, k1, n, t_p, i_pulse, v_end, lambda tt, tau: zarc_step(tt, tau, a_0),
     )
     ocv_ramp_fixed = ocv_ramp(t, i_arr, ocv_s, v_end)
 
@@ -696,8 +713,8 @@ def _fit_slow_zarc(t, v, i_arr, t_p, i_pulse, ocv_s, k1, n, noise, *,
 
     try:
         popt, _ = curve_fit(
-            _zarc_model, t[sec], v[sec], p0=[r_ini, tau_ini, 0.9],
-            bounds=([R_MIN_OHM, 1.0, ALPHA_MIN], [1.0, 1e5, ALPHA_MAX]),
+            _zarc_model, t[sec], v[sec], p0=[r_ini, tau_ini, a_0],
+            bounds=([R_MIN_OHM, 1.0, a_lo], [1.0, 1e5, a_hi]),
             maxfev=20000,
         )
     except (RuntimeError, ValueError):
@@ -728,7 +745,8 @@ def _ohmic_init(t, v, i_arr, n):
 
 
 def _fit_series_resistance(t, v, i_arr, t_p, i_pulse, ocv_s, ocv_e, r_d, tau_d,
-                           zarcs, r_s_ini):
+                           zarcs, r_s_ini,
+                           alpha_bounds=(ALPHA_MIN, ALPHA_MAX, 0.8)):
     """P9 — fit ``R_s`` together with the fastest ZARC over pulse + relaxation.
 
     The paper refits the last (lowest-tau) element here because the instantaneous
@@ -766,11 +784,13 @@ def _fit_series_resistance(t, v, i_arr, t_p, i_pulse, ocv_s, ocv_e, r_d, tau_d,
     def _model(tt, r_s, r, tau, alpha):
         return base + i_arr * r_s + i_pulse * zarc_pulse(t, t_p, r, tau, alpha)
 
+    a_lo, a_hi, _ = alpha_bounds
+    alpha_f = min(max(alpha_f, a_lo), a_hi)   # keep the seed inside the band
     try:
         popt, _ = curve_fit(
             _model, t, v, p0=[r_s_ini, r_f, tau_f, alpha_f],
-            bounds=([r_s_lo, R_MIN_OHM, 1e-3, ALPHA_MIN],
-                    [r_s_hi, 1.0, 1e5, ALPHA_MAX]),
+            bounds=([r_s_lo, R_MIN_OHM, 1e-3, a_lo],
+                    [r_s_hi, 1.0, 1e5, a_hi]),
             maxfev=30000,
         )
     except (RuntimeError, ValueError):
@@ -869,9 +889,12 @@ def _jax_ml_neg(jnp, alpha, x):
     return weights @ jnp.exp(-jnp.outer(jnp.exp(-u), s))
 
 
-def _jax_zarc_step(jnp, t, tau, alpha):
+def _jax_zarc_step(jnp, t, tau, alpha, rc=False):
     tt = jnp.clip(t, 1e-12, None)
-    val = 1.0 - _jax_ml_neg(jnp, alpha, (tt / tau) ** alpha)
+    if rc:                       # alpha pinned at 1 -> exact RC (ML degenerates)
+        val = 1.0 - jnp.exp(-tt / tau)
+    else:
+        val = 1.0 - _jax_ml_neg(jnp, alpha, (tt / tau) ** alpha)
     return jnp.where(t > 0, val, 0.0)
 
 
@@ -884,7 +907,7 @@ def _jax_warburg_step(jnp, t, tau_d, n_terms=20):
 
 
 def _jax_model_ml(jnp, x, n_zarc, t, i_arr, q_frac, t_p, i_pulse, ocv_s, ocv_e,
-                  slow_on=1.0):
+                  slow_on=1.0, rc=False):
     # unpack with has_slow=True so tau_d stays finite (the packed sentinel); the
     # slow_on mask, not a NaN, is what removes a dropped slow branch.
     p = _unpack(x, n_zarc, ocv_s, ocv_e, has_slow=True, xp=jnp)
@@ -893,9 +916,11 @@ def _jax_model_ml(jnp, x, n_zarc, t, i_arr, q_frac, t_p, i_pulse, ocv_s, ocv_e,
         t > t_p, _jax_warburg_step(jnp, t - t_p, p["tau_d"]), 0.0
     )
     v = v + slow_on * i_pulse * p["r_d"] * wb
+    # rc=True pins alpha at 1 (RC ladder): the packed alpha dims become inert
+    # (zero gradient), so L-BFGS leaves them and the fit stays integer-order.
     for r, tau, alpha in p["zarcs"]:
-        s = _jax_zarc_step(jnp, t, tau, alpha) - jnp.where(
-            t > t_p, _jax_zarc_step(jnp, t - t_p, tau, alpha), 0.0
+        s = _jax_zarc_step(jnp, t, tau, alpha, rc) - jnp.where(
+            t > t_p, _jax_zarc_step(jnp, t - t_p, tau, alpha, rc), 0.0
         )
         v = v + i_pulse * r * s
     return v
@@ -944,7 +969,7 @@ def _gl_zarc(jnp, lax, i_seq, h, r, tau, alpha, m=GL_MEMORY):
 
 
 def _jax_model_gl(jnp, lax, x, n_zarc, t_u, i_u, q_frac_u, h, t_p, i_pulse,
-                  ocv_s, ocv_e, slow_on=1.0):
+                  ocv_s, ocv_e, slow_on=1.0, rc=False):
     """Same model as ``_jax_model_ml`` but with GL-integrated ZARCs."""
     p = _unpack(x, n_zarc, ocv_s, ocv_e, has_slow=True, xp=jnp)
     v = ocv_s + (ocv_e - ocv_s) * q_frac_u + i_u * p["r_s"]
@@ -953,7 +978,7 @@ def _jax_model_gl(jnp, lax, x, n_zarc, t_u, i_u, q_frac_u, h, t_p, i_pulse,
     )
     v = v + slow_on * i_pulse * p["r_d"] * wb
     for r, tau, alpha in p["zarcs"]:
-        v = v + _gl_zarc(jnp, lax, i_u, h, r, tau, alpha)
+        v = v + _gl_zarc(jnp, lax, i_u, h, r, tau, 1.0 if rc else alpha)
     return v
 
 
@@ -977,6 +1002,7 @@ def refit_joint(t, v, i_arr, t_p, i_pulse, params, *, kernel="ml", verbose=False
     ocv_e = params["ocv_e"]                           # pinned, not optimized
     has_slow = _has_slow(params)
     slow_on = 1.0 if has_slow else 0.0
+    rc = bool(params.get("fix_alpha", False))         # RC ladder: alpha pinned 1
     x0 = _pack(params)
 
     q = np.concatenate(([0.0], np.cumsum(np.diff(t) * i_arr[:-1])))
@@ -989,7 +1015,7 @@ def refit_joint(t, v, i_arr, t_p, i_pulse, params, *, kernel="ml", verbose=False
 
         def loss(x):
             pred = _jax_model_ml(jnp, x, n_zarc, tj, ij, qj, t_p, i_pulse, ocv_s,
-                                 ocv_e, slow_on)
+                                 ocv_e, slow_on, rc)
             r = jnp.where(mj, pred - vj, 0.0)
             return jnp.sum(r ** 2) / jnp.sum(mj)
     elif kernel == "gl":
@@ -1010,7 +1036,7 @@ def refit_joint(t, v, i_arr, t_p, i_pulse, params, *, kernel="ml", verbose=False
 
         def loss(x):
             pred = _jax_model_gl(jnp, lax, x, n_zarc, tj, ij, qj, h, t_p,
-                                 i_pulse, ocv_s, ocv_e, slow_on)
+                                 i_pulse, ocv_s, ocv_e, slow_on, rc)
             r = jnp.where(mj, pred - vj, 0.0)
             return jnp.sum(r ** 2) / jnp.sum(mj)
     else:
@@ -1026,9 +1052,11 @@ def refit_joint(t, v, i_arr, t_p, i_pulse, params, *, kernel="ml", verbose=False
     res = minimize(fun, x0, jac=True, method="L-BFGS-B",
                    options={"maxiter": 500, "ftol": 1e-15, "gtol": 1e-12})
     refit = _unpack(res.x, n_zarc, ocv_s, ocv_e, has_slow=has_slow, xp=np)
-    refit["zarcs"] = [(float(r), float(tau), float(a))
+    # in RC mode the packed alpha dims were inert (model forced alpha=1); report 1.
+    refit["zarcs"] = [(float(r), float(tau), 1.0 if rc else float(a))
                       for r, tau, a in refit["zarcs"]]
-    refit = {k: (val if k in ("zarcs", "has_slow")
+    refit["fix_alpha"] = rc
+    refit = {k: (val if k in ("zarcs", "has_slow", "fix_alpha")
                  else float(val)) for k, val in refit.items()}
     # order slow -> fast, matching the identification order
     refit["zarcs"].sort(key=lambda z: -z[1])
@@ -1049,8 +1077,8 @@ def _rmse_mv(t, v, i_arr, t_p, i_pulse, params, relax_only=True):
 
 
 def fit_one_pulse_frac(window, t_p, i_pulse, pre_rest_v, *, n_max=N_MAX,
-                       d_fit1=D_FIT1, d_fit2=D_FIT2, slowest="zarc", p10=True,
-                       kernel="ml", verbose=False):
+                       d_fit1=D_FIT1, d_fit2=D_FIT2, slowest="zarc",
+                       fix_alpha=False, p10=True, kernel="ml", verbose=False):
     """Full P1-P10 identification for one pulse window. Returns a result dict."""
     t = (window["Time"] - window["Time"].iloc[0]).dt.total_seconds().to_numpy()
     v = window["Voltage"].to_numpy(dtype=float)
@@ -1064,7 +1092,8 @@ def fit_one_pulse_frac(window, t_p, i_pulse, pre_rest_v, *, n_max=N_MAX,
 
     params, info = decompose_pulse(
         t, v, i_arr, t_p, i_pulse, ocv_s,
-        n_max=n_max, d_fit1=d_fit1, d_fit2=d_fit2, slowest=slowest, verbose=verbose,
+        n_max=n_max, d_fit1=d_fit1, d_fit2=d_fit2, slowest=slowest,
+        fix_alpha=fix_alpha, verbose=verbose,
     )
     if params is None:
         return None
@@ -1241,17 +1270,40 @@ def _decade_series(sub, value="R"):
     return cols
 
 
+def _pulse_metrics(row):
+    """Per-pulse derived metrics for the vs-SOH plot.
+
+    ``R_pulse`` is the buildup-weighted pulse resistance
+    ``R_s + sum_k R_k (1 - e^{-t_p/tau_k})`` -- the resistance the pulse actually
+    develops by ``t_p`` (i.e. measured end-of-pulse overvoltage / I). Unlike the
+    raw ``R_total`` (sum of full element R), it does not inherit the scatter of a
+    slow ZARC whose R is unidentifiable because ``tau >> t_p`` (only ~3 % charged
+    in 20 s). ``R_fast``/``R_slow`` are the fastest/slowest ZARC (mirrors the 2RC
+    ``R1``/``R2``); the slow one is buildup-limited, kept for continuity.
+    """
+    zs = sorted(_iter_zarcs(row), key=lambda z: z[1])   # by tau, fast -> slow
+    t_p = float(row.get("pulse_dur_s", 20.0))
+    r_s = float(row["R_s_ohm"])
+    r_pulse = r_s + sum(r * (1.0 - np.exp(-t_p / tau)) for r, tau, _ in zs)
+    fast = zs[0] if zs else (np.nan, np.nan, np.nan)
+    slow = zs[-1] if zs else (np.nan, np.nan, np.nan)
+    return {
+        "R_s_mohm": r_s * 1e3,
+        "R_pulse_mohm": r_pulse * 1e3,
+        "R_fast_mohm": fast[0] * 1e3, "tau_fast_s": fast[1], "alpha_fast": fast[2],
+        "R_slow_mohm": slow[0] * 1e3, "tau_slow_s": slow[1], "alpha_slow": slow[2],
+    }
+
+
 def plot_vs_soh(results, out_png, title=""):
-    """Fractional-ECM parameters vs SOH: CHA/DCH split, tau-decade binned.
+    """Fractional-ECM parameters vs SOH, in the ``fit_2rc_pulse`` house style.
 
-    Layout: two columns (charge | discharge), three rows:
-
-    * **Headline resistances** -- ``R_s``, ``R_total`` and the slow-branch ``R_d``
-      (only where the Warburg was identified; ``slow_degenerate`` rows are hidden
-      so the plateau's non-identifiable slow branch does not inject spikes).
-    * **ZARC R by tau-decade** -- one trace per decade, so a given physical
-      process is one line even though pulses resolve different element counts.
-    * **ZARC alpha by tau-decade** -- the depression of each process's arc.
+    A 2x3 grid, one clean line **per pulse type** (direction + current, e.g.
+    ``CHA 1.5A``), x-axis inverted so aging reads fresh -> aged. Keying on the
+    pulse type is what avoids the sawtooth of lumping the +1.5 A and +3 A charge
+    pulses onto one "CHA" line. Panels mirror the 2RC plot (R0/R1/R2/tau1/tau2/
+    rmse): ``R_s`` (ohmic), ``R_pulse(t_p)`` (buildup-weighted total, the stable
+    replacement for ``R_total``), fast & slow ZARC ``R``/``tau`` and the fit RMSE.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -1259,62 +1311,38 @@ def plot_vs_soh(results, out_png, title=""):
 
     if "SOH_num" not in results.columns or results.empty:
         return
-    slow_ok = ~results.get("slow_degenerate", pd.Series(False, index=results.index)) \
-        .astype(str).str.lower().isin(["true", "1"])
+    df = results.copy()
+    m = df.apply(lambda r: pd.Series(_pulse_metrics(r)), axis=1)
+    df = pd.concat([df, m], axis=1)
+    df["pulse_type"] = (df["direction"].astype(str) + " "
+                        + df["I_A"].abs().round(1).astype(str) + "A")
 
-    fig, axes = plt.subplots(3, 2, figsize=(13, 11), sharex=True)
-    cmap = plt.get_cmap("viridis")
-    dec_colors = [cmap(i / (len(TAU_DECADE_LABELS) - 1))
-                  for i in range(len(TAU_DECADE_LABELS))]
-
-    for col, direction in enumerate(("CHA", "DCH")):
-        sub = results[results["direction"] == direction].sort_values("SOH_num")
-        a0, a1, a2 = axes[0][col], axes[1][col], axes[2][col]
-        if sub.empty:
-            for ax in (a0, a1, a2):
-                ax.axis("off")
-            continue
-
-        # row 0: robust resistances
-        a0.plot(sub["SOH_num"], sub["R_s_ohm"] * 1e3, "o-", color="C0",
-                label="R_s", ms=4)
-        a0.plot(sub["SOH_num"], sub["R_total_ohm"] * 1e3, "s--", color="0.4",
-                label="R_total", ms=3)
-        slow = sub[slow_ok.loc[sub.index] & sub["R_d_ohm"].gt(0)]
-        if not slow.empty:
-            a0.plot(slow["SOH_num"], slow["R_d_ohm"] * 1e3, "D:", color="C3",
-                    label="R_d (Warburg, identified)", ms=4)
-        a0.set_title(f"{direction}", fontsize=11)
-        a0.set_ylabel("R [mΩ]")
-
-        # rows 1-2: ZARC R and alpha, binned by tau-decade
-        for value, ax in (("R", a1), ("alpha", a2)):
-            series = _decade_series(sub, value)
-            for b, lab in enumerate(TAU_DECADE_LABELS):
-                if not series[b]:
-                    continue
-                xs = sorted(series[b])
-                ys = [series[b][x] for x in xs]
-                ax.plot(xs, ys, "o-", color=dec_colors[b], ms=4,
-                        label=f"tau {lab}")
-        a1.set_ylabel("ZARC R [mΩ]")
-        a2.set_ylabel("ZARC alpha [-]")
-        a2.set_xlabel("SOH [%]")
-
-    for row in axes:
-        for ax in row:
-            ax.grid(alpha=0.3)
-            if ax.has_data():
-                ax.legend(fontsize=7, ncol=2)
-    axes[0][0].invert_xaxis()      # shared x: SOH high -> low
-    fig.suptitle(f"Fractional ECM (Bruch decomposition) vs SOH — {title}\n"
-                 "R_s / R_total headline; ZARCs binned by tau-decade; R_d shown "
-                 "only where a Warburg was identified (--slowest warburg)",
+    metrics = [
+        ("R_s_mohm", "R_s (mΩ)"),
+        ("R_pulse_mohm", "R_pulse(t_p) (mΩ)"),
+        ("rmse_mV", "fit rmse (mV)"),
+        ("R_slow_mohm", "R_slow (mΩ)  [τ≫t_p: buildup-limited]"),
+        ("tau_slow_s", "τ_slow (s)"),
+        ("alpha_fast", "α_fast (-)"),
+    ]
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    for ax, (col, label) in zip(axes.ravel(), metrics):
+        for ptype, g in df.groupby("pulse_type"):
+            g = g.sort_values("SOH_num")
+            ax.plot(g["SOH_num"], g[col], "o-", ms=4, label=ptype)
+        ax.set_xlabel("SOH (%)")
+        ax.set_ylabel(label)
+        if col.startswith("tau"):
+            ax.set_yscale("log")   # tau spans decades (and a railed fit hits 1e5)
+        ax.invert_xaxis()     # aging reads left (fresh) -> right (aged)
+        ax.grid(alpha=0.3)
+    axes.ravel()[0].legend(fontsize=8, title="pulse")
+    fig.suptitle(f"Fractional ECM (Bruch decomposition) vs SOH — {title}",
                  fontsize=11)
     fig.tight_layout()
-    fig.savefig(out_png, dpi=130)
+    fig.savefig(out_png, dpi=120)
     plt.close(fig)
-    logging.info("plot -> %s", out_png)
+    logging.info("vs-SOH plot -> %s", out_png)
 
 
 # ---------------------------------------------------------------------------
@@ -1444,6 +1472,9 @@ def main():
                     help="slowest element: 'zarc' (default, pure ZARC ladder) or "
                          "'warburg' (finite-length Warburg, Bruch's original). "
                          "ZARC avoids the Warburg tail-degeneracy railing.")
+    ap.add_argument("--rc", action="store_true",
+                    help="pin every alpha to 1 -> ordinary RC ladder (integer-"
+                         "order 2RC/nRC baseline to compare the fractional fit).")
     ap.add_argument("--p10-kernel", choices=("ml", "gl"), default="ml",
                     help="P10 forward kernel: exact Mittag-Leffler (default) or "
                          "Grunwald-Letnikov recursion on a resampled grid")
@@ -1466,8 +1497,8 @@ def main():
         ap.error("a pulse parquet/folder is required (or use --self-test)")
 
     kw = dict(n_max=args.n_max, d_fit1=args.d_fit1, d_fit2=args.d_fit2,
-              slowest=args.slowest, p10=not args.no_p10, kernel=args.p10_kernel,
-              verbose=args.verbose)
+              slowest=args.slowest, fix_alpha=args.rc, p10=not args.no_p10,
+              kernel=args.p10_kernel, verbose=args.verbose)
 
     if os.path.isdir(args.parquet):
         results = fit_folder(args.parquet, args.nom_capacity,
