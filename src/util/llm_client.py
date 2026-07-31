@@ -17,9 +17,10 @@ columns and never touch Capacity_py / SOH numerics.
 import json
 import logging
 import os
+import re
 from typing import Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
@@ -150,6 +151,25 @@ suffix), not "partial_cha"/"partial_dch" — even when the small \
 true_voltage_range or the C-rate might suggest a partial step."""
 
 
+# Appended to the system prompt on the OpenAI path. OpenAI-compatible gateways
+# (e.g. chat.kiconnect.nrw) often accept `response_format` but do NOT enforce
+# strict JSON-schema output — the model then replies in free-form markdown and
+# `chat.completions.parse` raises a pydantic json_invalid. Spelling the JSON
+# contract into the prompt + defensive extraction (`_extract_json`) makes the
+# path work regardless of whether the server honours structured output.
+_JSON_INSTRUCTION = """\
+
+
+Respond with ONLY a single JSON object and nothing else — no markdown, no code \
+fences, no headings, no prose before or after it. The object MUST have exactly \
+these three keys:
+  "rationale": string — your STEP 0 -> 1 -> 2 reasoning,
+  "label": string — the snake_case procedure name,
+  "confidence": number between 0.0 and 1.0.
+Example of the EXACT shape (values illustrative):
+{"rationale": "STEP 0 ...", "label": "full_discharge_c2", "confidence": 0.9}"""
+
+
 class AnthropicLLMClient:
     """Claude backend via the official ``anthropic`` SDK.
 
@@ -204,11 +224,16 @@ class AnthropicLLMClient:
 class OpenAILLMClient:
     """OpenAI(-compatible) backend via the official ``openai`` SDK.
 
-    One ``chat.completions.parse`` call per cluster with a Pydantic-validated
-    structured output. Chat Completions (rather than the Responses API) so
-    OpenAI-compatible gateways work too — point ``llm_base_url`` at the
-    server's OpenAI v1 root (e.g. ``https://chat.kiconnect.nrw/api/v1``);
-    leave it unset for api.openai.com.
+    One ``chat.completions.create`` call per cluster, then the JSON is extracted
+    and validated against :class:`ClusterLabel` locally. We do NOT rely on the
+    server enforcing structured output: many OpenAI-compatible gateways (e.g.
+    ``chat.kiconnect.nrw``) accept ``response_format`` but ignore it, returning
+    free-form markdown that ``chat.completions.parse`` cannot validate. Instead
+    the JSON contract is spelled into the prompt (``_JSON_INSTRUCTION``), the
+    reply is parsed defensively (``_extract_json``), and one corrective retry is
+    issued if the first reply is not valid JSON. Point ``llm_base_url`` at the
+    server's OpenAI v1 root (e.g. ``https://chat.kiconnect.nrw/api/v1``); leave
+    it unset for api.openai.com.
     """
 
     def __init__(self, cfg: dict):
@@ -223,26 +248,54 @@ class OpenAILLMClient:
         self._client = openai.OpenAI(api_key=api_key, base_url=cfg.get("llm_base_url"))
         self._model = cfg.get("llm_model", DEFAULT_OPENAI_MODEL)
 
-    def interpret_cluster(self, signature: dict) -> ClusterLabel:
-        response = self._client.chat.completions.parse(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": "Cluster signature:\n"
-                    + json.dumps(signature, indent=2, sort_keys=True, default=str),
-                },
-            ],
-            response_format=ClusterLabel,
-        )
-        result = response.choices[0].message.parsed
-        if result is None:
-            raise RuntimeError(
-                "OpenAI returned no parsable ClusterLabel "
-                f"(finish_reason={response.choices[0].finish_reason})"
+    def _complete(self, messages: list) -> str:
+        """One chat completion, returning the raw message text.
+
+        Requests JSON mode when the gateway supports it, but falls back to a
+        plain call if the server rejects the ``response_format`` field — the
+        reply is validated locally either way.
+        """
+        try:
+            resp = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                response_format={"type": "json_object"},
             )
-        return result
+        except Exception:
+            resp = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+            )
+        return resp.choices[0].message.content or ""
+
+    def interpret_cluster(self, signature: dict) -> ClusterLabel:
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT + _JSON_INSTRUCTION},
+            {
+                "role": "user",
+                "content": "Cluster signature:\n"
+                + json.dumps(signature, indent=2, sort_keys=True, default=str),
+            },
+        ]
+        last_err: Exception | None = None
+        for _ in range(2):  # initial call + one corrective retry
+            content = self._complete(messages)
+            try:
+                return ClusterLabel.model_validate_json(_extract_json(content))
+            except (ValidationError, ValueError) as exc:
+                last_err = exc
+                messages = messages + [
+                    {"role": "assistant", "content": content},
+                    {
+                        "role": "user",
+                        "content": "Your previous reply was not the required JSON "
+                        "object. Reply again with ONLY the JSON object (keys "
+                        '"rationale", "label", "confidence") and nothing else.',
+                    },
+                ]
+        raise RuntimeError(
+            f"OpenAI backend did not return a parsable ClusterLabel after a retry: {last_err}"
+        )
 
 
 def make_llm_client(cfg: dict) -> LLMClient:
@@ -252,6 +305,50 @@ def make_llm_client(cfg: dict) -> LLMClient:
     if provider == "anthropic":
         return AnthropicLLMClient(cfg)
     raise ValueError(f"Unknown llm_provider {provider!r} (expected 'openai' or 'anthropic')")
+
+
+def _extract_json(text: str) -> str:
+    """Return the first JSON object embedded in a model reply.
+
+    Handles gateways that ignore ``response_format`` and wrap the object in a
+    ```json fence`` or surround it with prose/headings. Raises ``ValueError``
+    when no balanced ``{...}`` block is present (e.g. a pure-markdown reply),
+    which the caller turns into a corrective retry.
+    """
+    s = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)
+    if fence:
+        s = fence.group(1).strip()
+    # Try each "{" as a candidate object start and return the first balanced
+    # block that actually parses as JSON — this steps past decoy braces that
+    # prose or the rationale text may contain (e.g. "Reasoning {foo}. {...}").
+    for start in (m.start() for m in re.finditer(r"\{", s)):
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(s)):
+            c = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = s[start : i + 1]
+                    try:
+                        json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break  # not valid JSON; advance to the next "{"
+                    return candidate
+    raise ValueError("no JSON object found in model reply")
 
 
 def _root_config_key(key: str):
