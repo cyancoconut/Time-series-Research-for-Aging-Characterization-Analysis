@@ -1,0 +1,17 @@
+{
+  "_description": "Standalone config for analysis/fit_2rc_pulse.py. Every key is optional; omitted keys fall back to the module defaults shown here. Pass with `python -m analysis.fit_2rc_pulse <pulse.parquet> --config <this.json>`.",
+
+  "nom_capacity": 3.0,
+
+  "pulse_std_fraction": 0.05,
+  "rest_current_a": 0.05,
+  "cycle_active_limit_hour": 4.0,
+  "r_dc_delta_t_s": 0.5,
+  "remove_pulse_before_min": 0,
+  "exclude_zustand_current": ["DCH/-1.5"],
+
+  "_soc_comment": "SOC-sweep labeling. Pulses are grouped into plateaus by Ah_throughput: a jump > plateau_gap_ah (the between-plateau step) starts the next plateau. soc_sweep_direction is the SWEEP direction (not a single pulse's CHA/DCH): 'discharge' -> SOC 100% at the top plateau, stepping down soc_step_pct each plateau; 'charge' -> SOC 0% at the bottom plateau, stepping up. plateau_gap_ah null -> derived as nom_capacity * soc_step_pct / 100 (one full SOC step in Ah).",
+  "soc_sweep_direction": "discharge",
+  "soc_step_pct": 5,
+  "plateau_gap_ah": null
+}

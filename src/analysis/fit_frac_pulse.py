@@ -437,7 +437,7 @@ def _initial_guess(t, resid, k_start, i_relax_start, t_p, i_pulse, ocv_e,
 # ---------------------------------------------------------------------------
 def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
                     d_fit1=D_FIT1, d_fit2=D_FIT2, slowest="zarc",
-                    fix_alpha=False, verbose=False):
+                    fix_alpha=False, fit_r_s=True, verbose=False):
     """Run steps P1-P9 on one pulse+relaxation window.
 
     ``slowest`` selects the slowest element's form: ``"zarc"`` (default) makes the
@@ -555,15 +555,23 @@ def decompose_pulse(t, v, i_arr, t_p, i_pulse, ocv_s, *, n_max=N_MAX,
             logging.info("  P8: ZARC %d  R=%.2f mOhm  tau=%.2f s  alpha=%.3f",
                          len(zarcs), r_n * 1e3, tau_n, alpha_n)
 
-    # ---- P9: extend into the pulse; fit R_s and refit the fastest ZARC
+    # ---- P9: extend into the pulse; fit R_s and refit the fastest ZARC.
+    # When fit_r_s is False (shared-R0 path) R_s is left at the Ohm's-law init and
+    # the fastest ZARC is *not* refit here -- both are deferred to the check-up-wide
+    # joint fit (_solve_series_resistance), which fits one shared R_s across all the
+    # pulses of a check-up so R_s stays a single, current-independent cell property.
     r_s_ini = _ohmic_init(t, v, i_arr, n)
-    r_s, zarcs = _fit_series_resistance(
-        t, v, i_arr, t_p, i_pulse, ocv_s, ocv_e, r_d, tau_d, zarcs, r_s_ini,
-        alpha_bounds=(a_lo, a_hi, a_0),
-    )
+    if fit_r_s:
+        r_s, zarcs = _fit_series_resistance(
+            t, v, i_arr, t_p, i_pulse, ocv_s, ocv_e, r_d, tau_d, zarcs, r_s_ini,
+            alpha_bounds=(a_lo, a_hi, a_0),
+        )
+    else:
+        r_s = r_s_ini
     if verbose:
-        logging.info("  P9: R_s=%.2f mOhm (init %.2f mOhm), %d ZARC(s)",
-                     r_s * 1e3, r_s_ini * 1e3, len(zarcs))
+        logging.info("  P9: R_s=%.2f mOhm (init %.2f mOhm), %d ZARC(s)%s",
+                     r_s * 1e3, r_s_ini * 1e3, len(zarcs),
+                     "" if fit_r_s else " [R_s deferred to shared check-up fit]")
 
     params = {
         "ocv_s": ocv_s, "ocv_e": ocv_e, "r_s": r_s,
@@ -799,6 +807,109 @@ def _fit_series_resistance(t, v, i_arr, t_p, i_pulse, ocv_s, ocv_e, r_d, tau_d,
     return r_s, fixed + [(float(popt[1]), float(popt[2]), float(popt[3]))]
 
 
+def _alpha_bounds_for(fix_alpha):
+    """(a_lo, a_hi, a_0) alpha band: pinned at 1 for an RC ladder, else the ZARC range."""
+    return (1.0 - 1e-9, 1.0, 1.0) if fix_alpha else (ALPHA_MIN, ALPHA_MAX, 0.8)
+
+
+def _apply_series_resistance(ctx, r_s, fastest=None):
+    """Write the resolved R_s (and optionally a refit fastest ZARC) back into a ctx."""
+    p = ctx["params"]
+    p["r_s"] = r_s
+    if fastest is not None and p["zarcs"]:
+        p["zarcs"] = p["zarcs"][:-1] + [fastest]
+
+
+def _solve_series_resistance(contexts, *, fix_alpha=False, verbose=False):
+    """P9, check-up-wide — fit **one shared R_s** across all pulses of a check-up.
+
+    R_s is the cell's series (ohmic) resistance: a single physical property that
+    cannot depend on which pulse probes it. Fitting it per pulse is ill-conditioned
+    at low current (the ohmic step is small, so R_s trades freely with the fastest
+    RC and rails toward the lower bound -- observed on the 1.5 A CHA pulses), which
+    makes R_s current-dependent and wavy. Here every pulse of the check-up is fit
+    together with a **single** shared R_s and its **own** fastest ZARC, over the
+    concatenated pulse+relaxation residual. The higher-current pulses carry larger
+    overvoltages (hence larger squared residuals), so they pin R_s to the
+    well-conditioned value while the low-current pulse can no longer drag it down.
+
+    Mutates each ctx's ``params`` in place (sets ``r_s`` on all, refits the fastest
+    ZARC on those that have one). Falls back to the per-pulse ``_fit_series_resistance``
+    for a lone pulse or if the joint solve fails. Returns the shared R_s.
+    """
+    a_lo, a_hi, _ = _alpha_bounds_for(fix_alpha)
+
+    def _per_pulse():
+        for c in contexts:
+            p = c["params"]
+            r_s, zarcs = _fit_series_resistance(
+                c["t"], c["v"], c["i_arr"], c["t_p"], c["i_pulse"],
+                p["ocv_s"], p["ocv_e"], p["r_d"], p["tau_d"], p["zarcs"],
+                c["r_s_ini"], alpha_bounds=(a_lo, a_hi, 0.8),
+            )
+            p["r_s"], p["zarcs"] = r_s, zarcs
+        return float(np.median([c["params"]["r_s"] for c in contexts]))
+
+    if len(contexts) < 2:
+        return _per_pulse()
+
+    # Precompute each pulse's fixed part (OCV ramp + Warburg + all but the fastest
+    # ZARC); only the shared R_s and each pulse's fastest ZARC are optimized.
+    bases, slots = [], []
+    seeds = [float(np.median([c["r_s_ini"] for c in contexts]))]
+    lo = [0.5 * seeds[0]]
+    hi = [1.5 * seeds[0]]
+    for c in contexts:
+        p = c["params"]
+        has_slow = p["r_d"] > 0 and np.isfinite(p["tau_d"])
+        warb = (c["i_pulse"] * warburg_pulse(c["t"], c["t_p"], p["r_d"], p["tau_d"])
+                if has_slow else 0.0)
+        fixed = p["zarcs"][:-1] if p["zarcs"] else []
+        base = (ocv_ramp(c["t"], c["i_arr"], p["ocv_s"], p["ocv_e"]) + warb
+                + sum(c["i_pulse"] * zarc_pulse(c["t"], c["t_p"], r, tau, a)
+                      for r, tau, a in fixed))
+        bases.append(base)
+        if p["zarcs"]:
+            r_f, tau_f, a_f = p["zarcs"][-1]
+            seeds += [r_f, tau_f, min(max(a_f, a_lo), a_hi)]
+            lo += [R_MIN_OHM, 1e-3, a_lo]
+            hi += [1.0, 1e5, a_hi]
+            slots.append(True)
+        else:
+            slots.append(False)
+
+    def _resid(x):
+        r_s, k, out = x[0], 1, []
+        for c, base, has in zip(contexts, bases, slots):
+            model = base + c["i_arr"] * r_s
+            if has:
+                model = model + c["i_pulse"] * zarc_pulse(
+                    c["t"], c["t_p"], x[k], x[k + 1], x[k + 2])
+                k += 3
+            out.append(model - c["v"])
+        return np.concatenate(out)
+
+    try:
+        sol = least_squares(_resid, seeds, bounds=(lo, hi), max_nfev=20000)
+    except (RuntimeError, ValueError) as exc:
+        logging.info("  P9 shared R_s solve failed (%s); per-pulse fallback", exc)
+        return _per_pulse()
+
+    r_s, k = float(sol.x[0]), 1
+    for c, has in zip(contexts, slots):
+        if has:
+            _apply_series_resistance(
+                c, r_s, (float(sol.x[k]), float(sol.x[k + 1]), float(sol.x[k + 2])))
+            k += 3
+        else:
+            _apply_series_resistance(c, r_s)
+    if verbose:
+        logging.info("  P9 shared: R_s=%.2f mOhm across %d pulses "
+                     "(inits %s mOhm)", r_s * 1e3, len(contexts),
+                     ", ".join(f"{c['r_s_ini']*1e3:.1f}" for c in contexts))
+    return r_s
+
+
 # ---------------------------------------------------------------------------
 # Forward model (numpy) + parameter packing
 # ---------------------------------------------------------------------------
@@ -982,7 +1093,8 @@ def _jax_model_gl(jnp, lax, x, n_zarc, t_u, i_u, q_frac_u, h, t_p, i_pulse,
     return v
 
 
-def refit_joint(t, v, i_arr, t_p, i_pulse, params, *, kernel="ml", verbose=False):
+def refit_joint(t, v, i_arr, t_p, i_pulse, params, *, kernel="ml", fix_r_s=False,
+                verbose=False):
     """P10 — joint refit of every parameter with exact gradients + L-BFGS-B.
 
     The cost is evaluated on the **relaxation only** (Bruch eq. 16): during the
@@ -993,6 +1105,11 @@ def refit_joint(t, v, i_arr, t_p, i_pulse, params, *, kernel="ml", verbose=False
     ``kernel='ml'`` differentiates the exact Mittag-Leffler quadrature on the
     measured (non-uniform) time base. ``kernel='gl'`` resamples onto a uniform
     grid and differentiates the Grunwald-Letnikov recursion instead.
+
+    ``fix_r_s`` freezes R_s at its incoming value (the shared check-up R_s), so P10
+    refines only the RC/OCV parameters. On the relaxation-only cost the current is
+    ~0, so R_s has almost no leverage anyway; freezing it makes the shared R_s
+    exact rather than letting a near-zero gradient nudge it off the joint value.
     """
     jax, jnp = _require_jax()
     from jax.scipy.optimize import minimize as jminimize   # noqa: F401  (probe)
@@ -1049,9 +1166,21 @@ def refit_joint(t, v, i_arr, t_p, i_pulse, params, *, kernel="ml", verbose=False
         return float(f), np.asarray(g, dtype=float)
 
     from scipy.optimize import minimize
-    res = minimize(fun, x0, jac=True, method="L-BFGS-B",
-                   options={"maxiter": 500, "ftol": 1e-15, "gtol": 1e-12})
-    refit = _unpack(res.x, n_zarc, ocv_s, ocv_e, has_slow=has_slow, xp=np)
+    opts = {"maxiter": 500, "ftol": 1e-15, "gtol": 1e-12}
+    if fix_r_s:
+        # R_s is x[0] (log R_s); hold it constant and optimize only the rest.
+        r_s_slot = x0[:1]
+
+        def fun_free(xf):
+            f, g = val_grad(jnp.asarray(np.concatenate([r_s_slot, xf])))
+            return float(f), np.asarray(g[1:], dtype=float)
+
+        res = minimize(fun_free, x0[1:], jac=True, method="L-BFGS-B", options=opts)
+        x_opt = np.concatenate([r_s_slot, res.x])
+    else:
+        res = minimize(fun, x0, jac=True, method="L-BFGS-B", options=opts)
+        x_opt = res.x
+    refit = _unpack(x_opt, n_zarc, ocv_s, ocv_e, has_slow=has_slow, xp=np)
     # in RC mode the packed alpha dims were inert (model forced alpha=1); report 1.
     refit["zarcs"] = [(float(r), float(tau), 1.0 if rc else float(a))
                       for r, tau, a in refit["zarcs"]]
@@ -1076,10 +1205,15 @@ def _rmse_mv(t, v, i_arr, t_p, i_pulse, params, relax_only=True):
     return float(np.sqrt(np.mean((pred[m] - v[m]) ** 2)) * 1e3)
 
 
-def fit_one_pulse_frac(window, t_p, i_pulse, pre_rest_v, *, n_max=N_MAX,
-                       d_fit1=D_FIT1, d_fit2=D_FIT2, slowest="zarc",
-                       fix_alpha=False, p10=True, kernel="ml", verbose=False):
-    """Full P1-P10 identification for one pulse window. Returns a result dict."""
+def _prep_pulse_frac(window, t_p, i_pulse, pre_rest_v, *, n_max=N_MAX,
+                     d_fit1=D_FIT1, d_fit2=D_FIT2, slowest="zarc",
+                     fix_alpha=False, verbose=False):
+    """P1-P8 for one pulse window (no R_s fit). Returns a context dict or None.
+
+    R_s is *not* fitted here (``fit_r_s=False``): it is resolved afterwards by the
+    check-up-wide shared fit (``_solve_series_resistance``) so it is one shared cell
+    property. The context carries everything the shared fit and P10 need.
+    """
     t = (window["Time"] - window["Time"].iloc[0]).dt.total_seconds().to_numpy()
     v = window["Voltage"].to_numpy(dtype=float)
     i_arr = window["Current"].to_numpy(dtype=float)
@@ -1093,17 +1227,30 @@ def fit_one_pulse_frac(window, t_p, i_pulse, pre_rest_v, *, n_max=N_MAX,
     params, info = decompose_pulse(
         t, v, i_arr, t_p, i_pulse, ocv_s,
         n_max=n_max, d_fit1=d_fit1, d_fit2=d_fit2, slowest=slowest,
-        fix_alpha=fix_alpha, verbose=verbose,
+        fix_alpha=fix_alpha, fit_r_s=False, verbose=verbose,
     )
     if params is None:
         return None
+    return {
+        "t": t, "v": v, "i_arr": i_arr, "t_p": t_p, "i_pulse": i_pulse,
+        "params": params, "info": info,
+        "r_s_ini": float(info["r_s_init_ohm"]), "fix_alpha": fix_alpha,
+    }
+
+
+def _finalize_pulse_frac(ctx, *, p10=True, kernel="ml", verbose=False):
+    """P10 (R_s frozen at the shared value) + result-row assembly for one pulse."""
+    t, v, i_arr = ctx["t"], ctx["v"], ctx["i_arr"]
+    t_p, i_pulse = ctx["t_p"], ctx["i_pulse"]
+    params, info = ctx["params"], ctx["info"]
     rmse_p9 = _rmse_mv(t, v, i_arr, t_p, i_pulse, params)
 
     params_final, rmse_p10 = params, np.nan
     if p10:
         try:
             params_final, _ = refit_joint(
-                t, v, i_arr, t_p, i_pulse, params, kernel=kernel, verbose=verbose,
+                t, v, i_arr, t_p, i_pulse, params, kernel=kernel, fix_r_s=True,
+                verbose=verbose,
             )
             rmse_p10 = _rmse_mv(t, v, i_arr, t_p, i_pulse, params_final)
             if not np.isfinite(rmse_p10) or rmse_p10 > rmse_p9:
@@ -1136,6 +1283,8 @@ def fit_one_pulse_frac(window, t_p, i_pulse, pre_rest_v, *, n_max=N_MAX,
         **{f"R{k+1}_ohm": round(z[0], 5) for k, z in enumerate(zarcs)},
         **{f"tau{k+1}_s": round(z[1], 4) for k, z in enumerate(zarcs)},
         **{f"alpha{k+1}": round(z[2], 4) for k, z in enumerate(zarcs)},
+        # tau-decade-binned columns (stable across pulses; match the vs-SOH panels)
+        **_decade_columns(zarcs),
         **{f"{k}": round(val, 4) if isinstance(val, float) else val
            for k, val in info.items()},
         "n_points": int(len(t)),
@@ -1145,11 +1294,47 @@ def fit_one_pulse_frac(window, t_p, i_pulse, pre_rest_v, *, n_max=N_MAX,
     return out
 
 
+def fit_one_pulse_frac(window, t_p, i_pulse, pre_rest_v, *, n_max=N_MAX,
+                       d_fit1=D_FIT1, d_fit2=D_FIT2, slowest="zarc",
+                       fix_alpha=False, p10=True, kernel="ml", verbose=False):
+    """Full P1-P10 identification for one isolated pulse (single-pulse fallback).
+
+    Convenience wrapper: prep (P1-P8) -> R_s solve -> finalize (P10 + row). The
+    shared-R0 benefit only applies with >=2 pulses; on a lone pulse the "shared"
+    solve degenerates to the per-pulse ``_fit_series_resistance``. ``fit_frac`` uses
+    the grouped path directly so all pulses of a check-up share one R_s.
+    """
+    ctx = _prep_pulse_frac(window, t_p, i_pulse, pre_rest_v, n_max=n_max,
+                           d_fit1=d_fit1, d_fit2=d_fit2, slowest=slowest,
+                           fix_alpha=fix_alpha, verbose=verbose)
+    if ctx is None:
+        return None
+    _solve_series_resistance([ctx], fix_alpha=fix_alpha, verbose=verbose)
+    return _finalize_pulse_frac(ctx, p10=p10, kernel=kernel, verbose=verbose)
+
+
+# keys that route to the prep (P1-P8) vs finalize (P10) phases of fit_frac
+_PREP_KEYS = ("n_max", "d_fit1", "d_fit2", "slowest", "fix_alpha", "verbose")
+_FINALIZE_KEYS = ("p10", "kernel", "verbose")
+
+
 def fit_frac(labeled, seg_ids, nom_capacity, **kw):
-    """Fit every selected pulse segment. Mirrors ``fit_2rc_pulse.fit_2rc``."""
+    """Fit every selected pulse of a check-up. Mirrors ``fit_2rc_pulse.fit_2rc``.
+
+    R_s (R0) is fit **once, shared across all the check-up's pulses** instead of per
+    pulse (each ``fit_frac`` call receives one check-up's pulses). So it runs in
+    three phases: P1-P8 per pulse (``_prep_pulse_frac``, no R_s), one shared-R_s
+    solve (``_solve_series_resistance``), then P10 + row assembly per pulse
+    (``_finalize_pulse_frac``, R_s frozen). See ``_solve_series_resistance`` for why
+    a shared R_s removes the current-dependent, wavy per-pulse R0.
+    """
     df = labeled.sort_values("Time").reset_index(drop=True)
     seg_bounds = df.groupby("pulse_segment_id")["Time"].agg(["min", "max"])
-    rows, curves = [], []
+    prep_kw = {k: kw[k] for k in _PREP_KEYS if k in kw}
+    fin_kw = {k: kw[k] for k in _FINALIZE_KEYS if k in kw}
+
+    # ---- phase A: P1-P8 per pulse (no R_s yet) -----------------------------
+    prepped = []
     for seg_id in seg_ids:
         pulse_rows = df[df["pulse_segment_id"] == seg_id].sort_values("Time")
         if pulse_rows.empty:
@@ -1170,12 +1355,25 @@ def fit_frac(labeled, seg_ids, nom_capacity, **kw):
 
         logging.info("pulse %s  I=%.2f A  t_p=%.1f s  (%d samples)",
                      cur_id, i_pulse, t_p, len(window))
-        res = fit_one_pulse_frac(window, t_p, i_pulse, pre_rest_v, **kw)
-        if res is None:
+        ctx = _prep_pulse_frac(window, t_p, i_pulse, pre_rest_v, **prep_kw)
+        if ctx is None:
             continue
+        prepped.append((ctx, seg_id, cur_id, i_pulse, t_p, pulse_rows.iloc[0]))
+
+    if not prepped:
+        return pd.DataFrame(), []
+
+    # ---- phase B: one shared R_s across all the check-up's pulses -----------
+    _solve_series_resistance([p[0] for p in prepped],
+                             fix_alpha=kw.get("fix_alpha", False),
+                             verbose=kw.get("verbose", False))
+
+    # ---- phase C: P10 (R_s frozen) + row assembly --------------------------
+    rows, curves = [], []
+    for ctx, seg_id, cur_id, i_pulse, t_p, meta in prepped:
+        res = _finalize_pulse_frac(ctx, **fin_kw)
         curves.append((seg_id, res.pop("_t"), res.pop("_v"), res.pop("_vfit")))
         res.pop("_params")
-        meta = pulse_rows.iloc[0]
         rows.append({
             "File": meta.get("File", ""),
             "SOH": meta.get("SOH", ""),
@@ -1244,6 +1442,37 @@ def plot_fits(curves, results, out_png):
 # branch is dropped on some pulses and kept on others.
 TAU_DECADE_EDGES = [0.3, 3.0, 30.0, 300.0, 3000.0, 30000.0]
 TAU_DECADE_LABELS = ["~1 s", "~10 s", "~100 s", "~1000 s", "~10⁴ s"]
+# CSV-safe slugs paralleling TAU_DECADE_LABELS (no ``~``/spaces/superscripts).
+TAU_DECADE_SLUGS = ["1s", "10s", "100s", "1000s", "10000s"]
+
+
+def _tau_decade_bin(tau):
+    """Index of the tau-decade ``tau`` (seconds) falls in (clamped to range)."""
+    return int(np.clip(np.searchsorted(TAU_DECADE_EDGES, tau) - 1,
+                       0, len(TAU_DECADE_LABELS) - 1))
+
+
+def _decade_columns(zarcs):
+    """Per-tau-decade ``R``/``tau``/``alpha`` columns for one pulse's results row.
+
+    Bins each fitted element by its ``tau`` (same edges as the vs-SOH decade
+    panels), keeping the larger-``R`` element when two land in one decade. Always
+    emits a fixed column set (every decade slug, ``NaN`` where unresolved) so the
+    CSV has stable columns across pulses regardless of how many elements each
+    resolved. The ``R_dec_*_mohm`` values match the plotted decade panels.
+    """
+    best = {}
+    for r, tau, a in zarcs:
+        b = _tau_decade_bin(tau)
+        if b not in best or r > best[b][0]:
+            best[b] = (r, tau, a)
+    cols = {}
+    for b, slug in enumerate(TAU_DECADE_SLUGS):
+        r, tau, a = best.get(b, (np.nan, np.nan, np.nan))
+        cols[f"R_dec_{slug}_mohm"] = round(r * 1e3, 4) if np.isfinite(r) else np.nan
+        cols[f"tau_dec_{slug}_s"] = round(tau, 4) if np.isfinite(tau) else np.nan
+        cols[f"alpha_dec_{slug}"] = round(a, 4) if np.isfinite(a) else np.nan
+    return cols
 
 
 def _iter_zarcs(row):
@@ -1261,13 +1490,40 @@ def _decade_series(sub, value="R"):
     for _, row in sub.iterrows():
         soh = row["SOH_num"]
         for r, tau, a in _iter_zarcs(row):
-            b = int(np.clip(np.searchsorted(TAU_DECADE_EDGES, tau) - 1,
-                            0, len(TAU_DECADE_LABELS) - 1))
+            b = _tau_decade_bin(tau)
             # keep the largest-R element if two land in one decade for one pulse
             v = r * 1e3 if value == "R" else a
             if soh not in cols[b] or (value == "R" and v > cols[b][soh]):
                 cols[b][soh] = v
     return cols
+
+
+def _decade_long(df):
+    """Explode a results frame to one row per fitted element, tagged by tau-decade.
+
+    Each fitted ZARC/RC becomes a row carrying its ``pulse_type``, ``SOH_num``, the
+    tau-decade it falls in (``decade`` bin index + ``decade_label``), and its
+    ``R``/``tau``/``alpha``. When two elements of one pulse land in the same decade
+    the larger-``R`` one is kept (same rule as ``_decade_series``), so every
+    ``(pulse, decade)`` is unique -- this is what lets a decade panel draw one clean
+    line per pulse type across SOH instead of the decade-hopping ``tau_slow``.
+
+    Requires ``pulse_type`` already on ``df`` (added by ``plot_vs_soh``).
+    """
+    rows = []
+    for _, row in df.iterrows():
+        best = {}
+        for r, tau, a in _iter_zarcs(row):
+            b = _tau_decade_bin(tau)
+            if b not in best or r > best[b][0]:
+                best[b] = (r, tau, a)
+        for b, (r, tau, a) in best.items():
+            rows.append({
+                "pulse_type": row["pulse_type"], "SOH_num": row["SOH_num"],
+                "decade": b, "decade_label": TAU_DECADE_LABELS[b],
+                "R_mohm": r * 1e3, "tau_s": tau, "alpha": a,
+            })
+    return pd.DataFrame(rows)
 
 
 def _pulse_metrics(row):
@@ -1298,12 +1554,24 @@ def _pulse_metrics(row):
 def plot_vs_soh(results, out_png, title=""):
     """Fractional-ECM parameters vs SOH, in the ``fit_2rc_pulse`` house style.
 
-    A 2x3 grid, one clean line **per pulse type** (direction + current, e.g.
-    ``CHA 1.5A``), x-axis inverted so aging reads fresh -> aged. Keying on the
-    pulse type is what avoids the sawtooth of lumping the +1.5 A and +3 A charge
-    pulses onto one "CHA" line. Panels mirror the 2RC plot (R0/R1/R2/tau1/tau2/
-    rmse): ``R_s`` (ohmic), ``R_pulse(t_p)`` (buildup-weighted total, the stable
-    replacement for ``R_total``), fast & slow ZARC ``R``/``tau`` and the fit RMSE.
+    One clean line **per pulse type** (direction + current, e.g. ``CHA 1.5A``),
+    x-axis inverted so aging reads fresh -> aged. Keying on the pulse type is what
+    avoids the sawtooth of lumping the +1.5 A and +3 A charge pulses onto one "CHA"
+    line.
+
+    Three fixed panels give the pulse-level resistances: ``R_s`` (ohmic),
+    ``R_pulse(t_p)`` (buildup-weighted total, the stable replacement for
+    ``R_total``) and the fit ``rmse``. The remaining panels are **one R-vs-SOH and
+    one tau-vs-SOH panel per populated tau-decade** (``R ~10 s``, ``τ ~10 s`` ...).
+    Binning by physical timescale rather than by element *rank* is what removes the
+    decade-hopping seen in an index-based ``tau_slow``/``R_slow``: a slow element
+    that only some pulses resolve now populates its own decade panel instead of
+    corrupting a single ranked line. See ``_decade_long`` / ``TAU_DECADE_EDGES``.
+
+    The decade panels are drawn **markers-only**: a decade's membership is
+    intermittent (some pulses don't resolve it), so a connecting line would draw
+    false diagonals across the missing SOHs. The three pulse-level panels stay
+    lined since every pulse contributes a point.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -1317,26 +1585,50 @@ def plot_vs_soh(results, out_png, title=""):
     df["pulse_type"] = (df["direction"].astype(str) + " "
                         + df["I_A"].abs().round(1).astype(str) + "A")
 
-    metrics = [
+    long = _decade_long(df)
+    # decades actually resolved, ordered fast -> slow (bin index ascending)
+    present = sorted(long["decade"].unique()) if not long.empty else []
+
+    stable = [
         ("R_s_mohm", "R_s (mΩ)"),
         ("R_pulse_mohm", "R_pulse(t_p) (mΩ)"),
         ("rmse_mV", "fit rmse (mV)"),
-        ("R_slow_mohm", "R_slow (mΩ)  [τ≫t_p: buildup-limited]"),
-        ("tau_slow_s", "τ_slow (s)"),
-        ("alpha_fast", "α_fast (-)"),
     ]
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
-    for ax, (col, label) in zip(axes.ravel(), metrics):
+    n_panels = len(stable) + 2 * len(present)
+    ncol = 3
+    nrow = max(1, int(np.ceil(n_panels / ncol)))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(5.0 * ncol, 3.6 * nrow),
+                             squeeze=False)
+    axflat = axes.ravel()
+
+    def _style(ax, label):
+        ax.set_xlabel("SOH (%)")
+        ax.set_ylabel(label)
+        ax.invert_xaxis()     # aging reads left (fresh) -> right (aged)
+        ax.grid(alpha=0.3)
+
+    # --- pulse-level resistance panels (lined: every pulse contributes) -------
+    for ax, (col, label) in zip(axflat, stable):
         for ptype, g in df.groupby("pulse_type"):
             g = g.sort_values("SOH_num")
             ax.plot(g["SOH_num"], g[col], "o-", ms=4, label=ptype)
-        ax.set_xlabel("SOH (%)")
-        ax.set_ylabel(label)
-        if col.startswith("tau"):
-            ax.set_yscale("log")   # tau spans decades (and a railed fit hits 1e5)
-        ax.invert_xaxis()     # aging reads left (fresh) -> right (aged)
-        ax.grid(alpha=0.3)
-    axes.ravel()[0].legend(fontsize=8, title="pulse")
+        _style(ax, label)
+
+    # --- per-decade R then tau panels (markers-only, no false diagonals) ------
+    idx = len(stable)
+    for value, unit, fmt in (("R_mohm", "mΩ", "R"), ("tau_s", "s", "τ")):
+        for b in present:
+            ax = axflat[idx]
+            idx += 1
+            sub = long[long["decade"] == b]
+            for ptype, g in sub.groupby("pulse_type"):
+                g = g.sort_values("SOH_num")
+                ax.plot(g["SOH_num"], g[value], "o", ms=4, label=ptype)
+            _style(ax, f"{fmt} {TAU_DECADE_LABELS[b]} ({unit})")
+
+    for ax in axflat[n_panels:]:
+        ax.axis("off")
+    axflat[0].legend(fontsize=8, title="pulse")
     fig.suptitle(f"Fractional ECM (Bruch decomposition) vs SOH — {title}",
                  fontsize=11)
     fig.tight_layout()
@@ -1506,11 +1798,16 @@ def main():
         if results.empty:
             logging.warning("no pulses fit in %s", args.parquet)
             return
-        out_csv = args.out or os.path.join(args.parquet, "frac_vs_SOH.csv")
+        # name output for the model variant so an --rc run does not clobber the
+        # fractional results; the plot follows the CSV stem.
+        default_stem = "frac_rc_vs_SOH" if args.rc else "frac_vs_SOH"
+        out_csv = args.out or os.path.join(args.parquet, default_stem + ".csv")
         results.to_csv(out_csv, index=False)
         logging.info("results -> %s", out_csv)
-        plot_vs_soh(results, os.path.join(args.parquet, "frac_vs_SOH.png"),
-                    title=os.path.basename(os.path.normpath(args.parquet)))
+        out_png = os.path.splitext(out_csv)[0] + ".png"
+        title = os.path.basename(os.path.normpath(args.parquet))
+        plot_vs_soh(results, out_png,
+                    title=f"{title} ({'--rc RC ladder' if args.rc else 'fractional'})")
         pd.set_option("display.width", 220, "display.max_columns", 40)
         cols = [c for c in ("BM_Programm", "SOH_num", "direction", "R_s_ohm",
                             "R_d_ohm", "tau_d_s", "n_zarc", "rmse_mV")
