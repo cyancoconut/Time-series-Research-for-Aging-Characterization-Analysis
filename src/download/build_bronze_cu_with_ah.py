@@ -73,6 +73,18 @@ def _is_cu(object_name: str, cu_marker) -> bool:
     return any(m in parts[3] for m in markers)
 
 
+def _is_unfinished(object_name: str) -> bool:
+    """True for a still-running test export (``…=unfinished.parquet``).
+
+    Unfinished tests are excluded from BRONZE_CU entirely: their payload can be
+    a partial export whose ``Zeit`` reads back as object dtype (crashing the Ah
+    integral), and once the test finishes it re-downloads under a *different*
+    basename, which the incremental manifest would treat as a new file and
+    double-count. Only integrate a test once it is finished.
+    """
+    return os.path.basename(object_name).endswith("=unfinished.parquet")
+
+
 def _programme_name(object_name: str) -> str:
     parts = os.path.basename(object_name).split("=")
     return parts[3] if len(parts) > 3 else ""
@@ -254,6 +266,12 @@ def _compute_ah(
     if seed_zeit is not None:
         seed = pd.DataFrame({"Zeit": [pd.Timestamp(seed_zeit)], "Strom": [seed_strom]})
         df_all = pd.concat([seed, df_all], ignore_index=True)
+    # Frames can arrive with a heterogeneous Zeit dtype — a partial export may
+    # store it as object/strings, or mix tz-aware and tz-naive across files (and
+    # with the seed). That makes the concatenated column object dtype, which
+    # breaks the .dt access below. Normalize to tz-aware UTC so dedup/sort and
+    # the Time_UTC handling all operate on a real datetime column.
+    df_all["Zeit"] = pd.to_datetime(df_all["Zeit"], utc=True)
     df_all = df_all.drop_duplicates("Zeit").sort_values("Zeit").reset_index(drop=True)
     df_all[df_all.select_dtypes(np.float64).columns] = (
         df_all.select_dtypes(np.float64).astype(np.float32)
@@ -452,6 +470,14 @@ def process_cell(
 
     if not cell_tests:
         print(f"{cell} - no parquet files found.")
+        return
+
+    # Exclude still-running tests (…=unfinished.parquet) from the build — see
+    # _is_unfinished. Applied in every mode so a full build can't integrate an
+    # unfinished payload that a later incremental build would double-count.
+    cell_tests = [t for t in cell_tests if not _is_unfinished(t)]
+    if not cell_tests:
+        print(f"{cell} - only unfinished test files; nothing to build yet.")
         return
 
     if not any(_is_cu(t, cu_marker) for t in cell_tests):
