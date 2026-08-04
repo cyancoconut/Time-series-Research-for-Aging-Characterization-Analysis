@@ -121,7 +121,7 @@ class calculation:
             abs_current_mean < (self.qOCV_CRate * self.Nom_Capacity) + self.qocv_current_tolerance
         ) & (abs(current_std) < self.qocv_std_tolerance * self.Nom_Capacity):
             calculated_capacity = self.Ah_calculation(group)
-            if np.sign(group["Current"].iloc[-1]) == 1:
+            if np.sign(group["Current"].mean()) == 1:
                 if group["target"].iloc[-1] == "qOCV_CHA":
                     print("qOCV already added at ID: ", ID)
                 else:
