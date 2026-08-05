@@ -347,5 +347,10 @@ def export_qocv_object_key(cell: str, filename: str) -> str:
     return f"30_export_qocv/{stem}/{filename}"
 
 
+def export_eis_object_key(cell: str, filename: str) -> str:
+    stem = cell.split(".")[0]
+    return f"25_export_eis/{stem}/{filename}"
+
+
 def export_capacity_object_key(cell: str, filename: str) -> str:
     return f"40_capacity_monitore/{filename}"

@@ -77,6 +77,11 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 
    Routing follows `download_from`/`upload_to`. Export MinIO keys are **untagged** (no `10_TRACY`).
 
+   - **`output/export_eis.py`** — optional per-`BM_Programm` EIS export (flag `export_eis`, default off). Unlike pulse/qOCV (which read GOLD segments), EIS impedance data lives in **standalone files** in the cell's download folder; the cycler timeline only carries an `EIS` *label* marking when a measurement fired. `export_eis` discovers those files (`util/io_eis.py`), reduces each to a settled per-frequency spectrum, matches each to a `BM_Programm` by nearest EIS-labelled segment time, and bundles **one file per program** with every matched spectrum stacked (tagged by `eis_number`/`Time`/`U`). SOH from the program's CAP, same as pulse/qOCV. File: `25_export_eis/<cell_stem>/<cell_stem>_eis_BM<BM_Programm>_<SOH>SOH.parquet` (MinIO untagged).
+     - **EIS files** (`util/io_eis.py`): one measurement per file (csv or parquet), rows = per-second dwell samples of a frequency sweep. Recognised by the `=`-field measurement token `eis_file_marker` (default `(?:EIS|INS)\d+`, e.g. `EIS00017`; cycler tests carry `TS…`) — **not** by "EIS" in the procedure name (over-matches cycler EIS procedures). Reduction keeps the **last settled row per `ActFreq`** (`ActFreq>0 & Betrag>0`), canonical cols `Time, frequency (ActFreq), Z_real (Zreal1), Z_imag (Zimg1), Z_abs (Betrag), phase (Phase), U (U1)`. Filename metadata parsed layout-agnostically (cell_stem = field 1, a datetime field, the marker token). Source per `download_from` (local `<working_path>/<cell_stem>/`, minio `<minio_prefix>/<cell_stem>/`).
+     - **Downloader**: `download_from_specimen` detects EIS files (same marker, or `EISkanal` channel) and **keeps all columns**, bypassing the cycler `desired_columns` whitelist that would otherwise strip the impedance-sweep columns to an unusable 6-column stub.
+     - **Matching** (`match_spectra_to_programs`): nearest EIS-labelled segment (`target=="EIS"` or `Prozedur` contains `eis_procedure_filter`, default `"EIS"`) within `eis_match_tolerance_minutes` (default 120). BRONZE_CU `Zeit` is tz-aware UTC and EIS times are naive but on the same lab clock, so matching compares tz-naive wall-clock.
+
 7. **`output/export_capacity.py`** — always runs at end of `_process_cell` (no flag). Per-cell capacity summary CSV (one row per BM_Programm) for the aging monitor/matrix. Columns: `BM_Programm, Capacity_py, Ah_throughput, SOH, CAP_start_time` (`Ah_throughput` = cumulative throughput at the CAP-segment start). Flat under the folder:
    - Local: `<working_path>/40_capacity_monitore/<cell_stem>_capacity.csv`
    - MinIO: `<minio_prefix>/40_capacity_monitore/<cell_stem>_capacity.csv` (untagged)
@@ -140,6 +145,10 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 | `target_pulse_duration` | Expected pulse duration (s, default 20) |
 | `export_gold` | Write the GOLD parquet to disk/MinIO (default true). Set false to skip the GOLD write (downstream evals no longer read GOLD-on-disk; capacity/pulse/qOCV exports use the in-memory `df_gold`). |
 | `export_pulse` / `export_qocv` | Write per-BM_Programm PUL / qOCV parquets (default false) |
+| `export_eis` | Write per-BM_Programm EIS spectrum parquets from standalone EIS files (default false) |
+| `eis_file_marker` | Regex identifying an EIS file by its `=`-field measurement token (default `(?:EIS|INS)\d+`) |
+| `eis_procedure_filter` | Substring marking EIS-labelled segments used as match anchors (default `EIS`) |
+| `eis_match_tolerance_minutes` | Max time gap to match an EIS measurement to a segment (default 120) |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |
 | `ah_gap_threshold_s` | Optional. BRONZE Ah counter: intervals with Δt above this (seconds) are dead time between test files and book no `Ah_throughput`. Omit (default) to auto-derive the cut as `50 × median Δt` (the cell's sampling cadence) — adapts per cell, no tuning. |

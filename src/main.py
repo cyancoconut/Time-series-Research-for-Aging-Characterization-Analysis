@@ -19,6 +19,7 @@ from cluster.train_classifier import bootstrap_leftover_labels
 from calculate import results_fetching
 from output.export_pulse import export_pulse
 from output.export_qocv import export_qocv
+from output.export_eis import export_eis
 from output.export_capacity import export_capacity
 from util import io_router
 
@@ -371,6 +372,10 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         export_pulse(df_export, soh, cell, cfg, paths, minio_client, bronze_path)
     if cfg.get("export_qocv"):
         export_qocv(df_export, soh, cell, cfg, paths, minio_client)
+    if cfg.get("export_eis"):
+        # df_gold (not df_export): EIS spectra are matched to the cell's EIS-
+        # labelled segments, which df_export filters out.
+        export_eis(df_gold, soh, cell, cfg, paths, minio_client)
 
 
 def _build_soh_map(df_export, nom_capacity):
@@ -549,6 +554,7 @@ def _build_paths(cell: str, working_path: str, classifier: bool = False) -> dict
         "X_silver": os.path.join(working_path, x_silver_dir, stem + ".csv"),
         "gold": os.path.join(working_path, "GOLD", cell),
         "export_pulse_dir": os.path.join(working_path, "20_export_pulse", stem),
+        "export_eis_dir": os.path.join(working_path, "25_export_eis", stem),
         "export_qocv_dir": os.path.join(working_path, "30_export_qocv", stem),
         "export_capacity_dir": os.path.join(working_path, "40_capacity_monitore"),
     }
