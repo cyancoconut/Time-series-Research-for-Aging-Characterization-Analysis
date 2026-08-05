@@ -36,6 +36,10 @@
     "export_gold": true,
     "export_pulse": false,
     "export_qocv": false,
+    "export_eis": false,
+    "eis_file_marker": "(?:EIS|INS)\\d+",
+    "eis_procedure_filter": "EIS",
+    "eis_match_tolerance_minutes": 120,
     "running_window_days": 2,
 
     "feature_columns": ["Voltage", "Current", "Temperature"],

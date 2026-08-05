@@ -1,6 +1,7 @@
 import glob
 import io
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -10,6 +11,7 @@ from ahjo_dl.entities.test import TestFormat
 from minio.error import S3Error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from util import io_eis  # noqa: E402
 from util import io_router  # noqa: E402
 from util.procedure_filter import matches_any  # noqa: E402
 
@@ -244,20 +246,37 @@ class SpecimenDownloader:
                 if chosen is not None:
                     df = df.rename(columns={chosen: "T1"})
 
-            desired_columns = [
-                "Zeit",
-                "Spannung",
-                "Strom",
-                "T1",
-                "Prozedur",
-                "Zustand",
-                "AhAkku",
-                "Ahjo_Test_ID",
-            ]
+            # EIS device files (channel "EISkanal", measurement token "EIS<n>"
+            # or "INS<n>") carry the impedance-sweep columns (ActFreq, Zreal1,
+            # Zimg1, Betrag, Phase, U1, EISstart, ...). The desired_columns
+            # whitelist below is for cycler tests and would strip every EIS
+            # column, leaving an unusable stub — so keep all columns for EIS
+            # measurements. Detection mirrors util.io_eis' marker (the
+            # "EIS<digits>"/"INS<digits>" token in the test name), backed by the
+            # EISkanal equipment name.
+            is_eis = bool(re.search(io_eis.DEFAULT_EIS_FILE_MARKER, sanitized_test_name)) or (
+                "EISkanal" in str(getattr(test.equipment, "name", ""))
+            )
 
-            existing_columns = [col for col in desired_columns if col in df.columns]
-            df = df[existing_columns]
-            df.reset_index(inplace=True, drop=True)
+            if is_eis:
+                df.reset_index(inplace=True, drop=True)
+            else:
+                desired_columns = [
+                    "Zeit",
+                    "Spannung",
+                    "Strom",
+                    "T1",
+                    "Prozedur",
+                    "Zustand",
+                    "AhAkku",
+                    "Ahjo_Test_ID",
+                ]
+
+                existing_columns = [
+                    col for col in desired_columns if col in df.columns
+                ]
+                df = df[existing_columns]
+                df.reset_index(inplace=True, drop=True)
 
             status = "finished" if test.finished else "unfinished"
             object_name = f"{self.project}={specimen.name}={datetime.fromtimestamp(test.startDate).strftime('%Y-%m-%d_%H%M%S')}={test.parent}={sanitized_test_name}={test.equipment.name}=filesize-{file_size}={status}.parquet"
