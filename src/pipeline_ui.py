@@ -35,6 +35,7 @@ DEFAULT_DOWNLOAD_CFG = {
     "target_cell": [""],
     "cell_type": "",
     "testformat": " Format01",
+    "name_filter": "TS",
     "ahjo_endpoint": "https://ahjo.isea.rwth-aachen.de",
     "ahjo_key": "",
     "minio_endpoint": "optimusprime.isea.rwth-aachen.de:9000",
@@ -285,6 +286,9 @@ class PipelineUI(ctk.CTk):
             "Cell type:", placeholder="required, e.g. VTC or JGNE (MinIO path segment)"
         )
         self.dl_format = proj.add_entry("Test format:", placeholder=" Format01")
+        self.dl_name_filter = proj.add_entry(
+            "Test name:", placeholder="substring(s), e.g. TS or TS,EIS — blank = TS"
+        )
 
         ahjo = _Section(parent, "AHJO")
         ahjo.grid(row=1, column=0, sticky="ew", padx=8, pady=6)
@@ -578,11 +582,15 @@ class PipelineUI(ctk.CTk):
     def _collect_download_cfg(self) -> dict:
         specimen_text = self.dl_specimen.get().strip()
         specimen_list = [s.strip() for s in specimen_text.split(",")] if specimen_text else [""]
+        name_filter_text = self.dl_name_filter.get().strip()
+        # Comma-separated substrings -> list (matches any); blank falls back to "TS".
+        name_filter = [s.strip() for s in name_filter_text.split(",") if s.strip()] or "TS"
         return {
             "project": self.dl_project.get(),
             "target_cell": specimen_list,
             "cell_type": self.dl_cell_type.get().strip(),
             "testformat": self.dl_format.get(),
+            "name_filter": name_filter,
             "ahjo_endpoint": self.dl_ahjo_endpoint.get(),
             "ahjo_key": self.dl_ahjo_key.get(),
             "minio_endpoint": self.dl_minio_endpoint.get(),
@@ -609,6 +617,8 @@ class PipelineUI(ctk.CTk):
         _set(self.dl_specimen, ", ".join(target) if isinstance(target, list) else str(target))
         _set(self.dl_cell_type, cfg.get("cell_type", ""))
         _set(self.dl_format, cfg.get("testformat", ""))
+        nf = cfg.get("name_filter", "TS")
+        _set(self.dl_name_filter, ", ".join(nf) if isinstance(nf, list) else str(nf))
         _set(self.dl_ahjo_endpoint, cfg.get("ahjo_endpoint", ""))
         _set(self.dl_ahjo_key, cfg.get("ahjo_key", ""))
         _set(self.dl_minio_endpoint, cfg.get("minio_endpoint", ""))
