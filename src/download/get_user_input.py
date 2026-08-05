@@ -71,6 +71,18 @@ class ConfigurationGUI:
         self.format_entry.grid(row=4, column=1, pady=5, padx=(0, 20))
         self.format_entry.insert(0, " Format01")
 
+        # Test Name (substring filter on the test name; comma-separated for
+        # multiple substrings, matches any; blank falls back to "TS")
+        self.name_filter_label = ctk.CTkLabel(self.main_frame, text="Test Name:")
+        self.name_filter_label.grid(
+            row=5, column=0, sticky="w", padx=(20, 10), pady=5
+        )
+        self.name_filter_entry = ctk.CTkEntry(
+            self.main_frame, width=400, placeholder_text="e.g. TS or TS,EIS"
+        )
+        self.name_filter_entry.grid(row=5, column=1, pady=5, padx=(0, 20))
+        self.name_filter_entry.insert(0, "TS")
+
         # AHJO Configuration Section
         self.section_label2 = ctk.CTkLabel(
             self.main_frame,
@@ -78,27 +90,27 @@ class ConfigurationGUI:
             font=ctk.CTkFont(size=16, weight="bold"),
         )
         self.section_label2.grid(
-            row=5, column=0, columnspan=2, pady=(20, 5), sticky="w"
+            row=6, column=0, columnspan=2, pady=(20, 5), sticky="w"
         )
 
         # AHJO Endpoint
         self.ahjo_endpoint_label = ctk.CTkLabel(self.main_frame, text="AHJO Endpoint:")
         self.ahjo_endpoint_label.grid(
-            row=6, column=0, sticky="w", padx=(20, 10), pady=5
+            row=7, column=0, sticky="w", padx=(20, 10), pady=5
         )
         self.ahjo_endpoint_entry = ctk.CTkEntry(
             self.main_frame,
             width=400,
             placeholder_text="https://ahjo.isea.rwth-aachen.de",
         )
-        self.ahjo_endpoint_entry.grid(row=6, column=1, pady=5, padx=(0, 20))
+        self.ahjo_endpoint_entry.grid(row=7, column=1, pady=5, padx=(0, 20))
         self.ahjo_endpoint_entry.insert(0, "https://ahjo.isea.rwth-aachen.de")
 
         # AHJO Key
         self.ahjo_key_label = ctk.CTkLabel(self.main_frame, text="AHJO Key:")
-        self.ahjo_key_label.grid(row=7, column=0, sticky="w", padx=(20, 10), pady=5)
+        self.ahjo_key_label.grid(row=8, column=0, sticky="w", padx=(20, 10), pady=5)
         self.ahjo_key_entry = ctk.CTkEntry(self.main_frame, width=400, show="*")
-        self.ahjo_key_entry.grid(row=7, column=1, pady=5, padx=(0, 20))
+        self.ahjo_key_entry.grid(row=8, column=1, pady=5, padx=(0, 20))
 
         # MinIO Configuration Section
         self.section_label3 = ctk.CTkLabel(
@@ -107,7 +119,7 @@ class ConfigurationGUI:
             font=ctk.CTkFont(size=16, weight="bold"),
         )
         self.section_label3.grid(
-            row=8, column=0, columnspan=2, pady=(20, 5), sticky="w"
+            row=9, column=0, columnspan=2, pady=(20, 5), sticky="w"
         )
 
         # MinIO Endpoint
@@ -115,45 +127,45 @@ class ConfigurationGUI:
             self.main_frame, text="MinIO Endpoint:"
         )
         self.minio_endpoint_label.grid(
-            row=9, column=0, sticky="w", padx=(20, 10), pady=5
+            row=10, column=0, sticky="w", padx=(20, 10), pady=5
         )
         self.minio_endpoint_entry = ctk.CTkEntry(
             self.main_frame,
             width=400,
             placeholder_text="optimusprime.isea.rwth-aachen.de:9000",
         )
-        self.minio_endpoint_entry.grid(row=9, column=1, pady=5, padx=(0, 20))
+        self.minio_endpoint_entry.grid(row=10, column=1, pady=5, padx=(0, 20))
         self.minio_endpoint_entry.insert(0, "optimusprime.isea.rwth-aachen.de:9000")
 
         # Access Key
         self.access_key_label = ctk.CTkLabel(self.main_frame, text="Access Key:")
-        self.access_key_label.grid(row=10, column=0, sticky="w", padx=(20, 10), pady=5)
+        self.access_key_label.grid(row=11, column=0, sticky="w", padx=(20, 10), pady=5)
         self.access_key_entry = ctk.CTkEntry(self.main_frame, width=400)
-        self.access_key_entry.grid(row=10, column=1, pady=5, padx=(0, 20))
+        self.access_key_entry.grid(row=11, column=1, pady=5, padx=(0, 20))
 
         # Secret Key
         self.secret_key_label = ctk.CTkLabel(self.main_frame, text="Secret Key:")
-        self.secret_key_label.grid(row=11, column=0, sticky="w", padx=(20, 10), pady=5)
+        self.secret_key_label.grid(row=12, column=0, sticky="w", padx=(20, 10), pady=5)
         self.secret_key_entry = ctk.CTkEntry(self.main_frame, width=400, show="*")
-        self.secret_key_entry.grid(row=11, column=1, pady=5, padx=(0, 20))
+        self.secret_key_entry.grid(row=12, column=1, pady=5, padx=(0, 20))
 
         # Bucket Name
         self.bucket_name_label = ctk.CTkLabel(self.main_frame, text="Bucket Name:")
-        self.bucket_name_label.grid(row=12, column=0, sticky="w", padx=(20, 10), pady=5)
+        self.bucket_name_label.grid(row=13, column=0, sticky="w", padx=(20, 10), pady=5)
         self.bucket_name_entry = ctk.CTkEntry(self.main_frame, width=400)
-        self.bucket_name_entry.grid(row=12, column=1, pady=5, padx=(0, 20))
+        self.bucket_name_entry.grid(row=13, column=1, pady=5, padx=(0, 20))
 
         # MinIO Prefix
         self.minio_prefix_label = ctk.CTkLabel(self.main_frame, text="MinIO Prefix:")
         self.minio_prefix_label.grid(
-            row=13, column=0, sticky="w", padx=(20, 10), pady=5
+            row=14, column=0, sticky="w", padx=(20, 10), pady=5
         )
         self.minio_prefix_entry = ctk.CTkEntry(
             self.main_frame,
             width=400,
             placeholder_text="j8005-metabatt/Metabatt/VTC",
         )
-        self.minio_prefix_entry.grid(row=13, column=1, pady=5, padx=(0, 20))
+        self.minio_prefix_entry.grid(row=14, column=1, pady=5, padx=(0, 20))
 
         # Export Configuration Section
         self.section_label4 = ctk.CTkLabel(
@@ -162,24 +174,24 @@ class ConfigurationGUI:
             font=ctk.CTkFont(size=16, weight="bold"),
         )
         self.section_label4.grid(
-            row=14, column=0, columnspan=2, pady=(20, 5), sticky="w"
+            row=15, column=0, columnspan=2, pady=(20, 5), sticky="w"
         )
 
         # Export Type
         self.export_type_label = ctk.CTkLabel(self.main_frame, text="Export Type:")
-        self.export_type_label.grid(row=15, column=0, sticky="w", padx=(20, 10), pady=5)
+        self.export_type_label.grid(row=16, column=0, sticky="w", padx=(20, 10), pady=5)
         self.export_type_entry = ctk.CTkEntry(
             self.main_frame, width=400, placeholder_text="local"
         )
-        self.export_type_entry.grid(row=15, column=1, pady=5, padx=(0, 20))
+        self.export_type_entry.grid(row=16, column=1, pady=5, padx=(0, 20))
         self.export_type_entry.insert(0, "local")
 
         # Export Path
         self.export_path_label = ctk.CTkLabel(self.main_frame, text="Export Path:")
-        self.export_path_label.grid(row=16, column=0, sticky="w", padx=(20, 10), pady=5)
+        self.export_path_label.grid(row=17, column=0, sticky="w", padx=(20, 10), pady=5)
 
         self.path_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.path_frame.grid(row=16, column=1, pady=5, padx=(0, 20), sticky="w")
+        self.path_frame.grid(row=17, column=1, pady=5, padx=(0, 20), sticky="w")
 
         self.export_path_entry = ctk.CTkEntry(self.path_frame, width=320)
         self.export_path_entry.pack(side="left", padx=(0, 10))
@@ -192,7 +204,7 @@ class ConfigurationGUI:
     def create_buttons(self):
         # Button frame
         self.button_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.button_frame.grid(row=17, column=0, columnspan=2, pady=(30, 0))
+        self.button_frame.grid(row=18, column=0, columnspan=2, pady=(30, 0))
 
         # Save button
         self.save_button = ctk.CTkButton(
@@ -247,10 +259,18 @@ class ConfigurationGUI:
             [s.strip() for s in specimen_text.split(",")] if specimen_text else [""]
         )
 
+        # Test-name filter: comma-separated substrings -> list (matches any);
+        # blank falls back to "TS" (preserves the historical default).
+        name_filter_text = self.name_filter_entry.get().strip()
+        name_filter = [
+            s.strip() for s in name_filter_text.split(",") if s.strip()
+        ] or "TS"
+
         return {
             "project": self.project_entry.get(),
             "target_specimen": specimen_list,
             "testformat": self.format_entry.get(),
+            "name_filter": name_filter,
             "ahjo_endpoint": self.ahjo_endpoint_entry.get(),
             "ahjo_key": self.ahjo_key_entry.get(),
             "minio_endpoint": self.minio_endpoint_entry.get(),
@@ -294,6 +314,12 @@ class ConfigurationGUI:
                 self.format_entry.delete(0, tk.END)
                 self.format_entry.insert(0, config_data.get("testformat", ""))
 
+                nf = config_data.get("name_filter", "TS")
+                self.name_filter_entry.delete(0, tk.END)
+                self.name_filter_entry.insert(
+                    0, ", ".join(nf) if isinstance(nf, list) else str(nf)
+                )
+
                 self.ahjo_endpoint_entry.delete(0, tk.END)
                 self.ahjo_endpoint_entry.insert(0, config_data.get("ahjo_endpoint", ""))
 
@@ -332,6 +358,7 @@ class ConfigurationGUI:
         self.project_entry.delete(0, tk.END)
         self.specimen_entry.delete(0, tk.END)
         self.format_entry.delete(0, tk.END)
+        self.name_filter_entry.delete(0, tk.END)
         self.ahjo_endpoint_entry.delete(0, tk.END)
         self.ahjo_key_entry.delete(0, tk.END)
         self.minio_endpoint_entry.delete(0, tk.END)
@@ -387,10 +414,11 @@ def load_config_from_file(file_path):
                 config_data["minio_prefix"],
                 config_data["export_type"],
                 config_data["export_path"],
+                config_data.get("name_filter", "TS"),
             )
         else:
             # Return defaults if GUI was closed without applying
-            return ("", [""], " ", "", "", "", "", "", "", "", r"")
+            return ("", [""], " ", "", "", "", "", "", "", "", "", "", "TS")
     except Exception as e:
         messagebox.showerror("Error", f"Failed to load configuration: {str(e)}")
         return None
@@ -416,7 +444,8 @@ def get_config_from_gui():
             config_data["minio_prefix"],
             config_data["export_type"],
             config_data["export_path"],
+            config_data.get("name_filter", "TS"),
         )
     else:
         # Return defaults if GUI was closed without applying
-        return ("", [""], " ", "", "", "", "", "", "", "", r"")
+        return ("", [""], " ", "", "", "", "", "", "", "", "", "", "TS")

@@ -11,6 +11,7 @@ from minio.error import S3Error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from util import io_router  # noqa: E402
+from util.procedure_filter import matches_any  # noqa: E402
 
 
 def _normalize_export_type(value):
@@ -96,11 +97,17 @@ class SpecimenDownloader:
         update_unfinished,
         redownload=False,
         temperature_column=None,
+        name_filter="TS",
     ):
         # redownload=True forces a fresh fetch of every test: existing parquets
         # (finished and unfinished) are deleted so they drop out of the
         # existing_test skip-list and are downloaded again. Use it to re-pull
         # data after a downloader fix (e.g. a newly retained column).
+        #
+        # name_filter restricts candidates to tests whose name contains one of
+        # the substrings (default "TS"). Accepts a single substring or a list of
+        # substrings (matches when the name contains any entry, via
+        # util.procedure_filter.matches_any); None / empty disables the filter.
         print(f"Processing {specimen.name}")
 
         cfg = {"upload_to": _normalize_export_type(export_type)}
@@ -164,7 +171,7 @@ class SpecimenDownloader:
             for t in all_tests
             if (t.name.replace("|", "_") not in existing_test)
             and (include_unfinished or t.finished)
-            and ("TS" in t.name)
+            and matches_any(t.name, name_filter)
             and (self.test_format in t.name.split("|"))
         ]
         print(
