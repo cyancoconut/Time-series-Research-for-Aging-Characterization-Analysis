@@ -55,10 +55,45 @@ GROUP_KEYS = ["C_Rate", "Temperature", "DOD", "SOC"]
 TEMP_COLORS = {15: "skyblue", 25: "seagreen", 35: "goldenrod", 45: "tomato"}
 _FALLBACK_COLORS = ["mediumpurple", "darkorange", "teal", "crimson", "slategray"]
 
-# Capacity-fade plot: DOD facets, temperature colors, C-rate marker symbols.
+# Pale fill for the translucent mesh shell, one step lighter than the line
+# color so the wireframe stays readable on top of it. 35 °C had no notebook
+# entry; khaki pairs with the goldenrod markers.
+TEMP_FILL_COLORS = {
+    15: "lightblue", 25: "lightgreen", 35: "khaki", 45: "lightcoral",
+}
+MESH_OPACITY = 0.3
+
+# Capacity-fade plot: DOD facets, SOC colors at 25 °C, flat pastels elsewhere.
 DOD_SUBPLOT_POSITIONS = {20: (1, 1), 40: (1, 2), 60: (2, 1), 80: (2, 2), 100: (3, 1)}
-FADE_TEMP_COLORS = {15: "#1f77b4", 25: "#2ca02c", 35: "#d39e00", 45: "#d62728"}
-_MARKER_SYMBOLS = ["circle", "square", "diamond", "cross", "x", "triangle-up"]
+
+# RWTH corporate palette (100 % shades), inlined from the notebook's
+# `rwth_colors` module (not vendored in this repo). Verify against the real
+# module if the shades matter.
+RWTH_SOC_COLORS = {
+    10: "#00549F",  # blue
+    30: "#0098A1",  # turqoise
+    50: "#F6A800",  # orange
+    70: "#CC071E",  # red
+    90: "#A11035",  # darkred
+}
+# The notebook gives every non-25 °C temperature one flat pastel.
+FADE_TEMP_COLORS = {15: "lavender", 35: "lavenderblush", 45: "mistyrose"}
+FADE_HIGHLIGHT_TEMP = 25  # the temperature that gets per-SOC coloring
+_DEFAULT_SOC_COLOR = "#000000"
+_DEFAULT_TEMP_COLOR = "#7f7f7f"
+
+# Aging C-rate -> marker symbol, as in the notebook. Keys cover both the
+# numeric and the string form (`C_Rate` arrives as "05C"/"1C" from
+# `add_information_METABATT`, so the notebook's numeric test never matched).
+CRATE_SYMBOLS = {
+    "0.5": "circle", "05c": "circle", "0.5c": "circle", "c/2": "circle",
+    "1.0": "square", "1": "square", "1c": "square",
+}
+_DEFAULT_CRATE_SYMBOL = "diamond"
+
+
+def _crate_symbol(c_rate):
+    return CRATE_SYMBOLS.get(str(c_rate).strip().lower(), _DEFAULT_CRATE_SYMBOL)
 
 
 def build_cell_table(df_all):
@@ -116,12 +151,17 @@ def build_matrix(df_cells):
 def _capacity_fade_figure(df_all, c_nom):
     """3x2 DOD-faceted capacity-vs-EFC fade plot across the fleet.
 
-    Port of the notebook `plot_plotly`: per cell, normalized capacity
-    (``Capacity_py / Nom_Capacity``) over equivalent full cycles
-    (``Ah_throughput / Nom_Capacity``), faceted by DOD, one lines+markers
-    trace per (cell, temperature, SOC, C-rate) sorted by EFC, colored by
-    temperature, marker symbol by aging C-rate. Self-contained — no
-    ``rwth_colors`` dependency, no ``fig.show()``, no hardcoded output path.
+    Port of the notebook `plot_plotly` / `add_temperature_data`: per cell,
+    normalized capacity (``Capacity_py / Nom_Capacity``) over equivalent full
+    cycles (``Ah_throughput / Nom_Capacity``), faceted by DOD, one
+    lines+markers trace per (cell, temperature, SOC, C-rate) sorted by EFC.
+    Colour follows the notebook: the 25 °C series are coloured per **SOC**
+    from the RWTH palette, every other temperature gets one flat pastel.
+    Marker symbol encodes the aging C-rate. All five facets share the same
+    x/y range so they stay comparable by eye.
+
+    Self-contained — no ``rwth_colors`` import, no ``fig.show()``, no
+    hardcoded output path.
     """
     df = df_all.copy()
     df["Name_prefix"] = df["Name"].astype(str).str.split("-").str[0]
@@ -134,15 +174,11 @@ def _capacity_fade_figure(df_all, c_nom):
         rows=3, cols=2,
         subplot_titles=["DOD = 20%", "DOD = 40%", "DOD = 60%",
                         "DOD = 80%", "DOD = 100%", ""],
-        vertical_spacing=0.1, horizontal_spacing=0.08,
+        vertical_spacing=0.13, horizontal_spacing=0.08,
         specs=[[{}, {}], [{}, {}], [{}, None]],
     )
 
-    crates = sorted(df["C_Rate"].dropna().astype(str).unique())
-    crate_symbol = {
-        c: _MARKER_SYMBOLS[i % len(_MARKER_SYMBOLS)] for i, c in enumerate(crates)
-    }
-    seen_temps = set()
+    seen_legend = set()
 
     for dod, (row, col) in DOD_SUBPLOT_POSITIONS.items():
         sub = df[df["DOD"] == dod]
@@ -152,19 +188,25 @@ def _capacity_fade_figure(df_all, c_nom):
             g = g.sort_values("EFC")
             if g.empty:
                 continue
-            color = FADE_TEMP_COLORS.get(temp, "#7f7f7f")
-            show = temp not in seen_temps
-            seen_temps.add(temp)
+            if temp == FADE_HIGHLIGHT_TEMP:
+                color = RWTH_SOC_COLORS.get(soc, _DEFAULT_SOC_COLOR)
+                legend_key = (temp, soc)
+                legend_name = f"T={temp}°C, SOC={soc}"
+            else:
+                color = FADE_TEMP_COLORS.get(temp, _DEFAULT_TEMP_COLOR)
+                legend_key = (temp, None)
+                legend_name = f"T={temp}°C"
+            show = legend_key not in seen_legend
+            seen_legend.add(legend_key)
             fig.add_trace(
                 go.Scatter(
                     x=g["EFC"], y=g["cap_norm"],
                     mode="lines+markers",
-                    name=f"{temp}°C",
-                    legendgroup=str(temp),
+                    name=legend_name,
+                    legendgroup=str(legend_key),
                     showlegend=show,
                     line=dict(color=color),
-                    marker=dict(color=color, size=7,
-                                symbol=crate_symbol.get(str(crate), "circle")),
+                    marker=dict(color=color, size=8, symbol=_crate_symbol(crate)),
                     customdata=g[["Name_prefix", "SOC", "C_Rate", "Time"]].to_numpy(),
                     hovertemplate=(
                         "<b>%{customdata[0]}</b><br>"
@@ -178,18 +220,37 @@ def _capacity_fade_figure(df_all, c_nom):
                 ),
                 row=row, col=col,
             )
+
+    x_range, y_range = _fade_axis_ranges(df)
+    for row, col in DOD_SUBPLOT_POSITIONS.values():
         fig.update_xaxes(title_text="Equivalent Full Cycle", row=row, col=col,
-                         showgrid=True, gridwidth=1, gridcolor="lightgrey")
+                         showgrid=True, gridwidth=1, gridcolor="lightgrey",
+                         range=x_range)
         fig.update_yaxes(title_text="Capacity (norm.)", row=row, col=col,
-                         showgrid=True, gridwidth=1, gridcolor="lightgrey")
+                         showgrid=True, gridwidth=1, gridcolor="lightgrey",
+                         range=y_range)
 
     fig.update_layout(
         title="Battery capacity vs equivalent full cycle, by DOD",
-        legend_title="Temperature",
-        width=1400, height=1000,
+        legend_title="SOC/C_Rate (Temperature Color Coding)",
+        width=1500, height=1050,
         plot_bgcolor="white", paper_bgcolor="white",
     )
     return fig
+
+
+def _fade_axis_ranges(df):
+    """Shared x/y ranges over every plotted DOD facet, as in the notebook.
+
+    Returns ``(None, None)`` when nothing falls into the DOD facets, which
+    leaves plotly on autoscale rather than pinning an empty range.
+    """
+    plotted = df[df["DOD"].isin(DOD_SUBPLOT_POSITIONS)]
+    x = plotted["EFC"].dropna()
+    y = plotted["cap_norm"].dropna()
+    if x.empty or y.empty:
+        return None, None
+    return [0, x.max() * 1.01], [y.min() * 0.99, y.max() * 1.01]
 
 
 def _variance_figure(sub, title):
@@ -277,6 +338,31 @@ def _surface_figure(sub, title):
     return fig
 
 
+def _mesh_surface(sub, color, name):
+    """Translucent shell over the SOC/DOD plane for one temperature.
+
+    Plotly triangulates internally: with no `i/j/k` given, `Mesh3d` defaults
+    to `alphahull=-1`, i.e. a Delaunay triangulation in the plane named by
+    `delaunayaxis` ("z" — our SOC/DOD plane). One trace per temperature, so
+    no `scipy.spatial.Delaunay` and none of the notebook's per-triangle
+    traces. Returns None when there are too few points to triangulate.
+    """
+    if len(sub) < 3:
+        return None
+    return go.Mesh3d(
+        x=sub["SOC"],
+        y=sub["DOD"],
+        z=sub["capacity_lost_norm"],
+        delaunayaxis="z",
+        color=color,
+        opacity=MESH_OPACITY,
+        showscale=False,
+        showlegend=False,
+        hoverinfo="skip",
+        name=f"surface {name}",
+    )
+
+
 def _multi_temp_figure(df_crate, c_rate):
     """Overlay the 3D aging surface for every temperature at one C-rate."""
     fig = go.Figure()
@@ -286,6 +372,9 @@ def _multi_temp_figure(df_crate, c_rate):
         if sub.empty:
             continue
         color = TEMP_COLORS.get(temp, _FALLBACK_COLORS[n % len(_FALLBACK_COLORS)])
+        mesh = _mesh_surface(sub, TEMP_FILL_COLORS.get(temp, color), f"{temp}°C")
+        if mesh is not None:
+            fig.add_trace(mesh)
         for tr in _neighbor_lines(sub, color):
             fig.add_trace(tr)
         fig.add_trace(go.Scatter3d(
