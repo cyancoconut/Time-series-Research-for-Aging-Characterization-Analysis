@@ -27,7 +27,7 @@ import os
 
 import pandas as pd
 
-from output.add_information_Hina import add_additional_information
+from output.add_information_METABATT import add_additional_information
 from util import io_router
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -166,7 +166,8 @@ def main():
     )
     parser.add_argument("config", help="Path to battery config JSON")
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         default=None,
         help="Override local output CSV path",
     )
