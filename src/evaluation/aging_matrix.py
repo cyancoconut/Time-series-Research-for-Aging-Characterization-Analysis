@@ -55,10 +55,53 @@ GROUP_KEYS = ["C_Rate", "Temperature", "DOD", "SOC"]
 TEMP_COLORS = {15: "skyblue", 25: "seagreen", 35: "goldenrod", 45: "tomato"}
 _FALLBACK_COLORS = ["mediumpurple", "darkorange", "teal", "crimson", "slategray"]
 
-# Capacity-fade plot: DOD facets, temperature colors, C-rate marker symbols.
+# Pale fill for the translucent mesh shell, one step lighter than the line
+# color so the wireframe stays readable on top of it. 35 °C had no notebook
+# entry; khaki pairs with the goldenrod markers.
+TEMP_FILL_COLORS = {
+    15: "lightblue",
+    25: "lightgreen",
+    35: "khaki",
+    45: "lightcoral",
+}
+MESH_OPACITY = 0.3
+
+# Capacity-fade plot: DOD facets, SOC colors at 25 °C, flat pastels elsewhere.
 DOD_SUBPLOT_POSITIONS = {20: (1, 1), 40: (1, 2), 60: (2, 1), 80: (2, 2), 100: (3, 1)}
-FADE_TEMP_COLORS = {15: "#1f77b4", 25: "#2ca02c", 35: "#d39e00", 45: "#d62728"}
-_MARKER_SYMBOLS = ["circle", "square", "diamond", "cross", "x", "triangle-up"]
+
+# RWTH corporate palette (100 % shades), inlined from the notebook's
+# `rwth_colors` module (not vendored in this repo). Verify against the real
+# module if the shades matter.
+RWTH_SOC_COLORS = {
+    10: "#00549F",  # blue
+    30: "#0098A1",  # turqoise
+    50: "#F6A800",  # orange
+    70: "#CC071E",  # red
+    90: "#A11035",  # darkred
+}
+# The notebook gives every non-25 °C temperature one flat pastel.
+FADE_TEMP_COLORS = {15: "lavender", 35: "lavenderblush", 45: "mistyrose"}
+FADE_HIGHLIGHT_TEMP = 25  # the temperature that gets per-SOC coloring
+_DEFAULT_SOC_COLOR = "#000000"
+_DEFAULT_TEMP_COLOR = "#7f7f7f"
+
+# Aging C-rate -> marker symbol, as in the notebook. Keys cover both the
+# numeric and the string form (`C_Rate` arrives as "05C"/"1C" from
+# `add_information_METABATT`, so the notebook's numeric test never matched).
+CRATE_SYMBOLS = {
+    "0.5": "circle",
+    "05c": "circle",
+    "0.5c": "circle",
+    "c/2": "circle",
+    "1.0": "square",
+    "1": "square",
+    "1c": "square",
+}
+_DEFAULT_CRATE_SYMBOL = "diamond"
+
+
+def _crate_symbol(c_rate):
+    return CRATE_SYMBOLS.get(str(c_rate).strip().lower(), _DEFAULT_CRATE_SYMBOL)
 
 
 def build_cell_table(df_all):
@@ -67,17 +110,21 @@ def build_cell_table(df_all):
     Adds `capacity_lost` and `Delta_Ah_throughput` (max - min over the cell's
     check-ups) alongside the cell's aging conditions.
     """
-    agg = df_all.groupby("Name").agg(
-        DOD=("DOD", "first"),
-        SOC=("SOC", "first"),
-        C_Rate=("C_Rate", "first"),
-        Temperature=("Temperature", "first"),
-        n_CU=("Capacity_py", "count"),
-        cap_max=("Capacity_py", "max"),
-        cap_min=("Capacity_py", "min"),
-        ah_max=("Ah_throughput", "max"),
-        ah_min=("Ah_throughput", "min"),
-    ).reset_index()
+    agg = (
+        df_all.groupby("Name")
+        .agg(
+            DOD=("DOD", "first"),
+            SOC=("SOC", "first"),
+            C_Rate=("C_Rate", "first"),
+            Temperature=("Temperature", "first"),
+            n_CU=("Capacity_py", "count"),
+            cap_max=("Capacity_py", "max"),
+            cap_min=("Capacity_py", "min"),
+            ah_max=("Ah_throughput", "max"),
+            ah_min=("Ah_throughput", "min"),
+        )
+        .reset_index()
+    )
 
     agg["capacity_lost"] = agg["cap_max"] - agg["cap_min"]
     agg["Delta_Ah_throughput"] = agg["ah_max"] - agg["ah_min"]
@@ -113,105 +160,161 @@ def build_matrix(df_cells):
 # Plotting
 # --------------------------------------------------------------------------- #
 
-def _capacity_fade_figure(df_all, c_nom):
-    """3x2 DOD-faceted capacity-vs-EFC fade plot across the fleet.
 
-    Port of the notebook `plot_plotly`: per cell, normalized capacity
-    (``Capacity_py / Nom_Capacity``) over equivalent full cycles
-    (``Ah_throughput / Nom_Capacity``), faceted by DOD, one lines+markers
-    trace per (cell, temperature, SOC, C-rate) sorted by EFC, colored by
-    temperature, marker symbol by aging C-rate. Self-contained — no
-    ``rwth_colors`` dependency, no ``fig.show()``, no hardcoded output path.
-    """
+def _capacity_fade_figure(df_all, c_nom):
+    """3x2 DOD-faceted capacity-vs-EFC fade plot across the fleet."""
     df = df_all.copy()
     df["Name_prefix"] = df["Name"].astype(str).str.split("-").str[0]
     df["cap_norm"] = df["Capacity_py"] / c_nom
-    df["EFC"] = df["Ah_throughput"] / c_nom
+    df["EFC"] = df["Ah_throughput"] / c_nom / 2
     if "Time" not in df.columns:
         df["Time"] = pd.NaT
 
     fig = make_subplots(
-        rows=3, cols=2,
-        subplot_titles=["DOD = 20%", "DOD = 40%", "DOD = 60%",
-                        "DOD = 80%", "DOD = 100%", ""],
-        vertical_spacing=0.1, horizontal_spacing=0.08,
+        rows=3,
+        cols=2,
+        subplot_titles=[
+            "DOD = 20%",
+            "DOD = 40%",
+            "DOD = 60%",
+            "DOD = 80%",
+            "DOD = 100%",
+            "",
+        ],
+        vertical_spacing=0.13,
+        horizontal_spacing=0.08,
         specs=[[{}, {}], [{}, {}], [{}, None]],
     )
 
-    crates = sorted(df["C_Rate"].dropna().astype(str).unique())
-    crate_symbol = {
-        c: _MARKER_SYMBOLS[i % len(_MARKER_SYMBOLS)] for i, c in enumerate(crates)
-    }
-    seen_temps = set()
+    seen_legend = set()
 
+    def _add_trace(fig, g, name, temp, soc, crate, dod, row, col):
+        g = g.sort_values("EFC")
+        if g.empty:
+            return
+        if temp == FADE_HIGHLIGHT_TEMP:
+            color = RWTH_SOC_COLORS.get(soc, _DEFAULT_SOC_COLOR)
+            legend_key = (temp, soc)
+            legend_name = f"T={temp}°C, SOC={soc}"
+        else:
+            color = FADE_TEMP_COLORS.get(temp, _DEFAULT_TEMP_COLOR)
+            legend_key = (temp, None)
+            legend_name = f"T={temp}°C"
+        show = legend_key not in seen_legend
+        seen_legend.add(legend_key)
+        fig.add_trace(
+            go.Scatter(
+                x=g["EFC"],
+                y=g["cap_norm"],
+                mode="lines+markers",
+                name=legend_name,
+                legendgroup=str(legend_key),
+                showlegend=show,
+                line=dict(color=color),
+                marker=dict(color=color, size=8, symbol=_crate_symbol(crate)),
+                customdata=g[["Name_prefix", "SOC", "C_Rate", "Time"]].to_numpy(),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    f"Temp: {temp}°C<br>"
+                    "SOC: %{customdata[1]}%<br>"
+                    f"DOD: {dod}%<br>"
+                    "C-Rate: %{customdata[2]}<br>"
+                    "EFC: %{x:.1f}<br>Capacity: %{y:.3f}<br>"
+                    "Time: %{customdata[3]}<extra></extra>"
+                ),
+            ),
+            row=row,
+            col=col,
+        )
+
+    # --- Pass 1: all non-highlight temperatures (drawn first, behind) ---
     for dod, (row, col) in DOD_SUBPLOT_POSITIONS.items():
         sub = df[df["DOD"] == dod]
         for (name, temp, soc, crate), g in sub.groupby(
             ["Name_prefix", "Temperature", "SOC", "C_Rate"], dropna=False
         ):
-            g = g.sort_values("EFC")
-            if g.empty:
+            if temp == FADE_HIGHLIGHT_TEMP:
                 continue
-            color = FADE_TEMP_COLORS.get(temp, "#7f7f7f")
-            show = temp not in seen_temps
-            seen_temps.add(temp)
-            fig.add_trace(
-                go.Scatter(
-                    x=g["EFC"], y=g["cap_norm"],
-                    mode="lines+markers",
-                    name=f"{temp}°C",
-                    legendgroup=str(temp),
-                    showlegend=show,
-                    line=dict(color=color),
-                    marker=dict(color=color, size=7,
-                                symbol=crate_symbol.get(str(crate), "circle")),
-                    customdata=g[["Name_prefix", "SOC", "C_Rate", "Time"]].to_numpy(),
-                    hovertemplate=(
-                        "<b>%{customdata[0]}</b><br>"
-                        f"Temp: {temp}°C<br>"
-                        "SOC: %{customdata[1]}%<br>"
-                        f"DOD: {dod}%<br>"
-                        "C-Rate: %{customdata[2]}<br>"
-                        "EFC: %{x:.1f}<br>Capacity: %{y:.3f}<br>"
-                        "Time: %{customdata[3]}<extra></extra>"
-                    ),
-                ),
-                row=row, col=col,
-            )
-        fig.update_xaxes(title_text="Equivalent Full Cycle", row=row, col=col,
-                         showgrid=True, gridwidth=1, gridcolor="lightgrey")
-        fig.update_yaxes(title_text="Capacity (norm.)", row=row, col=col,
-                         showgrid=True, gridwidth=1, gridcolor="lightgrey")
+            _add_trace(fig, g, name, temp, soc, crate, dod, row, col)
+
+    # --- Pass 2: highlight temperature only (drawn last, on top) ---
+    for dod, (row, col) in DOD_SUBPLOT_POSITIONS.items():
+        sub = df[df["DOD"] == dod]
+        for (name, temp, soc, crate), g in sub.groupby(
+            ["Name_prefix", "Temperature", "SOC", "C_Rate"], dropna=False
+        ):
+            if temp != FADE_HIGHLIGHT_TEMP:
+                continue
+            _add_trace(fig, g, name, temp, soc, crate, dod, row, col)
+
+    x_range, y_range = _fade_axis_ranges(df)
+    for row, col in DOD_SUBPLOT_POSITIONS.values():
+        fig.update_xaxes(
+            title_text="Equivalent Full Cycle",
+            row=row,
+            col=col,
+            showgrid=True,
+            gridwidth=1,
+            gridcolor="lightgrey",
+            range=x_range,
+        )
+        fig.update_yaxes(
+            title_text="Capacity (norm.)",
+            row=row,
+            col=col,
+            showgrid=True,
+            gridwidth=1,
+            gridcolor="lightgrey",
+            range=y_range,
+        )
 
     fig.update_layout(
         title="Battery capacity vs equivalent full cycle, by DOD",
-        legend_title="Temperature",
-        width=1400, height=1000,
-        plot_bgcolor="white", paper_bgcolor="white",
+        legend_title="SOC/C_Rate (Temperature Color Coding)",
+        width=1500,
+        height=1050,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
     )
     return fig
 
 
+def _fade_axis_ranges(df):
+    """Shared x/y ranges over every plotted DOD facet, as in the notebook.
+
+    Returns ``(None, None)`` when nothing falls into the DOD facets, which
+    leaves plotly on autoscale rather than pinning an empty range.
+    """
+    plotted = df[df["DOD"].isin(DOD_SUBPLOT_POSITIONS)]
+    x = plotted["EFC"].dropna()
+    y = plotted["cap_norm"].dropna()
+    if x.empty or y.empty:
+        return None, None
+    return [0, x.max() * 1.01], [y.min() * 0.99, y.max() * 1.01]
+
+
 def _variance_figure(sub, title):
     """2D SOC x DOD scatter colored by cell-to-cell capacity-loss spread."""
-    fig = go.Figure(go.Scatter(
-        x=sub["DOD"],
-        y=sub["SOC"],
-        mode="markers",
-        marker=dict(
-            size=16,
-            color=sub["capacity_lost_std"],
-            colorscale="RdBu",
-            opacity=0.85,
-            colorbar=dict(title="capacity_lost_std"),
-            line=dict(width=1, color="black"),
-        ),
-        customdata=sub[["candidate_count"]].to_numpy(),
-        hovertemplate=(
-            "DOD: %{x}%<br>SOC: %{y}%<br>"
-            "loss std: %{marker.color:.4f}<br>n cells: %{customdata[0]}<extra></extra>"
-        ),
-    ))
+    fig = go.Figure(
+        go.Scatter(
+            x=sub["DOD"],
+            y=sub["SOC"],
+            mode="markers",
+            marker=dict(
+                size=16,
+                color=sub["capacity_lost_std"],
+                colorscale="RdBu",
+                opacity=0.85,
+                colorbar=dict(title="capacity_lost_std"),
+                line=dict(width=1, color="black"),
+            ),
+            customdata=sub[["candidate_count"]].to_numpy(),
+            hovertemplate=(
+                "DOD: %{x}%<br>SOC: %{y}%<br>"
+                "loss std: %{marker.color:.4f}<br>n cells: %{customdata[0]}<extra></extra>"
+            ),
+        )
+    )
     fig.update_layout(
         title=title,
         xaxis_title="Depth of Discharge (DOD) %",
@@ -238,15 +341,20 @@ def _neighbor_lines(sub, color):
             if edge in seen:
                 continue
             seen.add(edge)
-            traces.append(go.Scatter3d(
-                x=[sub.iloc[i]["SOC"], sub.iloc[j]["SOC"]],
-                y=[sub.iloc[i]["DOD"], sub.iloc[j]["DOD"]],
-                z=[sub.iloc[i]["capacity_lost_norm"], sub.iloc[j]["capacity_lost_norm"]],
-                mode="lines",
-                line=dict(color=color, width=4),
-                showlegend=False,
-                hoverinfo="skip",
-            ))
+            traces.append(
+                go.Scatter3d(
+                    x=[sub.iloc[i]["SOC"], sub.iloc[j]["SOC"]],
+                    y=[sub.iloc[i]["DOD"], sub.iloc[j]["DOD"]],
+                    z=[
+                        sub.iloc[i]["capacity_lost_norm"],
+                        sub.iloc[j]["capacity_lost_norm"],
+                    ],
+                    mode="lines",
+                    line=dict(color=color, width=4),
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
     return traces
 
 
@@ -255,26 +363,53 @@ def _surface_figure(sub, title):
     fig = go.Figure()
     for tr in _neighbor_lines(sub, "green"):
         fig.add_trace(tr)
-    fig.add_trace(go.Scatter3d(
+    fig.add_trace(
+        go.Scatter3d(
+            x=sub["SOC"],
+            y=sub["DOD"],
+            z=sub["capacity_lost_norm"],
+            mode="markers",
+            marker=dict(
+                size=11,
+                color=sub["capacity_lost_norm"],
+                colorscale="Viridis",
+                opacity=1.0,
+                colorbar=dict(title="norm. loss"),
+                line=dict(width=2, color="black"),
+            ),
+            hovertemplate=(
+                "SOC: %{x}%<br>DOD: %{y}%<br>norm. loss: %{z:.4f}<extra></extra>"
+            ),
+            name="cells",
+        )
+    )
+    _layout_3d(fig, title)
+    return fig
+
+
+def _mesh_surface(sub, color, name):
+    """Translucent shell over the SOC/DOD plane for one temperature.
+
+    Plotly triangulates internally: with no `i/j/k` given, `Mesh3d` defaults
+    to `alphahull=-1`, i.e. a Delaunay triangulation in the plane named by
+    `delaunayaxis` ("z" — our SOC/DOD plane). One trace per temperature, so
+    no `scipy.spatial.Delaunay` and none of the notebook's per-triangle
+    traces. Returns None when there are too few points to triangulate.
+    """
+    if len(sub) < 3:
+        return None
+    return go.Mesh3d(
         x=sub["SOC"],
         y=sub["DOD"],
         z=sub["capacity_lost_norm"],
-        mode="markers",
-        marker=dict(
-            size=11,
-            color=sub["capacity_lost_norm"],
-            colorscale="Viridis",
-            opacity=1.0,
-            colorbar=dict(title="norm. loss"),
-            line=dict(width=2, color="black"),
-        ),
-        hovertemplate=(
-            "SOC: %{x}%<br>DOD: %{y}%<br>norm. loss: %{z:.4f}<extra></extra>"
-        ),
-        name="cells",
-    ))
-    _layout_3d(fig, title)
-    return fig
+        delaunayaxis="z",
+        color=color,
+        opacity=MESH_OPACITY,
+        showscale=False,
+        showlegend=False,
+        hoverinfo="skip",
+        name=f"surface {name}",
+    )
 
 
 def _multi_temp_figure(df_crate, c_rate):
@@ -286,21 +421,27 @@ def _multi_temp_figure(df_crate, c_rate):
         if sub.empty:
             continue
         color = TEMP_COLORS.get(temp, _FALLBACK_COLORS[n % len(_FALLBACK_COLORS)])
+        mesh = _mesh_surface(sub, TEMP_FILL_COLORS.get(temp, color), f"{temp}°C")
+        if mesh is not None:
+            fig.add_trace(mesh)
         for tr in _neighbor_lines(sub, color):
             fig.add_trace(tr)
-        fig.add_trace(go.Scatter3d(
-            x=sub["SOC"],
-            y=sub["DOD"],
-            z=sub["capacity_lost_norm"],
-            mode="markers",
-            marker=dict(size=11, color=color, opacity=1.0,
-                        line=dict(width=2, color="black")),
-            hovertemplate=(
-                f"{temp}°C<br>"
-                "SOC: %{x}%<br>DOD: %{y}%<br>norm. loss: %{z:.4f}<extra></extra>"
-            ),
-            name=f"{temp}°C",
-        ))
+        fig.add_trace(
+            go.Scatter3d(
+                x=sub["SOC"],
+                y=sub["DOD"],
+                z=sub["capacity_lost_norm"],
+                mode="markers",
+                marker=dict(
+                    size=11, color=color, opacity=1.0, line=dict(width=2, color="black")
+                ),
+                hovertemplate=(
+                    f"{temp}°C<br>"
+                    "SOC: %{x}%<br>DOD: %{y}%<br>norm. loss: %{z:.4f}<extra></extra>"
+                ),
+                name=f"{temp}°C",
+            )
+        )
     _layout_3d(fig, f"Aging surface — C-Rate {c_rate}, all temperatures")
     fig.update_layout(showlegend=True)
     return fig
@@ -325,29 +466,40 @@ def render_html(matrix, df_all=None, c_nom=None, title="Battery aging matrix"):
     sections = []  # (heading, figure)
     if df_all is not None and not df_all.empty:
         sections.append(
-            ("Capacity fade — capacity vs equivalent full cycle",
-             _capacity_fade_figure(df_all, c_nom))
+            (
+                "Capacity fade — capacity vs equivalent full cycle",
+                _capacity_fade_figure(df_all, c_nom),
+            )
         )
     for (c_rate, temp), sub in matrix.groupby(["C_Rate", "Temperature"], dropna=False):
         if sub.empty:
             continue
         label = f"C-Rate {c_rate}, {temp}°C"
-        sections.append((f"Variance — {label}", _variance_figure(sub, f"Cell-to-cell variance — {label}")))
-        sections.append((f"Surface — {label}", _surface_figure(sub, f"Aging surface — {label}")))
+        sections.append(
+            (
+                f"Variance — {label}",
+                _variance_figure(sub, f"Cell-to-cell variance — {label}"),
+            )
+        )
+        sections.append(
+            (f"Surface — {label}", _surface_figure(sub, f"Aging surface — {label}"))
+        )
 
     for c_rate, df_crate in matrix.groupby("C_Rate", dropna=False):
         if df_crate["Temperature"].nunique(dropna=True) > 1:
             sections.append(
-                (f"Multi-temperature surface — C-Rate {c_rate}",
-                 _multi_temp_figure(df_crate, c_rate))
+                (
+                    f"Multi-temperature surface — C-Rate {c_rate}",
+                    _multi_temp_figure(df_crate, c_rate),
+                )
             )
 
     parts = []
     for i, (heading, fig) in enumerate(sections):
         parts.append(f"<h2>{heading}</h2>")
-        parts.append(fig.to_html(
-            full_html=False, include_plotlyjs="cdn" if i == 0 else False
-        ))
+        parts.append(
+            fig.to_html(full_html=False, include_plotlyjs="cdn" if i == 0 else False)
+        )
     body = "".join(parts) if parts else "<p>No aging-matrix data to plot.</p>"
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -359,6 +511,7 @@ def render_html(matrix, df_all=None, c_nom=None, title="Battery aging matrix"):
 # --------------------------------------------------------------------------- #
 # Output routing
 # --------------------------------------------------------------------------- #
+
 
 def _write_outputs(matrix, cfg, out_dir, df_all=None):
     html = render_html(matrix, df_all=df_all, c_nom=cfg["nom_capacity"])
@@ -379,8 +532,11 @@ def _write_outputs(matrix, cfg, out_dir, df_all=None):
             client, cfg, matrix, f"{EVAL_DIRNAME}/{CSV_NAME}", include_tag=False
         )
         io_router._upload_bytes(
-            client, cfg, f"{EVAL_DIRNAME}/{HTML_NAME}",
-            html.encode("utf-8"), include_tag=False,
+            client,
+            cfg,
+            f"{EVAL_DIRNAME}/{HTML_NAME}",
+            html.encode("utf-8"),
+            include_tag=False,
         )
 
 
@@ -390,7 +546,8 @@ def main():
     )
     parser.add_argument("config", help="Path to battery config JSON")
     parser.add_argument(
-        "-o", "--output-dir",
+        "-o",
+        "--output-dir",
         default=None,
         help="Override local output directory (default: <working_path>/50_evaluation)",
     )
