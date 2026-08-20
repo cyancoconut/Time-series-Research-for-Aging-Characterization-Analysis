@@ -1,0 +1,16 @@
+{
+  "_description": "2RC pulse-fit config for the Namey NFPP 28 Ah full-SOC-sweep HPPC (J8049_Namey_NFPP_28Ah_*). Single ~9.87 A pulse amplitude (~C/2.8); discharge sweep, 21 plateaus at 5% steps, 100% -> 0%. plateau_gap_ah derived = 28 * 5/100 = 1.40 Ah.",
+
+  "nom_capacity": 28.0,
+
+  "pulse_std_fraction": 0.05,
+  "rest_current_a": 0.05,
+  "cycle_active_limit_hour": 4.0,
+  "r_dc_delta_t_s": 0.5,
+  "remove_pulse_before_min": 0,
+  "exclude_zustand_current": [],
+
+  "soc_sweep_direction": "discharge",
+  "soc_step_pct": 5,
+  "plateau_gap_ah": null
+}

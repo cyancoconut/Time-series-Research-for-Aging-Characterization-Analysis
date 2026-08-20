@@ -30,14 +30,48 @@ Pipeline
    actual current step, which is reproducible across check-ups and ramp-robust.
    The termination R_DC and the instantaneous jumps are reported as cross-checks
    (``R0_consistent`` flags onset vs termination R_DC agreement). C_k = tau_k/R_k.
+   ``R0_extrap_onset_ohm`` / ``R0_extrap_term_ohm`` are pure-ohmic R0 estimates:
+   the ohmic step extrapolated back to t=0 from the pulse *rise* (onset, on the
+   dense ~0.18 s cadence — the most reproducible) and from the relaxation *decay*
+   (termination, coarse ~0.8 s side). Neither depends on where a single sample
+   lands; the two agree when both are well-posed, and both read ~1.5-2 mΩ below
+   R_DC,0.5 s (the difference is the RC that develops within 0.5 s).
+
+3. **Coupled staged fit** (``_staged_branches``) — a physically-separated
+   decomposition reported next to the joint fit (``R0_staged``/``R1_fast``/
+   ``tau1_fast``/``R2_slow``/``tau2_slow``/``staged_rmse_mV``). R0 is the onset
+   ohmic; the slow branch is read from the fast-free part of the relaxation; its
+   contribution *during* the pulse (a non-negligible several mV — the slow branch
+   is partly built up by t_p) is reconstructed and subtracted, together with the
+   OCV ramp, before the fast branch is fit on the dense onset residual. Each
+   branch is thus read where the cadence resolves it. It re-simulates the full
+   curve to sub-mV, giving reproducible charge-transfer params for aging while the
+   joint fit stays the (lowest-RMSE) simulation model.
+
+4. **2RC + finite-length Warburg** (``_fit_2rc_warburg``) — reported *alongside*
+   the joint 2RC (columns ``R_d_ohm``/``tau_d_s``/``R{1,2}_w_ohm``/
+   ``warburg_rmse_mV``). The lumped slow RC branch is a crude stand-in for the
+   distributed diffusion impedance (``2RC_parameters_research_notes.md`` §2.3);
+   this fit adds a proper **transmissive finite-length Warburg** element
+   (``Z_Ws = R_d tanh(√(jω τ_d))/√(jω τ_d)``, step response ``_warburg_step``)
+   on top of the two RC branches, so the √t-early diffusion shape is captured
+   rather than approximated. R0 is pinned to the same R_DC as the 2RC fit, so the
+   two models are directly comparable (``rmse_mV`` vs ``warburg_rmse_mV``). The
+   joint 2RC stays the primary simulation model; the Warburg fit is a diagnostic.
 
 Standalone analysis utility — does not touch the pipeline. Run from ``src/``::
 
-    python -m analysis.fit_2rc_pulse [pulse.parquet] [--plot]
+    # every cell: takes working_path (and nom_capacity) from the pipeline config
+    python -m analysis.fit_2rc_pulse --battery-config ../battery_config_VTC_linux.json
+    # one cell, by name fragment
+    python -m analysis.fit_2rc_pulse --battery-config <cfg.json> --cell 003
+    # an explicit folder or file (wins over the config)
+    python -m analysis.fit_2rc_pulse <cell_folder|pulse.parquet> [--plot]
 """
 
 import argparse
 import glob
+import json
 import logging
 import os
 import re
@@ -58,8 +92,10 @@ REMOVE_PULSE_BEFORE_MIN = 0       # drop pulses earlier than this into a cycle
 # needs is unmeasured). Dropped by label rather than by timing.
 EXCLUDE_ZUSTAND_CURRENT = ["DCH/-1.5"]
 CYCLE_ACTIVE_LIMIT_HOUR = 4.0     # time_diff > this starts a new cycle
-STD_LIMIT_1P5A = 0.1              # max current std (A) for a 1.5 A pulse
-STD_LIMIT_3A = 0.1               # max current std (A) for a 3.0 A pulse
+# Amplitude-agnostic pulse-stability gate: a segment is a pulse when its current
+# plateau is *relatively* stable, std(I) <= PULSE_STD_FRACTION * |I|. Scales with
+# cell size (VTC6 ~1.5/3 A, the 28 Ah sweep ~9.87 A), so no per-chemistry level list.
+PULSE_STD_FRACTION = 0.05
 REST_CURRENT_A = 0.05            # |Current| below this counts as rest
 # Resistance-calculation-period for the DC pulse resistance R_DC,Δt, after
 # Ludwig et al. (J. Power Sources 490 (2021) 229523): R_DC,Δt = ΔU/ΔI measured
@@ -70,13 +106,123 @@ REST_CURRENT_A = 0.05            # |Current| below this counts as rest
 # ms sampling we do not have.
 R_DC_DELTA_T = 0.5
 
-DEFAULT_FILE = (
-    "/home/ann/Documents/Data_Metabatt/20_export_pulse/"
-    "METABatt_Sony_Murata_18650VTC6_003/"
-    "METABatt_Sony_Murata_18650VTC6_003_pulse_BM5_96.1SOH.parquet"
-)
+# --- SOC-sweep labeling (assign_pulse_soc) ----------------------------------
+# A full-SOC-sweep HPPC pulses at a series of SOC plateaus. Pulses are grouped
+# into plateaus by their Ah_throughput: a jump larger than the plateau gap between
+# consecutive pulses (the between-plateau charge/discharge step) starts the next
+# plateau; a small jump (only the pulse+restore throughput) keeps them together.
+# The gap defaults to one full SOC step in Ah, nom_capacity * SOC_SWEEP_STEP_PCT/100
+# (config `plateau_gap_ah` overrides it).
+#
+# SOC_SWEEP_DIRECTION is the *sweep* direction (not a single pulse's CHA/DCH):
+#   "discharge" -> sweep starts full and empties: SOC = 100 - step*plateau
+#   "charge"    -> sweep starts empty and fills:  SOC =   0 + step*plateau
+# so plateau 0 is 100% for a discharge sweep and 0% for a charge sweep.
+SOC_SWEEP_DIRECTION = "discharge"
+SOC_SWEEP_STEP_PCT = 5.0
+PLATEAU_GAP_AH = None  # None -> derive nom_capacity * SOC_SWEEP_STEP_PCT / 100
+
+#: Nominal capacity fallback (VTC6) when neither config supplies one.
+DEFAULT_NOM_CAPACITY = 3.0
+
+#: Pulse-export folder under ``working_path`` — one sub-folder per cell stem,
+#: written by ``output/export_pulse.py``.
+PULSE_EXPORT_DIR = "20_export_pulse"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+
+# ---------------------------------------------------------------------------
+# Config (dedicated JSON; see config_2rc_example.json)
+# ---------------------------------------------------------------------------
+# Maps config keys -> the module globals they override. Every key is optional;
+# omitted keys keep the module default. Values that are not globals (nom_capacity,
+# the SOC-sweep params) are read straight off the returned dict by ``main``.
+_CONFIG_GLOBALS = {
+    "pulse_std_fraction": "PULSE_STD_FRACTION",
+    "rest_current_a": "REST_CURRENT_A",
+    "cycle_active_limit_hour": "CYCLE_ACTIVE_LIMIT_HOUR",
+    "r_dc_delta_t_s": "R_DC_DELTA_T",
+    "exclude_zustand_current": "EXCLUDE_ZUSTAND_CURRENT",
+    "remove_pulse_before_min": "REMOVE_PULSE_BEFORE_MIN",
+    "soc_sweep_direction": "SOC_SWEEP_DIRECTION",
+    "soc_step_pct": "SOC_SWEEP_STEP_PCT",
+    "plateau_gap_ah": "PLATEAU_GAP_AH",
+}
+
+
+def load_2rc_config(path):
+    """Load a dedicated 2RC JSON config and apply it to the module globals.
+
+    Underscore-prefixed keys (``_description`` etc.) are ignored so the JSON can
+    carry inline docs. Recognised keys in ``_CONFIG_GLOBALS`` overwrite the
+    matching module-level constant (the analyzer's tunables live in one place);
+    ``nom_capacity`` and the SOC-sweep params are returned for ``main`` to consume.
+    Returns the parsed dict. Missing keys keep the module defaults.
+    """
+    with open(path) as fh:
+        cfg = json.load(fh)
+    for key, glob_name in _CONFIG_GLOBALS.items():
+        if key in cfg and cfg[key] is not None:
+            globals()[glob_name] = cfg[key]
+    logging.info("loaded 2RC config %s", os.path.basename(path))
+    return cfg
+
+
+def load_battery_config(path):
+    """Load the pipeline's battery config (the one ``main.py`` takes).
+
+    Only two keys are used here — ``working_path`` (to locate the pulse exports)
+    and ``nom_capacity`` — so the analyzer stays runnable on any machine without
+    a hardcoded data path. A dedicated 2RC ``--config`` still wins on
+    ``nom_capacity``: it is the cell-specific one.
+    """
+    with open(path) as fh:
+        cfg = json.load(fh)
+    logging.info("loaded battery config %s", os.path.basename(path))
+    return cfg
+
+
+def resolve_cell_folders(cfg, cell_filters=None):
+    """Every cell's pulse-export folder under ``<working_path>/20_export_pulse``.
+
+    One sub-folder per ``cell_stem``. ``cell_filters`` subsets by name fragment,
+    matching ``main.py --cells``; ``None`` returns all of them. Folders holding
+    no ``*_pulse_BM*.parquet`` are skipped (a cell can be exported but have no
+    pulses). Raises ``FileNotFoundError`` with a pointed hint when the export
+    folder itself is missing — the usual cause is that the pipeline ran with
+    ``export_pulse`` at its default ``false``.
+    """
+    working_path = cfg.get("working_path")
+    if not working_path:
+        raise ValueError("battery config has no 'working_path'")
+    root = os.path.join(working_path, PULSE_EXPORT_DIR)
+    if not os.path.isdir(root):
+        raise FileNotFoundError(
+            f"no pulse exports at {root} — the pipeline writes them only with "
+            "'export_pulse': true (default false). With download_from='minio' "
+            "they may exist only in MinIO and need syncing to working_path first."
+        )
+
+    folders = []
+    for name in sorted(os.listdir(root)):
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        if cell_filters and not any(c in name for c in cell_filters):
+            continue
+        if not glob.glob(os.path.join(path, "*_pulse_BM*.parquet")):
+            logging.info("skip %s: no pulse exports in folder", name)
+            continue
+        folders.append(path)
+
+    if not folders:
+        raise FileNotFoundError(
+            f"no cell folder with pulse exports under {root}"
+            + (f" matching {cell_filters}" if cell_filters else "")
+        )
+    logging.info("%d cell folder(s) under %s", len(folders), root)
+    return folders
 
 
 # ---------------------------------------------------------------------------
@@ -145,18 +291,22 @@ def label_time_diff(df, file_name):
 
 
 def _is_bad_current_segment(group):
-    """True if a pulse segment's current is the wrong level or too unstable."""
+    """True if a pulse segment's current is too unstable or has no real step.
+
+    Amplitude-agnostic: a real pulse has a genuine current step (|I| plateau above
+    the rest threshold) that is *relatively* stable (``std <= PULSE_STD_FRACTION *
+    |I|``). Keying on relative stability rather than a fixed level list lets the
+    gate scale with cell size (VTC6 ~1.5/3 A, the 28 Ah sweep ~9.87 A, …) without
+    per-chemistry tuning.
+    """
     g = group.sort_values("Time")
     cur = g["Current"]
     if len(g) >= 2 and cur.iloc[0] == 0:  # ignore a leading zero sample
         cur = cur.iloc[1:]
-    level = round(cur.abs().iloc[0], 1)
-    std = cur.std()
-    if level == 1.5:
-        return std > STD_LIMIT_1P5A
-    if level == 3.0:
-        return std > STD_LIMIT_3A
-    return True  # unknown level -> reject
+    amp = float(cur.abs().median())
+    if amp < REST_CURRENT_A:
+        return True
+    return bool(cur.std() > PULSE_STD_FRACTION * amp)
 
 
 def _segment_zc(grp):
@@ -219,6 +369,88 @@ def build_pulse_sequence(labeled, output_columns):
     )
     keep = [c for c in output_columns if c in seq.columns]
     return seq[keep].copy()
+
+
+def assign_pulse_soc(
+    labeled,
+    nom_capacity,
+    sweep_direction=None,
+    soc_step_pct=None,
+    plateau_gap_ah=None,
+):
+    """Label each pulse segment with amplitude, direction and sweep SOC.
+
+    A full-SOC-sweep HPPC steps the cell through equal SOC plateaus, doing one or
+    two test pulses at each. Pulses are ordered in time and grouped into plateaus
+    by their ``Ah_throughput``: a jump larger than ``plateau_gap_ah`` (the
+    between-plateau charge/discharge step) starts a new plateau, while the small
+    jump between a plateau's paired pulses (only the pulse+restore throughput)
+    keeps them together. Each plateau then gets an SOC from the *sweep* direction:
+
+        discharge sweep -> SOC = 100 - soc_step_pct * plateau   (100% at the top)
+        charge sweep    -> SOC =   0 + soc_step_pct * plateau   (0% at the bottom)
+
+    ``plateau_gap_ah`` defaults to one full SOC step in Ah,
+    ``nom_capacity * soc_step_pct / 100``.
+
+    Returns a per-segment DataFrame indexed by ``pulse_segment_id`` with columns
+    ``t0, Ah_throughput, pulse_amplitude_A, pulse_C_rate, direction, soc_plateau,
+    SOC_pct`` (in time order). Empty if no good pulse segments or no
+    ``Ah_throughput`` column.
+    """
+    sweep_direction = sweep_direction if sweep_direction is not None else SOC_SWEEP_DIRECTION
+    soc_step_pct = soc_step_pct if soc_step_pct is not None else SOC_SWEEP_STEP_PCT
+    if plateau_gap_ah is None:
+        plateau_gap_ah = PLATEAU_GAP_AH
+    if plateau_gap_ah is None:
+        plateau_gap_ah = nom_capacity * soc_step_pct / 100.0
+
+    if "Ah_throughput" not in labeled.columns:
+        logging.warning("assign_pulse_soc: no Ah_throughput column — cannot label SOC")
+        return pd.DataFrame()
+
+    pulses = labeled[labeled["Zustand"].isin(["CHA", "DCH"])]
+    recs = []
+    for seg_id, grp in pulses.groupby("pulse_segment_id", sort=False):
+        if _is_bad_current_segment(grp):
+            continue
+        g = grp.sort_values("Time")
+        cur = g["Current"]
+        active = cur[cur.abs() > REST_CURRENT_A]
+        i_signed = float(active.mean()) if not active.empty else float(cur.mean())
+        amp = float(active.abs().median()) if not active.empty else float(cur.abs().median())
+        recs.append(
+            {
+                "pulse_segment_id": seg_id,
+                "t0": g["Time"].min(),
+                "Ah_throughput": float(g["Ah_throughput"].mean()),
+                "pulse_amplitude_A": round(amp, 3),
+                "pulse_C_rate": round(amp / nom_capacity, 3) if nom_capacity else np.nan,
+                "direction": "CHA" if i_signed > 0 else "DCH",
+            }
+        )
+    seg = pd.DataFrame(recs)
+    if seg.empty:
+        return seg
+    seg = seg.sort_values("t0").reset_index(drop=True)
+
+    # plateau index from Ah_throughput jumps (monotone-increasing cumulative Ah)
+    dah = seg["Ah_throughput"].diff()
+    new_plateau = dah.isna() | (dah.abs() > plateau_gap_ah)
+    seg["soc_plateau"] = new_plateau.cumsum().astype(int) - 1  # 0-based, top plateau = 0
+
+    if str(sweep_direction).lower().startswith("cha"):
+        seg["SOC_pct"] = 0.0 + soc_step_pct * seg["soc_plateau"]
+    else:  # discharge sweep
+        seg["SOC_pct"] = 100.0 - soc_step_pct * seg["soc_plateau"]
+
+    n_plateaus = seg["soc_plateau"].nunique()
+    logging.info(
+        "assign_pulse_soc: %d pulses -> %d plateaus (gap %.3f Ah, %s sweep, SOC %.0f..%.0f%%)",
+        len(seg), n_plateaus, plateau_gap_ah, sweep_direction,
+        seg["SOC_pct"].iloc[0], seg["SOC_pct"].iloc[-1],
+    )
+    return seg
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +538,365 @@ def _r_dc_delta_t(t, v, i_arr, t_change, dt, u_ref, i_ref):
     return abs((u_ref - float(v[k])) / d_i)
 
 
+# Early-relaxation window (s) fit for the extrapolated termination R0. The t=0
+# intercept must be reconstructed from the *fast* decay near current-off; fitting
+# the whole (~30 min) rest lets the two exponentials chase the slow SOC/diffusion
+# drift and biases the intercept high (a ~3 mOhm over-read on VTC6). A short early
+# window isolates the fast+medium branches (the slow tail is ~flat over it and
+# folds into OCV), so the extrapolation converges toward the true ohmic R0.
+EXTRAP_REST_WINDOW_S = 60.0
+
+
+def _extrap_termination_r0(t, v, t_p, i_pulse, v_pulse_last,
+                           window_s=EXTRAP_REST_WINDOW_S):
+    """Fit-extrapolated termination R0 — the ohmic step at current-off, sampling-lag-free.
+
+    The raw termination jump ``(v_relax_first - v_pulse_last)/I`` reads the *first*
+    relaxation sample, which on a coarse rest cadence (here ~0.8 s) lands well
+    after current-off. In that gap the RC overvoltages have already begun to
+    decay, so the raw jump over-reads R0 by the RC that leaked in during the lag
+    (a systematic bias, not averageable). Instead, fit the *early* relaxation
+    (first ``window_s`` s) to the 2RC decay
+    ``V(t') = OCV + V1(0)e^{-t'/tau1} + V2(0)e^{-t'/tau2}`` and reconstruct the
+    voltage **at the current-off instant** ``t'=0``::
+
+        V(0+) = OCV + V1(0) + V2(0)          # RC still full, ohmic already gone
+        R0    = |(v_pulse_last - V(0+)) / i_pulse|
+
+    Because ``V(0+)`` is extrapolated from the decay shape, the result does not
+    depend on where the first rest sample happens to fall — it is reproducible
+    across check-ups regardless of the relaxation cadence. The fit is restricted
+    to ``window_s`` because the t=0 intercept is set by the fast branch; fitting
+    the full rest lets the slow tail dominate and biases R0 high. Mirrors the t=0
+    extrapolation ``fit_one_relaxation`` uses for cycling rest curves.
+    **Caveat**: at a coarse rest cadence the sub-second double-layer decay is
+    unmeasured, so the intercept still carries some window sensitivity — read this
+    as a *true-ohmic* estimate, cross-checked against the (densely sampled) onset.
+    Returns ``np.nan`` when the early rest tail is too short to fit.
+    """
+    t = np.asarray(t, dtype=float)
+    v = np.asarray(v, dtype=float)
+    rest = (t > t_p) & (t - t_p <= window_s)
+    t_rest = t[rest] - t_p
+    v_rest = v[rest]
+    if len(t_rest) < 8:
+        return np.nan
+
+    v_settled = float(v_rest[-1])                     # ~OCV guess (rest tail)
+    amp0 = float(v_rest[0] - v_settled)               # total overvoltage at t'~0
+    tau2_hi = 6000.0
+    bounds = (
+        [v_settled - 0.5, -0.5, -0.5, 0.2, 20.0],
+        [v_settled + 0.5, 0.5, 0.5, 60.0, tau2_hi],
+    )
+    best_popt, best_rmse = None, np.inf
+    for tau1_0, tau2_0 in [(5.0, 200.0), (2.0, 30.0), (8.0, 60.0), (3.0, 100.0)]:
+        p0 = [v_settled, amp0 / 2, amp0 / 2, tau1_0, tau2_0]
+        try:
+            popt, _ = curve_fit(_v_relax, t_rest, v_rest, p0=p0, bounds=bounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((_v_relax(t_rest, *popt) - v_rest) ** 2)))
+        if rmse < best_rmse:
+            best_popt, best_rmse = popt, rmse
+    if best_popt is None:
+        return np.nan
+    ocv, v1_0, v2_0, _, _ = best_popt
+    v0_plus = ocv + v1_0 + v2_0                        # extrapolated to current-off
+    return abs((v_pulse_last - v0_plus) / i_pulse)
+
+
+# Window (s) of the pulse rise used for the onset-extrapolated R0. The whole 20 s
+# pulse is densely sampled (~0.18 s), so the fast rise is well resolved; a window
+# a little longer than a few tau1 anchors the t=0 intercept without letting slow
+# SOC drift over a long pulse bias it.
+EXTRAP_ONSET_WINDOW_S = 20.0
+
+
+def _extrap_onset_r0(t, v, t_p, i_pulse, ocv_pre, window_s=EXTRAP_ONSET_WINDOW_S,
+                     r0_cap=None):
+    """Onset-extrapolated R0 — pure ohmic step read from the *densely-sampled* rise.
+
+    The rest->pulse transition is on the fine (~0.18 s) pulse cadence, so unlike
+    the termination extrapolation (which fights the coarse ~0.8 s rest) the fast
+    branch is directly resolved here. Fit the first ``window_s`` s of the pulse to
+    the 2RC charging curve with OCV anchored at the settled pre-pulse voltage::
+
+        V(t) = ocv_pre + I*R0 + I*R1*(1-e^{-t/tau1}) + I*R2*(1-e^{-t/tau2})
+
+    and read R0 (the t=0 intercept above OCV) directly. Because the intercept is
+    anchored by the dense early samples, this is the most reproducible pure-ohmic
+    R0 for coarse-rest data — cross-checked against ``_extrap_termination_r0`` (the
+    two land on the same value when both are well-posed). Returns ``np.nan`` when
+    the early rise is too short to fit.
+
+    ``r0_cap`` (when given, the fixed-window R_DC,0.5s) bounds the intercept from
+    above: the pure-ohmic R0 is ohmic-only and R_DC,Δt is ohmic + the fast-RC
+    overpotential grown within Δt, so R0 <= R_DC,Δt by construction. Capping the
+    R0 bound at R_DC,0.5s and seeding from it keeps the intercept from swapping
+    magnitude with the fast branch across check-ups (the vs-SOH rumble).
+    """
+    t = np.asarray(t, dtype=float)
+    v = np.asarray(v, dtype=float)
+    rise = (t > 0) & (t <= min(t_p, window_s))
+    tt, vv = t[rise], v[rise]
+    if len(tt) < 8:
+        return np.nan
+
+    def model(x, r0, r1, tau1, r2, tau2):
+        eta1 = i_pulse * r1 * (1.0 - np.exp(-x / tau1))
+        eta2 = i_pulse * r2 * (1.0 - np.exp(-x / tau2))
+        return ocv_pre + i_pulse * r0 + eta1 + eta2
+
+    # R0 upper bound: R_DC,0.5s when supplied (physical ceiling), else the loose
+    # default. A hair of slack (2 %) above the cap absorbs measurement noise.
+    r0_hi = 0.2
+    r0_seed = 0.02
+    if r0_cap is not None and np.isfinite(r0_cap) and r0_cap > 0:
+        r0_hi = min(0.2, r0_cap * 1.02)
+        r0_seed = min(r0_hi, 0.8 * r0_cap)
+    bounds = ([1e-4, 1e-5, 0.2, 1e-5, 20.0], [r0_hi, 1.0, 60.0, 1.0, 6000.0])
+    best, brmse = None, np.inf
+    for tau1_0, tau2_0 in [(5.0, 200.0), (2.0, 30.0), (8.0, 60.0), (3.0, 100.0)]:
+        try:
+            popt, _ = curve_fit(model, tt, vv, p0=[r0_seed, 0.01, tau1_0, 0.01, tau2_0],
+                                bounds=bounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((model(tt, *popt) - vv) ** 2)))
+        if rmse < brmse:
+            best, brmse = popt, rmse
+    if best is None:
+        return np.nan
+    return abs(best[0])
+
+
+# Rest time (s) after which the fast branch has effectively decayed, so the
+# relaxation is slow-branch-only — used to isolate R2/tau2 before reconstructing
+# the slow branch's contribution *during* the pulse.
+STAGED_SLOW_CUT_S = 5.0
+
+
+def _staged_branches(t, v, t_p, i_pulse, ocv_pre, r0):
+    """Coupled staged 2RC decomposition — each branch read where it is resolved.
+
+    A fraction of the slow branch already builds up *during* the pulse (up to tens
+    of %  of R2, several mV by t_p), so the dense onset rise is **not** fast-only.
+    This fit removes that overlap explicitly:
+
+    1. **Slow branch from the relaxation.** Past ``STAGED_SLOW_CUT_S`` s the fast
+       branch has decayed, so the (coarsely sampled, but tau2 >> 0.8 s) rest tail
+       is pure slow decay: fit ``V = OCV + A2 e^{-t'/tau2}``. The slow amplitude at
+       current-off is ``A2`` (tau2 >> the cut, so it is ~unchanged over it), giving
+       ``R2 = A2 / (I (1 - e^{-t_p/tau2}))`` via the pulse development factor.
+    2. **Reconstruct the slow ramp in the pulse** ``eta2(t) = I R2 (1-e^{-t/tau2})``
+       and subtract it — with the ohmic ``I*r0`` (onset-extrapolated) — from the
+       dense onset rise.
+    3. **Fast branch from the residual onset** (0.18 s cadence):
+       ``resid(t) = I R1 (1-e^{-t/tau1})`` -> clean R1, tau1.
+
+    Returns ``{R1_fast, tau1_fast, R2_slow, tau2_slow, staged_rmse_mV}`` (the RMSE
+    is the full pulse+relaxation curve re-simulated from the staged params, so it
+    is comparable to the joint fit's rmse) or ``None`` if either stage fails.
+    """
+    t = np.asarray(t, dtype=float)
+    v = np.asarray(v, dtype=float)
+
+    # --- stage 1: slow branch from the fast-free part of the relaxation ---
+    rest = (t > t_p) & (t - t_p >= STAGED_SLOW_CUT_S)
+    tr, vr = t[rest] - t_p, v[rest]
+    if len(tr) < 8:
+        return None
+    v_settled = float(vr[-1])
+
+    def slow(tt, ocv, a2, tau2):
+        return ocv + a2 * np.exp(-tt / tau2)
+
+    sbounds = ([v_settled - 0.5, -0.5, 20.0], [v_settled + 0.5, 0.5, 6000.0])
+    a0 = float(vr[0] - v_settled)
+    best_s, rmse_s = None, np.inf
+    for tau2_0 in (60.0, 150.0, 400.0, 1000.0):
+        try:
+            popt, _ = curve_fit(slow, tr, vr, p0=[v_settled, a0, tau2_0],
+                                bounds=sbounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((slow(tr, *popt) - vr) ** 2)))
+        if rmse < rmse_s:
+            best_s, rmse_s = popt, rmse
+    if best_s is None:
+        return None
+    ocv_post, a2, tau2 = best_s          # ocv_post = relaxation asymptote (settled OCV)
+    # A2 is the slow amplitude at t'=0 (current-off, extrapolated across the cut).
+    # It was built over the pulse: A2 = I*R2*(1 - e^{-t_p/tau2}) -> solve for R2.
+    dev2 = 1.0 - np.exp(-t_p / tau2)
+    if abs(dev2) < 1e-6:
+        return None
+    r2 = a2 / (i_pulse * dev2)
+
+    # --- stage 2+3: subtract ohmic + OCV ramp + reconstructed slow ramp, fit fast ---
+    onset = (t > 0) & (t <= t_p)
+    to, vo = t[onset], v[onset]
+    if len(to) < 8:
+        return None
+    # OCV ramps ocv_pre -> ocv_post over the pulse as SOC moves (matters at low SOC
+    # where the OCV curve is steep); remove it so it does not leak into the fast RC.
+    ocv_ramp = ocv_pre + (ocv_post - ocv_pre) * np.clip(to / t_p, 0.0, 1.0)
+    eta2_pulse = i_pulse * r2 * (1.0 - np.exp(-to / tau2))
+    resid = vo - ocv_ramp - i_pulse * r0 - eta2_pulse
+
+    def fast(tt, r1, tau1):
+        return i_pulse * r1 * (1.0 - np.exp(-tt / tau1))
+
+    fbounds = ([1e-5, 0.2], [1.0, 60.0])
+    best_f, rmse_f = None, np.inf
+    for tau1_0 in (1.0, 2.0, 5.0, 10.0):
+        try:
+            popt, _ = curve_fit(fast, to, resid, p0=[0.01, tau1_0],
+                                bounds=fbounds, maxfev=20000)
+        except (RuntimeError, ValueError):
+            continue
+        rmse = float(np.sqrt(np.mean((fast(to, *popt) - resid) ** 2)))
+        if rmse < rmse_f:
+            best_f, rmse_f = popt, rmse
+    if best_f is None:
+        return None
+    r1, tau1 = best_f
+
+    # order fast < slow (guard against a swapped/degenerate slow branch)
+    if tau1 > tau2:
+        return None
+    # full-curve validation: reconstruct the whole window from the staged params
+    # with the same OCV-ramp model the joint fit uses, so staged_rmse is comparable.
+    vsim = _v_2rc(t, ocv_post, r0, r1, tau1, r2, tau2,
+                  i_pulse=i_pulse, t_p=t_p, ocv_pre=ocv_pre)
+    staged_rmse = float(np.sqrt(np.mean((vsim - v) ** 2)) * 1000)
+    return {
+        "R1_fast_ohm": round(r1, 5),
+        "tau1_fast_s": round(tau1, 3),
+        "R2_slow_ohm": round(r2, 5),
+        "tau2_slow_s": round(tau2, 2),
+        "staged_rmse_mV": round(staged_rmse, 3),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2RC + finite-length Warburg (transmissive Ws) extension
+# ---------------------------------------------------------------------------
+# Number of terms kept in the transmissive-FLW step-response series. The n-th
+# odd term decays as exp(-n^2 ...), so the sum converges quadratically; 20 odd
+# terms is exact to well below the fit noise for any t.
+WARBURG_N_TERMS = 20
+
+
+def _warburg_step(t, tau_d, n_terms=WARBURG_N_TERMS):
+    """Dimensionless step response g(t) of a finite-length transmissive Warburg.
+
+    The finite-length *transmissive* (short/absorbing terminus) Warburg element
+    has impedance ``Z_Ws = R_d * tanh(sqrt(jω τ_d)) / sqrt(jω τ_d)`` — the proper
+    distributed diffusion branch that the lumped slow RC only approximates (see
+    ``2RC_parameters_research_notes.md`` §2.3/§3.2). Its unit current-step voltage
+    response is ``I * R_d * g(t)`` with::
+
+        g(t) = 1 - (8/π²) Σ_{k=0..} 1/(2k+1)² · exp(-(2k+1)² π² t / (4 τ_d))
+
+    ``g(0)=0`` (Σ 1/(2k+1)² = π²/8), ``g(∞)=1`` (settles to the DC resistance
+    ``R_d``), and the early rise is ∝ √t — the diffusion signature a single RC
+    cannot reproduce. ``τ_d = L²/D`` is the diffusion time constant. Bounded and
+    settling, so it fits both the pulse and the 30-min relaxation asymptote.
+    """
+    t = np.asarray(t, dtype=float)
+    acc = np.zeros_like(t)
+    for k in range(n_terms):
+        m = 2 * k + 1
+        acc += np.exp(-(m ** 2) * np.pi ** 2 * np.maximum(t, 0.0) / (4.0 * tau_d)) / m ** 2
+    g = 1.0 - (8.0 / np.pi ** 2) * acc
+    return np.where(t > 0, g, 0.0)
+
+
+def _v_2rc_warburg(t, ocv_post, r0, r1, tau1, r2, tau2, r_d, tau_d,
+                   *, i_pulse, t_p, ocv_pre):
+    """Terminal voltage of a 2RC **+ finite-length Warburg** cell for one pulse+rest.
+
+    Extends ``_v_2rc`` (OCV ramp + ohmic + two RC branches) with a transmissive
+    Warburg diffusion branch added by superposition, exactly as the RC branches
+    build up during the pulse and decay after it: the response to a current step
+    ``+I`` at t=0 minus the step ``+I`` removed at ``t_p``::
+
+        during pulse (t ≤ t_p):  η_W = I R_d g(t)
+        during rest  (t > t_p):  η_W = I R_d (g(t) - g(t - t_p))
+
+    ``g`` is the transmissive-FLW step response (``_warburg_step``).
+    """
+    base = _v_2rc(t, ocv_post, r0, r1, tau1, r2, tau2,
+                  i_pulse=i_pulse, t_p=t_p, ocv_pre=ocv_pre)
+    t = np.asarray(t, dtype=float)
+    during = t <= t_p
+    g_now = _warburg_step(t, tau_d)
+    g_off = np.where(during, 0.0, _warburg_step(t - t_p, tau_d))
+    eta_w = i_pulse * r_d * (g_now - g_off)
+    return base + eta_w
+
+
+def _fit_2rc_warburg(t, v, t_p, i_pulse, ocv_pre, r0, v_rest, r0_guess):
+    """Joint 2RC + finite-length-Warburg fit (R0 pinned). Returns a dict or None.
+
+    Fits ``{OCV, R1, τ1, R2, τ2, R_d, τ_d}`` over the same pulse+relaxation window
+    the 2RC fit uses, with R0 held at the pinned R_DC value so the Warburg result
+    is directly comparable to the 2RC one. Multi-start over (τ1, τ2, τ_d) seeds —
+    the extra diffusion branch adds a slow-RC↔Warburg trade-off, so a single start
+    is unreliable; the lowest-RMSE fit is kept. ``_vfit_w`` carries the fitted curve
+    for the overlay plot.
+    """
+    tau2_hi = 6000.0
+    tau_d_hi = 20000.0
+
+    def model(tt, ocv_post, r1, tau1, r2, tau2, r_d, tau_d):
+        return _v_2rc_warburg(
+            tt, ocv_post, r0, r1, tau1, r2, tau2, r_d, tau_d,
+            i_pulse=i_pulse, t_p=t_p, ocv_pre=ocv_pre,
+        )
+
+    bounds = (
+        [v_rest - 0.5, 1e-5, 0.2, 1e-5, 20.0, 1e-5, 5.0],
+        [v_rest + 0.5, 1.0, 60.0, 1.0, tau2_hi, 1.0, tau_d_hi],
+    )
+    best_popt, best_rmse = None, np.inf
+    seeds = [(5.0, 200.0), (2.0, 30.0), (8.0, 60.0), (3.0, 100.0)]
+    for tau1_0, tau2_0 in seeds:
+        for tau_d_0 in (100.0, 500.0, 2000.0):
+            p0 = [v_rest, r0_guess, tau1_0, r0_guess, tau2_0, r0_guess, tau_d_0]
+            try:
+                popt, _ = curve_fit(model, t, v, p0=p0, bounds=bounds, maxfev=30000)
+            except (RuntimeError, ValueError):
+                continue
+            rmse = float(np.sqrt(np.mean((model(t, *popt) - v) ** 2)))
+            if rmse < best_rmse:
+                best_popt, best_rmse = popt, rmse
+    if best_popt is None:
+        return None
+
+    ocv, r1, tau1, r2, tau2, r_d, tau_d = best_popt
+    if tau1 > tau2:  # order the two RC branches fast -> slow
+        r1, tau1, r2, tau2 = r2, tau2, r1, tau1
+    # a collapsed Warburg (railed τ_d / vanishing R_d) means the slow RC absorbed
+    # the diffusion branch — flag it, same idea as the 2RC `degenerate` flag.
+    degenerate = bool(tau_d >= 0.999 * tau_d_hi or r_d <= 1e-4 or tau2 >= 0.999 * tau2_hi)
+    return {
+        "OCV_w_V": round(ocv, 4),
+        "R1_w_ohm": round(r1, 5),
+        "tau1_w_s": round(tau1, 3),
+        "R2_w_ohm": round(r2, 5),
+        "tau2_w_s": round(tau2, 2),
+        "R_d_ohm": round(r_d, 5),
+        "tau_d_s": round(tau_d, 2),
+        "C_d_F": round(tau_d / r_d, 1) if r_d else np.nan,
+        "warburg_rmse_mV": round(best_rmse * 1000, 3),
+        "warburg_degenerate": degenerate,
+        "_vfit_w": model(t, *best_popt),
+    }
+
+
 def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v):
     """Fit the 2RC model to one pulse window. Returns a result dict or None."""
     t = (window["Time"] - window["Time"].iloc[0]).dt.total_seconds().to_numpy()
@@ -334,6 +925,25 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
         if pre_rest_v is not None else np.nan
     )
     r_dc_term = _r_dc_delta_t(t, v, i_arr, t_p, R_DC_DELTA_T, v_pulse_last, i_load_last)
+    # Fit-extrapolated termination R0: the ohmic step at current-off with the RC
+    # decay extrapolated back to t=0, so it is free of the raw jump's coarse-rest
+    # sampling-lag bias. Reported as a cadence-independent R0 candidate.
+    r0_extrap_term = _extrap_termination_r0(t, v, t_p, i_pulse, v_pulse_last)
+    # Onset-extrapolated R0: pure ohmic intercept read from the densely-sampled
+    # pulse rise (the fine 0.18 s side), so it does not fight the coarse rest.
+    # Most reproducible pure-ohmic estimate; cross-checks the termination one.
+    r0_extrap_onset = (
+        _extrap_onset_r0(t, v, t_p, i_pulse, pre_rest_v, r0_cap=r_dc_onset)
+        if pre_rest_v is not None else np.nan
+    )
+    # Coupled staged decomposition: slow branch from the relaxation, its in-pulse
+    # contribution removed from the dense onset, then the fast branch — with R0 at
+    # the onset-extrapolated ohmic value. Physical/reproducible params for aging;
+    # the joint fit above stays the simulation model.
+    staged = (
+        _staged_branches(t, v, t_p, i_pulse, ocv_pre, r0_extrap_onset)
+        if np.isfinite(r0_extrap_onset) else None
+    )
 
     tau2_hi = 6000.0
     # Pin R0 to R_DC,Δt (onset preferred -> rested reference). Pinning removes the
@@ -342,7 +952,8 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
     # so R0 absorbs only the sub-second resistance and does not double-count the
     # RC branches. Fall back to the termination R_DC, then the jump, if needed.
     r0 = next(
-        (x for x in (r_dc_onset, r_dc_term, r0_term) if x is not None and np.isfinite(x)),
+        (x for x in (r_dc_onset, r_dc_term, r0_extrap_term, r0_term)
+         if x is not None and np.isfinite(x)),
         r0_term,
     )
 
@@ -387,6 +998,12 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
         if pre_rest_v is not None
         else np.nan
     )
+    # 2RC + finite-length Warburg (transmissive) fit, reported alongside the joint
+    # 2RC — the proper distributed diffusion branch in place of the lumped slow RC
+    # (see 2RC_parameters_research_notes.md §2.3/§3.2). R0 pinned to the same value.
+    warburg = _fit_2rc_warburg(t, v, t_p, i_pulse, ocv_pre, r0, v_rest, r0_guess)
+    vfit_w = warburg.pop("_vfit_w") if warburg else None
+
     # cross-check the onset vs termination R_DC,Δt (the two pinning candidates);
     # they estimate the same resistance and should agree within 10 %.
     r0_consistent = (
@@ -413,11 +1030,34 @@ def fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
         "R_DC_term_ohm": round(r_dc_term, 5) if np.isfinite(r_dc_term) else np.nan,
         "R0_jump_term_ohm": round(r0_term, 5),
         "R0_jump_onset_ohm": round(r0_onset, 5) if not np.isnan(r0_onset) else np.nan,
+        "R0_extrap_term_ohm": round(r0_extrap_term, 5) if np.isfinite(r0_extrap_term) else np.nan,
+        "R0_extrap_onset_ohm": round(r0_extrap_onset, 5) if np.isfinite(r0_extrap_onset) else np.nan,
+        # coupled staged decomposition (R0=onset ohmic, fast from onset, slow from
+        # relaxation); NaN-filled when either stage failed to converge
+        "R0_staged_ohm": round(r0_extrap_onset, 5) if staged is not None else np.nan,
+        "R1_fast_ohm": staged["R1_fast_ohm"] if staged else np.nan,
+        "tau1_fast_s": staged["tau1_fast_s"] if staged else np.nan,
+        "R2_slow_ohm": staged["R2_slow_ohm"] if staged else np.nan,
+        "tau2_slow_s": staged["tau2_slow_s"] if staged else np.nan,
+        "staged_rmse_mV": staged["staged_rmse_mV"] if staged else np.nan,
         "R0_consistent": r0_consistent,
         "rmse_mV": round(rmse_mv, 3),
         "degenerate": degenerate,
+        # 2RC + finite-length Warburg (transmissive Ws) fit; NaN when it failed to
+        # converge. R_d/tau_d are the diffusion resistance / time constant.
+        "OCV_w_V": warburg["OCV_w_V"] if warburg else np.nan,
+        "R1_w_ohm": warburg["R1_w_ohm"] if warburg else np.nan,
+        "tau1_w_s": warburg["tau1_w_s"] if warburg else np.nan,
+        "R2_w_ohm": warburg["R2_w_ohm"] if warburg else np.nan,
+        "tau2_w_s": warburg["tau2_w_s"] if warburg else np.nan,
+        "R_d_ohm": warburg["R_d_ohm"] if warburg else np.nan,
+        "tau_d_s": warburg["tau_d_s"] if warburg else np.nan,
+        "C_d_F": warburg["C_d_F"] if warburg else np.nan,
+        "warburg_rmse_mV": warburg["warburg_rmse_mV"] if warburg else np.nan,
+        "warburg_degenerate": warburg["warburg_degenerate"] if warburg else np.nan,
         "n_points": int(len(t)),
         "_t": t, "_v": v, "_vfit": model(t, *popt),  # for plotting
+        "_vfit_w": vfit_w,
     }
 
 
@@ -592,7 +1232,8 @@ def fit_2rc(labeled, seg_ids, nom_capacity):
         res = fit_one_pulse(window, t_p, i_pulse, v_pulse_last, v_relax_first, pre_rest_v)
         if res is None:
             continue
-        curves.append((seg_id, res.pop("_t"), res.pop("_v"), res.pop("_vfit")))
+        curves.append((seg_id, res.pop("_t"), res.pop("_v"), res.pop("_vfit"),
+                       res.pop("_vfit_w")))
         meta = pulse_rows.iloc[0]
         row = {
             "File": meta["File"],
@@ -742,10 +1383,14 @@ def plot_fits(curves, results, out_png, id_col="pulse_segment_id"):
     ncol = 2
     nrow = (n + ncol - 1) // ncol
     fig, axes = plt.subplots(nrow, ncol, figsize=(11, 3.2 * nrow), squeeze=False)
-    for ax, (seg_id, t, v, vfit) in zip(axes.ravel(), curves):
+    for ax, (seg_id, t, v, vfit, *rest) in zip(axes.ravel(), curves):
         row = results[results[id_col] == seg_id].iloc[0]
         ax.plot(t, v, ".", ms=2, label="measured", color="0.5")
         ax.plot(t, vfit, "-", lw=1.5, label="2RC fit", color="C3")
+        # overlay the 2RC+Warburg fit when present (pulse curves carry it)
+        vfit_w = rest[0] if rest else None
+        if vfit_w is not None:
+            ax.plot(t, vfit_w, "-", lw=1.2, label="2RC+Warburg", color="C0", alpha=0.8)
         ax.set_title(
             f"{row['direction']} {row['I_A']} A | R0={row['R0_ohm']*1000:.1f} mΩ "
             f"R1={row['R1_ohm']*1000:.1f} R2={row['R2_ohm']*1000:.1f} | rmse={row['rmse_mV']:.1f} mV",
@@ -934,10 +1579,339 @@ def plot_vs_soh(results, out_png, title=""):
     logging.info("vs-SOH plot -> %s", out_png)
 
 
+def plot_vs_soc(results, out_png, title=""):
+    """Plot the 2RC parameters vs SOC across a single-checkup SOC sweep.
+
+    Companion to ``plot_vs_soh`` (which walks aging at fixed SOC). Needs the
+    numeric ``SOC_pct`` column from ``assign_pulse_soc``; charge and discharge
+    pulses are drawn as separate series (one line per direction × amplitude), so
+    the CHA/DCH resistance asymmetry is visible. Degenerate fits are hidden.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if "SOC_pct" not in results.columns:
+        logging.info("vs-SOC plot: no SOC_pct column, skipping")
+        return
+    metrics = [
+        ("R0_ohm", "R0 (mΩ)", 1000),
+        ("R1_ohm", "R1 (mΩ)", 1000),
+        ("R2_ohm", "R2 (mΩ)", 1000),
+        ("tau1_s", "τ1 (s)", 1),
+        ("tau2_s", "τ2 (s)", 1),
+        ("rmse_mV", "fit rmse (mV)", 1),
+    ]
+    good = results.dropna(subset=["SOC_pct"])
+    if "degenerate" in good.columns:
+        n_bad = int(good["degenerate"].sum())
+        if n_bad:
+            logging.info("vs-SOC plot: hiding %d degenerate fit(s)", n_bad)
+        good = good[~good["degenerate"]]
+    if good.empty:
+        logging.info("vs-SOC plot: nothing to plot")
+        return
+
+    # one series per (direction, amplitude); DCH cool, CHA warm
+    good = good.copy()
+    good["series"] = good["direction"] + " " + good["pulse_amplitude_A"].round(1).astype(str) + " A"
+    colors = {"DCH": "#2f6fdb", "CHA": "#e08a1e"}
+
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    for ax, (col, label, scale) in zip(axes.ravel(), metrics):
+        for series, g in good.groupby("series"):
+            g = g.sort_values("SOC_pct")
+            direction = g["direction"].iloc[0]
+            ax.plot(g["SOC_pct"], g[col] * scale, "o-", ms=4, label=series,
+                    color=colors.get(direction))
+        ax.set_xlabel("SOC (%)")
+        ax.set_ylabel(label)
+        ax.grid(alpha=0.3)
+    axes.ravel()[0].legend(fontsize=8, title="pulse")
+    fig.suptitle(f"2RC parameters vs SOC — {title}", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    logging.info("vs-SOC plot -> %s", out_png)
+
+
+def plot_warburg_vs_soc(results, out_png, title=""):
+    """Plot all 7 2RC+Warburg parameters vs SOC across a single-checkup sweep.
+
+    SOC-sweep companion to ``plot_warburg_vs_soh``: the finite-length-Warburg
+    parameter set — R0 (pinned ohmic), the two RC branches (R1/τ1, R2/τ2) and the
+    diffusion branch (R_d/τ_d) — plus ``warburg_rmse_mV`` on a 2×4 grid, with
+    charge and discharge pulses as separate series. Needs the numeric ``SOC_pct``
+    column from ``assign_pulse_soc``; rows where the Warburg fit did not converge
+    (NaN) or collapsed (``warburg_degenerate``) are hidden.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if "SOC_pct" not in results.columns:
+        logging.info("Warburg vs-SOC plot: no SOC_pct column, skipping")
+        return
+    if "R_d_ohm" not in results.columns:
+        logging.info("Warburg vs-SOC plot: no Warburg columns, skipping")
+        return
+    metrics = [
+        ("R0_ohm", "R0 ohmic (mΩ)", 1000),
+        ("R1_w_ohm", "R1 (mΩ)", 1000),
+        ("tau1_w_s", "τ1 (s)", 1),
+        ("R2_w_ohm", "R2 (mΩ)", 1000),
+        ("tau2_w_s", "τ2 (s)", 1),
+        ("R_d_ohm", "R_d diffusion (mΩ)", 1000),
+        ("tau_d_s", "τ_d diffusion (s)", 1),
+        ("warburg_rmse_mV", "2RC+W rmse (mV)", 1),
+    ]
+    good = results.dropna(subset=["SOC_pct", "R_d_ohm", "tau_d_s"])
+    if "warburg_degenerate" in good.columns:
+        good = good[good["warburg_degenerate"] != True]  # noqa: E712 — keep False/NaN
+    n_drop = len(results) - len(good)
+    if n_drop:
+        logging.info("Warburg vs-SOC plot: hiding %d non-converged/degenerate fit(s)", n_drop)
+    if good.empty:
+        logging.info("Warburg vs-SOC plot: nothing to plot")
+        return
+
+    good = good.copy()
+    good["series"] = good["direction"] + " " + good["pulse_amplitude_A"].round(1).astype(str) + " A"
+    colors = {"DCH": "#2f6fdb", "CHA": "#e08a1e"}
+
+    fig, axes = plt.subplots(2, 4, figsize=(18, 8))
+    for ax, (col, label, scale) in zip(axes.ravel(), metrics):
+        for series, g in good.groupby("series"):
+            g = g.sort_values("SOC_pct")
+            direction = g["direction"].iloc[0]
+            ax.plot(g["SOC_pct"], g[col] * scale, "o-", ms=4, label=series,
+                    color=colors.get(direction))
+        ax.set_xlabel("SOC (%)")
+        ax.set_ylabel(label)
+        ax.grid(alpha=0.3)
+    axes.ravel()[0].legend(fontsize=8, title="pulse")
+    fig.suptitle(f"2RC + finite-length Warburg vs SOC — {title}", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    logging.info("Warburg vs-SOC plot -> %s", out_png)
+
+
+def plot_staged_vs_soh(results, out_png, title=""):
+    """Plot the coupled staged decomposition (pure-ohmic R0 + fast/slow branches) vs SOH.
+
+    Companion to ``plot_vs_soh`` (which shows the joint-fit params). Uses the
+    ``R0_staged``/``R1_fast``/``R2_slow`` columns — the physically-separated set —
+    and hides rows where the staged fit did not converge (NaN) or whose full-curve
+    ``staged_rmse_mV`` shows it did not reconstruct the pulse.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if "R0_staged_ohm" not in results.columns:
+        logging.info("staged vs-SOH plot: no staged columns, skipping")
+        return
+    metrics = [
+        ("R0_staged_ohm", "R0 ohmic (mΩ)", 1000),
+        ("R1_fast_ohm", "R1 fast (mΩ)", 1000),
+        ("tau1_fast_s", "τ1 fast (s)", 1),
+        ("R2_slow_ohm", "R2 slow (mΩ)", 1000),
+        ("tau2_slow_s", "τ2 slow (s)", 1),
+        ("staged_rmse_mV", "staged rmse (mV)", 1),
+    ]
+    # keep only rows where the staged fit converged and reconstructed the curve
+    good = results.dropna(subset=["R0_staged_ohm", "R1_fast_ohm", "R2_slow_ohm"])
+    # also drop ill-posed R0 estimates: a collapsed joint 2RC branch (degenerate)
+    # and pulses whose onset/termination R_DC disagree (R0_consistent False) both
+    # make the extrapolated ohmic intercept unreliable and cause the vs-SOH rumble.
+    if "degenerate" in good.columns:
+        good = good[~good["degenerate"].fillna(False)]
+    if "R0_consistent" in good.columns:
+        good = good[good["R0_consistent"] != False]  # noqa: E712 — keep True and NaN
+    n_drop = len(results) - len(good)
+    if n_drop:
+        logging.info("staged vs-SOH plot: hiding %d unreliable/non-converged staged fit(s)", n_drop)
+    if good.empty:
+        logging.info("staged vs-SOH plot: nothing to plot")
+        return
+
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    for ax, (col, label, scale) in zip(axes.ravel(), metrics):
+        for ptype, g in good.groupby("pulse_type"):
+            g = g.sort_values("SOH_num")
+            ax.plot(g["SOH_num"], g[col] * scale, "o-", ms=4, label=ptype)
+        ax.set_xlabel("SOH (%)")
+        ax.set_ylabel(label)
+        ax.invert_xaxis()  # aging reads left (fresh) -> right (aged)
+        ax.grid(alpha=0.3)
+    axes.ravel()[0].legend(fontsize=8, title="pulse")
+    fig.suptitle(f"Staged 2RC (pure-ohmic R0 + fast/slow) vs SOH — {title}", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    logging.info("staged vs-SOH plot -> %s", out_png)
+
+
+def plot_warburg_vs_soh(results, out_png, title=""):
+    """Plot all 7 2RC+Warburg parameters vs SOH (+ the fit RMSE).
+
+    Companion to ``plot_vs_soh``. Shows the full parameter set of the
+    finite-length-Warburg fit — R0 (pinned ohmic), the two RC branches
+    (R1/τ1, R2/τ2) and the diffusion branch (R_d/τ_d) — plus ``warburg_rmse_mV``,
+    on a 2×4 grid. Rows where the Warburg fit did not converge (NaN) or collapsed
+    (``warburg_degenerate``) are hidden.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if "R_d_ohm" not in results.columns:
+        logging.info("Warburg vs-SOH plot: no Warburg columns, skipping")
+        return
+    # all 7 model parameters (R0 is pinned -> the shared R0_ohm column) + fit rmse
+    metrics = [
+        ("R0_ohm", "R0 ohmic (mΩ)", 1000),
+        ("R1_w_ohm", "R1 (mΩ)", 1000),
+        ("tau1_w_s", "τ1 (s)", 1),
+        ("R2_w_ohm", "R2 (mΩ)", 1000),
+        ("tau2_w_s", "τ2 (s)", 1),
+        ("R_d_ohm", "R_d diffusion (mΩ)", 1000),
+        ("tau_d_s", "τ_d diffusion (s)", 1),
+        ("warburg_rmse_mV", "2RC+W rmse (mV)", 1),
+    ]
+    good = results.dropna(subset=["R_d_ohm", "tau_d_s"])
+    if "warburg_degenerate" in good.columns:
+        good = good[good["warburg_degenerate"] != True]  # noqa: E712 — keep False/NaN
+    n_drop = len(results) - len(good)
+    if n_drop:
+        logging.info("Warburg vs-SOH plot: hiding %d non-converged/degenerate fit(s)", n_drop)
+    if good.empty:
+        logging.info("Warburg vs-SOH plot: nothing to plot")
+        return
+
+    fig, axes = plt.subplots(2, 4, figsize=(18, 8))
+    for ax, (col, label, scale) in zip(axes.ravel(), metrics):
+        for ptype, g in good.groupby("pulse_type"):
+            g = g.sort_values("SOH_num")
+            ax.plot(g["SOH_num"], g[col] * scale, "o-", ms=4, label=ptype)
+        ax.set_xlabel("SOH (%)")
+        ax.set_ylabel(label)
+        ax.invert_xaxis()  # aging reads left (fresh) -> right (aged)
+        ax.grid(alpha=0.3)
+    axes.ravel()[0].legend(fontsize=8, title="pulse")
+    fig.suptitle(f"2RC + finite-length Warburg vs SOH — {title}", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    logging.info("Warburg vs-SOH plot -> %s", out_png)
+
+
+def run_cell_folder(folder, args, out_csv=None):
+    """Fit every pulse export in one cell folder and plot the params vs SOH.
+
+    Outputs land beside the data, in the cell folder itself: ``2RC_vs_SOH.csv``
+    plus the joint / staged / Warburg vs-SOH plots. Returns the results frame
+    (empty when nothing fit), so a multi-cell run can concatenate them.
+    """
+    results = fit_folder(
+        folder, args.nom_capacity, args.remove_pulse_before_min, args.exclude_zc
+    )
+    if results.empty:
+        logging.warning("no pulses fit in %s", folder)
+        return results
+
+    folder_title = os.path.basename(os.path.normpath(folder))
+    pd.set_option("display.width", 200, "display.max_columns", 30)
+    cols = ["BM_Programm", "SOH_num", "pulse_type", "R0_ohm", "R1_ohm",
+            "tau1_s", "R2_ohm", "tau2_s", "rmse_mV"]
+    print(f"\n=== 2RC parameters across folder — {folder_title} ===")
+    print(results[cols].to_string(index=False))
+
+    out_csv = out_csv or os.path.join(folder, "2RC_vs_SOH.csv")
+    results.to_csv(out_csv, index=False)
+    logging.info("combined results -> %s", out_csv)
+
+    plot_vs_soh(results, os.path.join(folder, "2RC_vs_SOH.png"), title=folder_title)
+    plot_staged_vs_soh(
+        results, os.path.join(folder, "2RC_staged_vs_SOH.png"), title=folder_title,
+    )
+    plot_warburg_vs_soh(
+        results, os.path.join(folder, "2RC_warburg_vs_SOH.png"), title=folder_title,
+    )
+    return results
+
+
+def run_all_cells(battery_cfg, args):
+    """Fit every cell folder under ``<working_path>/20_export_pulse``.
+
+    One ``run_cell_folder`` pass per cell stem, each writing its own CSV/plots,
+    plus a combined table with a ``cell`` column at the export root. A cell that
+    raises is logged and skipped so one bad export cannot abort the fleet run.
+
+    Without ``--cell`` the selection falls back to the config's ``type_cell``
+    fragment (``main.py``'s own convention). This matters: one ``working_path``
+    can hold several chemistries side by side, and ``nom_capacity`` comes from
+    the config — fitting an A123 folder with a VTC6 capacity silently
+    misnormalizes every C-rate.
+    """
+    cell_filters = args.cell
+    if not cell_filters and battery_cfg.get("type_cell"):
+        cell_filters = [battery_cfg["type_cell"]]
+        logging.info("no --cell: restricting to type_cell=%r", cell_filters[0])
+    folders = resolve_cell_folders(battery_cfg, cell_filters)
+    frames, failed = [], []
+    for folder in folders:
+        cell = os.path.basename(os.path.normpath(folder))
+        logging.info("=== %s ===", cell)
+        try:
+            results = run_cell_folder(folder, args)
+        except Exception as exc:  # noqa: BLE001 — one cell must not kill the run
+            logging.warning("%s: fit failed (%s)", cell, exc)
+            failed.append(cell)
+            continue
+        if results.empty:
+            continue
+        frames.append(results.assign(cell=cell))
+
+    if not frames:
+        logging.warning("no pulses fit in any of the %d cell folder(s)", len(folders))
+        return
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined[["cell"] + [c for c in combined.columns if c != "cell"]]
+    root = os.path.join(battery_cfg["working_path"], PULSE_EXPORT_DIR)
+    out_csv = args.out or os.path.join(root, "2RC_vs_SOH_all_cells.csv")
+    combined.to_csv(out_csv, index=False)
+    logging.info(
+        "%d cell(s), %d pulse fit(s) -> %s",
+        combined["cell"].nunique(), len(combined), out_csv,
+    )
+    if failed:
+        logging.warning("%d cell(s) failed: %s", len(failed), ", ".join(failed))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Fit a 2RC ECM to HPPC pulse exports.")
-    ap.add_argument("parquet", nargs="?", default=DEFAULT_FILE, help="pulse parquet")
-    ap.add_argument("--nom-capacity", type=float, default=3.0, help="Ah (VTC6=3.0)")
+    ap.add_argument(
+        "parquet", nargs="?",
+        help="pulse parquet, or a cell folder of them. Omit and pass "
+        "--battery-config to fit every cell under <working_path>/20_export_pulse.",
+    )
+    ap.add_argument(
+        "--battery-config",
+        help="the pipeline battery config (as given to main.py): supplies "
+        "working_path (-> 20_export_pulse/<cell_stem>/) and nom_capacity",
+    )
+    ap.add_argument(
+        "--cell", nargs="*",
+        help="with --battery-config: only cells whose folder name contains one "
+        "of these fragments (same semantics as main.py --cells). Default: all.",
+    )
+    ap.add_argument(
+        "--nom-capacity", type=float,
+        help=f"Ah (VTC6={DEFAULT_NOM_CAPACITY}). Default: from --battery-config, "
+        f"else {DEFAULT_NOM_CAPACITY}. A --config value wins over both.",
+    )
     ap.add_argument(
         "--remove-pulse-before-min", type=float, default=REMOVE_PULSE_BEFORE_MIN,
         help="drop pulses earlier than this many minutes into a cycle (0=keep all)",
@@ -946,7 +1920,16 @@ def main():
         "--exclude-zc", nargs="*", default=EXCLUDE_ZUSTAND_CURRENT,
         help="Zustand/Current labels to exclude from the fit (e.g. DCH/-1.5)",
     )
-    ap.add_argument("-o", "--out", help="output CSV (default: <stem>_2RC.csv)")
+    ap.add_argument(
+        "--config",
+        help="dedicated 2RC JSON config (see config_2rc_example.json): pulse gate, "
+        "nom_capacity and SOC-sweep params. Config values win over the flag defaults.",
+    )
+    ap.add_argument(
+        "-o", "--out",
+        help="output CSV (default: <stem>_2RC.csv; per-folder 2RC_vs_SOH.csv; "
+        "all-cells 2RC_vs_SOH_all_cells.csv at the export root)",
+    )
     ap.add_argument("--plot", action="store_true", help="also save a fit overlay PNG")
     ap.add_argument(
         "--validate", action="store_true",
@@ -959,6 +1942,46 @@ def main():
         "{OCV,R1,tau1,R2,tau2} from the relaxation and reverse-calc R0.",
     )
     args = ap.parse_args()
+
+    # nom_capacity precedence: --config (cell-specific) > --nom-capacity >
+    # battery config > module default.
+    battery_cfg = {}
+    if args.battery_config:
+        battery_cfg = load_battery_config(args.battery_config)
+        if args.nom_capacity is None and battery_cfg.get("nom_capacity") is not None:
+            args.nom_capacity = float(battery_cfg["nom_capacity"])
+
+    # A dedicated config overrides the module tunables (applied to globals) and the
+    # flag defaults for nom_capacity / exclude-zc / remove-before.
+    cfg = {}
+    if args.config:
+        cfg = load_2rc_config(args.config)
+        if cfg.get("nom_capacity") is not None:
+            args.nom_capacity = cfg["nom_capacity"]
+        args.exclude_zc = EXCLUDE_ZUSTAND_CURRENT
+        args.remove_pulse_before_min = REMOVE_PULSE_BEFORE_MIN
+
+    if args.nom_capacity is None:
+        args.nom_capacity = DEFAULT_NOM_CAPACITY
+    logging.info("nom_capacity = %.3f Ah", args.nom_capacity)
+
+    # No explicit path: fit every cell folder the battery config points at.
+    if args.parquet is None:
+        if not battery_cfg:
+            ap.error(
+                "give a pulse parquet/folder, or --battery-config <cfg.json> to "
+                "fit every cell under <working_path>/20_export_pulse"
+            )
+        if args.relax:
+            ap.error("--relax needs an explicit path (it reads cycling data, "
+                     "not the pulse exports)")
+        try:
+            run_all_cells(battery_cfg, args)
+        except (FileNotFoundError, ValueError) as exc:
+            ap.error(str(exc))  # a config/layout problem, not a stack trace
+        return
+    if args.cell:
+        logging.info("--cell ignored: an explicit path was given")
 
     # Relaxation mode: fit rest curves (cycling data), not HPPC pulses.
     if args.relax:
@@ -994,24 +2017,7 @@ def main():
 
     # Folder mode: fit every pulse file and plot the parameters vs SOH.
     if os.path.isdir(args.parquet):
-        results = fit_folder(
-            args.parquet, args.nom_capacity, args.remove_pulse_before_min, args.exclude_zc
-        )
-        if results.empty:
-            logging.warning("no pulses fit in %s", args.parquet)
-            return
-        pd.set_option("display.width", 200, "display.max_columns", 30)
-        cols = ["BM_Programm", "SOH_num", "pulse_type", "R0_ohm", "R1_ohm",
-                "tau1_s", "R2_ohm", "tau2_s", "rmse_mV"]
-        print("\n=== 2RC parameters across folder ===")
-        print(results[cols].to_string(index=False))
-        out_csv = args.out or os.path.join(args.parquet, "2RC_vs_SOH.csv")
-        results.to_csv(out_csv, index=False)
-        logging.info("combined results -> %s", out_csv)
-        plot_vs_soh(
-            results, os.path.join(args.parquet, "2RC_vs_SOH.png"),
-            title=os.path.basename(os.path.normpath(args.parquet)),
-        )
+        run_cell_folder(args.parquet, args, out_csv=args.out)
         return
 
     df = pd.read_parquet(args.parquet)
@@ -1035,6 +2041,16 @@ def main():
         logging.warning("no pulses fit")
         return
 
+    # SOC-sweep labeling: attach amplitude / direction / numeric SOC per pulse and,
+    # when it resolves, plot the 2RC parameters vs SOC (a single-checkup sweep).
+    soc_seg = assign_pulse_soc(labeled, args.nom_capacity)
+    if not soc_seg.empty:
+        results = results.merge(
+            soc_seg[["pulse_segment_id", "pulse_amplitude_A", "pulse_C_rate",
+                     "soc_plateau", "SOC_pct"]],
+            on="pulse_segment_id", how="left",
+        )
+
     pd.set_option("display.width", 200, "display.max_columns", 30)
     print("\n=== 2RC fit results ===")
     print(results.to_string(index=False))
@@ -1046,6 +2062,11 @@ def main():
 
     if args.plot:
         plot_fits(curves, results, f"{stem}_2RC.png")
+        if "SOC_pct" in results.columns and results["SOC_pct"].notna().any():
+            plot_vs_soc(results, f"{stem}_2RC_vs_SOC.png",
+                        title=os.path.basename(stem))
+            plot_warburg_vs_soc(results, f"{stem}_2RC_warburg_vs_SOC.png",
+                                title=os.path.basename(stem))
 
     if args.validate:
         val_df, val_curves = validate_loo(records)

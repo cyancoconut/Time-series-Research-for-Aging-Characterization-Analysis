@@ -24,6 +24,7 @@ from analysis.fit_2rc_pulse import fit_one_relaxation
 from analysis.simulate_cycle_from_partial import CELL as DEFAULT_CELL
 from analysis.simulate_cycle_from_partial import CYCLING_FILE as DEFAULT_CYCLING_FILE
 from analysis.simulate_cycle_from_partial import DATA, NOM
+from analysis.simulate_cycle_soc_interp_rc import block_throughput, discover_checkups
 
 # Default cycling rate is ~C/2 (1.4 A): CHA pulses exist at C/2 (rate-matched),
 # DCH pulses only at 1C (3.0 A). Override with --pulse-rate.
@@ -102,7 +103,7 @@ def main():
     direction = args.direction
     cell = args.cell
     rate = args.pulse_rate if args.pulse_rate is not None else DEFAULT_PULSE_RATE[direction]
-    rate_str = f"{rate:g}"
+    rate_str = f"{rate:.1f}"                       # match CSV convention ("3.0A", "1.5A")
     pulse_type = f"{direction} {rate_str}A @{args.pulse_soc}"
 
     pairs = extract_cycle_pauses(args.cycling_file, direction)
@@ -126,6 +127,18 @@ def main():
     relax = pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
     pulse = pulse_r0(cell, args.adjacent_bms, pulse_type)
 
+    # check-up-interpolated R0 at each cycle: map the cycle time onto the
+    # cumulative-throughput axis, then linearly blend the pulse-test R0 between
+    # the bracketing check-ups (same interpolation as the ECM in
+    # simulate_cycle_soc_interp_rc -- here applied to R0 only).
+    checkups = discover_checkups(cell, pulse_type)
+    thr_cycles = np.array([block_throughput(t, checkups) for t in relax["time"]])
+    relax["throughput_Ah"] = thr_cycles
+    relax["R0_checkup_interp_ohm"] = np.interp(
+        thr_cycles, checkups["throughput"], checkups["R0_ohm"])
+    relax["R0_jump_checkup_interp_ohm"] = np.interp(
+        thr_cycles, checkups["throughput"], checkups["R0_jump_ohm"])
+
     pd.set_option("display.width", 200, "display.max_columns", 20)
     print("\n=== %s relaxation R0 over the block (every %d cycles) ===" % (direction, args.every))
     print(relax.to_string(index=False))
@@ -144,6 +157,8 @@ def main():
             label="relaxation R0 (fit-extrapolated)")
     ax.plot(relax["time"], relax["R0_jump_ohm"] * 1000, "x--", color="C0", ms=5,
             alpha=0.5, label="relaxation R0 (model-free jump)")
+    ax.plot(relax["time"], relax["R0_checkup_interp_ohm"] * 1000, "-", color="C2", lw=2,
+            label="check-up-interpolated R0 (throughput axis)")
     for _, p in pulse.iterrows():
         ax.plot(p["time"], p["R0_ohm"] * 1000, "*", color="C3", ms=18,
                 label=f"pulse BM{int(p['BM'])} R0 ({p['SOH']:.1f}% SOH)")

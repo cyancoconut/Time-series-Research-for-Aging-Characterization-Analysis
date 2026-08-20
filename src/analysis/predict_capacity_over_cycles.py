@@ -31,9 +31,72 @@ from analysis.simulate_cycle_from_partial import (
     CYCLING_FILE,
     DATA,
     NOM,
+    V_MIN,
     _cum_ah,
+    ah_of_ocv,
     load_reference,
+    ocv_of,
 )
+from analysis.simulate_cycle_soc_interp_rc import (
+    block_throughput,
+    discover_checkups,
+    interp_reference,
+)
+
+
+def _interp_ecm(cell, cycle_time, checkups):
+    """Check-up-interpolated (soc_grid, ocv, rc) at a cycle's aging state.
+
+    Maps the cycle timestamp onto the cumulative-throughput axis, blends the
+    qOCV shape + @50% RC between the bracketing check-ups, and returns them in
+    the same (soc_grid 1->0, ocv, rc) form ``predict_from_partial`` expects.
+    """
+    thr = block_throughput(cycle_time, checkups)
+    rc_c, _soh, grid_c, ocv_c, _meta = interp_reference(cell, thr, checkups)
+    soc_grid_c = 1.0 - grid_c / grid_c[-1]
+    return soc_grid_c, ocv_c, rc_c, thr, grid_c
+
+
+def _simulate_tail_to_cutoff(grid, ocv, rc, i_abs, ah_start, dt=1.0):
+    """Continue a CC discharge from absolute Ah `ah_start` (on the qOCV Ah grid)
+    at |I| = `i_abs` until the terminal voltage hits V_MIN; return the cutoff Ah.
+
+    RC states start at their settled (fully polarized) values, since the cell was
+    already under load at the partial's end.
+    """
+    i = -abs(i_abs)
+    a1, a2 = np.exp(-dt / rc["tau1_s"]), np.exp(-dt / rc["tau2_s"])
+    v1, v2 = i * rc["R1_ohm"], i * rc["R2_ohm"]
+    ah = ah_start
+    while True:
+        v = ocv_of(ah, grid, ocv) + i * rc["R0_ohm"] + v1 + v2
+        if v <= V_MIN or ah > 1.5 * grid[-1]:
+            return ah
+        v1 = v1 * a1 + i * rc["R1_ohm"] * (1 - a1)
+        v2 = v2 * a2 + i * rc["R2_ohm"] * (1 - a2)
+        ah += abs(i) * dt / 3600.0
+
+
+def capacity_to_cutoff(cyc, grid, ocv, rc):
+    """Method B target: capacity from full to the *loaded* 2.5 V cutoff.
+
+    Trust the measured partial charge over its own span, then simulate only the
+    unmeasured tail from the partial's end down to cutoff (and the small top from
+    full -> partial-start, read off the qOCV):
+
+        capacity = ah_start(full->partial-start, qOCV) + dAh(measured) + tail(simulated)
+
+    Unlike the algebraic dAh/dSOC (which stops at the *rested* 0% SOC), this
+    stops where the under-load voltage hits 2.5 V -- incl. the IR+polarization
+    drop that grows near empty -- so it mirrors a real C/2 capacity test. Leans
+    on the low-SOC RC, which is currently the @50% value held flat.
+    """
+    g = cyc["dch"]
+    t = (g["Zeit"] - g["Zeit"].iloc[0]).dt.total_seconds().to_numpy()
+    i = abs(float(g["Strom"].mean()))
+    d_ah = _cum_ah(t, g["Strom"].to_numpy())[-1]
+    ah_start = ah_of_ocv(g["Spannung"].iloc[0] + i * rc["R0_ohm"], grid, ocv)
+    return _simulate_tail_to_cutoff(grid, ocv, rc, i, ah_start + d_ah)
 
 
 def check_up_capacities(cell):
@@ -122,8 +185,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--every", type=int, default=5, help="predict on every Nth partial cycle")
     ap.add_argument("--ref-bm", type=int, default=7, help="reference check-up BM (OCV shape + RC)")
-    ap.add_argument("--skip-settling", type=int, default=10,
-                    help="skip this many leading (post-check-up settling) cycles before anchoring the calibration")
     args = ap.parse_args()
 
     rc, _, grid, ocv = load_reference(CELL, args.ref_bm)
@@ -142,16 +203,22 @@ def main():
     picks = cycles[:: args.every]
     rows = [predict_from_partial(c, soc_grid, ocv, rc) for c in picks]
     res = pd.DataFrame(rows)
-    # one-time calibration: anchor a *post-settling* cycle to the "before"
-    # check-up's C/2 capacity (a constant offset; the predicted *fade* is
-    # unchanged). Removes the systematic OCV-hysteresis/plateau bias. The first
-    # ~10 cycles after a check-up are a settling transient (v_relax_post drift),
-    # so anchoring on cycle 0 is unreliable -- skip them first.
-    anchor = next((j for j in range(len(picks)) if j * args.every >= args.skip_settling), 0)
-    offset = before["cap_Ah"] - res["cap"].iloc[anchor]
-    res["cap_cal"] = res["cap"] + offset
-    offset_rc = before["cap_Ah"] - res["cap_rc"].iloc[anchor]
-    res["cap_rc_cal"] = res["cap_rc"] + offset_rc
+
+    # check-up-interpolated variant: per cycle, blend the qOCV shape + @50% RC
+    # between the bracketing check-ups at that cycle's throughput, instead of
+    # freezing the BM7 reference. cap (relaxed endpoints) keys on the OCV *shape*
+    # (aging-stable -> little change); cap_rc keys on RC (grows with age -> moves).
+    checkups = discover_checkups(CELL)
+    ci_rows, thr_cycles, capB = [], [], []
+    for c in picks:
+        sg_c, ocv_c, rc_c, thr, grid_c = _interp_ecm(CELL, c["dch"]["Zeit"].iloc[0], checkups)
+        ci_rows.append(predict_from_partial(c, sg_c, ocv_c, rc_c))
+        thr_cycles.append(thr)
+        capB.append(capacity_to_cutoff(c, grid_c, ocv_c, rc_c))   # Method B: simulate to cutoff
+    res["cap_ci"] = [r["cap"] for r in ci_rows]
+    res["cap_rc_ci"] = [r["cap_rc"] for r in ci_rows]
+    res["cap_methodB"] = capB
+    res["throughput_Ah"] = thr_cycles
 
     print(f"reference BM{args.ref_bm}: qOCV cap {cap_ref:.3f} Ah, "
           f"RC R0/R1/R2 = {rc['R0_ohm']*1e3:.1f}/{rc['R1_ohm']*1e3:.1f}/{rc['R2_ohm']*1e3:.1f} mOhm")
@@ -159,37 +226,36 @@ def main():
     print(f"bracket (C/2 capacity from filename SOH): "
           f"BM{before['bm']} {before['date']:%Y-%m-%d} {before['cap_Ah']:.3f} Ah  ->  "
           f"BM{after['bm']} {after['date']:%Y-%m-%d} {after['cap_Ah']:.3f} Ah")
-    print(f"{len(cycles)} partial cycles, predicting every {args.every} -> {len(picks)} cycles")
-    print(f"calibration anchor: cycle {anchor * args.every} ({res['time'].iloc[anchor]:%m-%d %H:%M}), "
-          f"skipping first {args.skip_settling} settling cycles\n")
+    print(f"{len(cycles)} partial cycles, predicting every {args.every} -> {len(picks)} cycles  (raw, no calibration)\n")
     show = res.copy()
     show["time"] = show["time"].dt.strftime("%m-%d %H:%M")
-    print(show[["time", "v0", "v1", "d_ah", "soc0", "soc1", "cap", "cap_rc", "cap_cal"]].round(3).to_string(index=False))
+    print(show[["time", "v0", "v1", "d_ah", "soc0", "soc1", "cap_rc", "cap_rc_ci", "cap_methodB"]].round(3).to_string(index=False))
     print(f"\nrelaxed-pause cap : first {res['cap'].iloc[0]:.3f}  last {res['cap'].iloc[-1]:.3f}  "
           f"(fade {res['cap'].iloc[0]-res['cap'].iloc[-1]:.3f} Ah)")
     print(f"RC-corrected  cap : first {res['cap_rc'].iloc[0]:.3f}  last {res['cap_rc'].iloc[-1]:.3f}  "
           f"(fade {res['cap_rc'].iloc[0]-res['cap_rc'].iloc[-1]:.3f} Ah)")
-    print(f"difference (relax - rc): mean {(res['cap']-res['cap_rc']).mean():+.3f} Ah")
-    print(f"calibrated (relax): first {res['cap_cal'].iloc[0]:.3f}  last {res['cap_cal'].iloc[-1]:.3f}  (offset {offset:+.3f})")
-    print(f"calibrated (rc)   : first {res['cap_rc_cal'].iloc[0]:.3f}  last {res['cap_rc_cal'].iloc[-1]:.3f}  (offset {offset_rc:+.3f})")
-    print(f"vs bracket        : before {before['cap_Ah']:.3f}  after {after['cap_Ah']:.3f} Ah  "
+    print(f"check-up interp: throughput {res['throughput_Ah'].iloc[0]:.1f} -> {res['throughput_Ah'].iloc[-1]:.1f} Ah "
+          f"(bracketing BM{before['bm']}/BM{after['bm']})")
+    print(f"  rc (interp)      : first {res['cap_rc_ci'].iloc[0]:.3f}  last {res['cap_rc_ci'].iloc[-1]:.3f}  "
+          f"(fade {res['cap_rc_ci'].iloc[0]-res['cap_rc_ci'].iloc[-1]:.3f} Ah)")
+    print(f"  method B (cutoff): first {res['cap_methodB'].iloc[0]:.3f}  last {res['cap_methodB'].iloc[-1]:.3f}  "
+          f"(fade {res['cap_methodB'].iloc[0]-res['cap_methodB'].iloc[-1]:.3f} Ah)")
+    print(f"vs bracket         : before {before['cap_Ah']:.3f}  after {after['cap_Ah']:.3f} Ah  "
           f"(actual fade {before['cap_Ah']-after['cap_Ah']:.3f} Ah)")
 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(res["time"], res["cap_cal"], "o-", color="C3", ms=4,
-            label=f"calibrated relaxed ({offset:+.3f} Ah)")
-    ax.plot(res["time"], res["cap_rc_cal"], "s-", color="C1", ms=4,
-            label=f"calibrated @50% RC ({offset_rc:+.3f} Ah)")
-    ax.plot(res["time"], res["cap"], "o--", color="0.6", ms=3, label="raw relaxed pause")
-    ax.plot(res["time"], res["cap_rc"], "s--", color="C4", ms=3, label="raw @50% RC")
+    ax.plot(res["time"], res["cap_rc"], "s-", color="C1", ms=4,
+            label=f"@50% RC, frozen BM{args.ref_bm}")
+    ax.plot(res["time"], res["cap_rc_ci"], "s-", color="C6", ms=4,
+            label="@50% RC, check-up interp")
+    ax.plot(res["time"], res["cap_methodB"], "D-", color="k", ms=4,
+            label="method B sim-to-cutoff, check-up interp")
     for b, c in ((before, "C0"), (after, "C2")):
         ax.scatter(b["date"], b["cap_Ah"], color=c, s=90, zorder=5,
                    label=f"BM{b['bm']} C/2 capacity = {b['cap_Ah']:.3f} Ah")
-    ax.axvline(res["time"].iloc[anchor], color="0.4", ls=":", lw=1,
-               label=f"calibration anchor (cycle {anchor * args.every})")
     ax.set_xlabel("date")
     ax.set_ylabel("capacity (Ah)")
     ax.set_title(f"{CELL}: full capacity predicted from partial cycles vs C/2 check-ups")
