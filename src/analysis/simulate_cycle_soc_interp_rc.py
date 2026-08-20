@@ -23,6 +23,8 @@ Usage (from src/):  python -m analysis.simulate_cycle_soc_interp_rc
 """
 
 import argparse
+import glob
+import re
 
 import numpy as np
 import pandas as pd
@@ -42,6 +44,88 @@ from analysis.simulate_cycle_from_partial import (
 
 # 007 = same VTC6 cell type, full 90/50/10 SOC pulse schema.
 RC_CELL = "METABatt_Sony_Murata_18650VTC6_007"
+
+_RC_KEYS = ("R0_ohm", "R1_ohm", "tau1_s", "R2_ohm", "tau2_s")
+
+
+def discover_checkups(cell, pulse_type="DCH 3.0A @50%"):
+    """All check-ups for `cell`, sorted by cumulative Ah-throughput.
+
+    A check-up qualifies when it has both a `pulse_type` row in
+    ``2RC_vs_SOH.csv`` and a ``qocv_dch`` parquet. Returns a DataFrame with
+    one row per BM_Programm: bm, soh, throughput (qOCV Ah_throughput start),
+    time (qOCV start), qocv_file, the RC params, and the model-free
+    ``R0_jump_ohm``. ``throughput`` is the aging axis; ``time`` lets us place a
+    cycling block between two check-ups. `pulse_type` selects which pulse the RC
+    comes from (DCH/CHA, C-rate, SOC); the throughput axis is direction-agnostic
+    (always the qOCV cumulative throughput).
+    """
+    r = pd.read_csv(f"{DATA}/20_export_pulse/{cell}/2RC_vs_SOH.csv")
+    rc = r[r["pulse_type"] == pulse_type].set_index("BM_Programm")
+    rows = []
+    for qf in glob.glob(f"{DATA}/30_export_qocv/{cell}/*qocv_dch_BM*.parquet"):
+        bm = int(re.search(r"_BM(\d+)_", qf).group(1))
+        if bm not in rc.index:
+            continue
+        q = pd.read_parquet(qf, columns=["Time", "Ah_throughput"])
+        row = rc.loc[bm]
+        rows.append(dict(
+            bm=bm, soh=float(row["SOH_num"]),
+            throughput=float(q["Ah_throughput"].min()),
+            time=pd.to_datetime(q["Time"]).min(), qocv_file=qf,
+            R0_jump_ohm=float(row["R0_jump_term_ohm"]),
+            **{k: float(row[k]) for k in _RC_KEYS},
+        ))
+    return pd.DataFrame(rows).sort_values("throughput").reset_index(drop=True)
+
+
+def block_throughput(block_time, checkups):
+    """Map a cycling-block timestamp onto the cumulative-throughput axis.
+
+    AhAkku in the cycling file is per-test (it resets), so the block's own
+    cumulative throughput is not recorded. Between two check-ups under steady
+    cycling, throughput grows ~linearly in time, so we interpolate the check-up
+    (time -> throughput) points to place the block.
+    """
+    t = checkups["time"].astype("int64").to_numpy()       # ns since epoch
+    return float(np.interp(pd.Timestamp(block_time).value, t, checkups["throughput"]))
+
+
+def interp_reference(cell, target_throughput, checkups=None):
+    """Build a check-up-interpolated ECM at `target_throughput` (Ah).
+
+    Linearly blends, between the two bracketing check-ups (weight ``w`` on the
+    Ah-throughput axis): the @50% RC params, and the qOCV curve. The qOCV blend
+    is done on the **normalized SOC-fraction** axis (each curve divided by its
+    own capacity), then rescaled to Ah by the blended capacity -- so the curves
+    line up at the knee instead of smearing across different Ah extents.
+
+    Returns (rc, soh, grid, ocv, meta) with the same (grid, ocv) contract as
+    ``load_reference``; meta carries w and the bracketing BMs for reporting.
+    """
+    if checkups is None:
+        checkups = discover_checkups(cell)
+    thr = checkups["throughput"].to_numpy()
+    j = int(np.clip(np.searchsorted(thr, target_throughput) - 1, 0, len(thr) - 2))
+    lo, hi = checkups.iloc[j], checkups.iloc[j + 1]
+    w = float(np.clip((target_throughput - lo["throughput"]) /
+                      (hi["throughput"] - lo["throughput"]), 0.0, 1.0))
+
+    rc = {k: (1 - w) * lo[k] + w * hi[k] for k in _RC_KEYS}
+    soh = (1 - w) * lo["soh"] + w * hi["soh"]
+
+    # qOCV blend on the normalized SOC-fraction axis (load_reference returns
+    # grid = Ah_removed 0->Q, ocv IR-corrected by that check-up's own R0).
+    _, _, g_lo, o_lo = load_reference(cell, int(lo["bm"]))
+    _, _, g_hi, o_hi = load_reference(cell, int(hi["bm"]))
+    f = np.linspace(0.0, 1.0, 500)                         # shared SOC fraction
+    o = (1 - w) * np.interp(f, g_lo / g_lo[-1], o_lo) + w * np.interp(f, g_hi / g_hi[-1], o_hi)
+    q_full = (1 - w) * g_lo[-1] + w * g_hi[-1]             # blended capacity
+    grid = f * q_full
+
+    meta = dict(w=w, bm_lo=int(lo["bm"]), bm_hi=int(hi["bm"]),
+                thr=target_throughput, soh_lo=float(lo["soh"]), soh_hi=float(hi["soh"]))
+    return rc, float(soh), grid, o, meta
 
 
 def load_soc_rc(cell, soh_target, direction="DCH"):
@@ -149,6 +233,9 @@ def run_case(name, tab, grid, ocv, q_full, i_cyc, partial, lower):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bm", type=int, default=7, help="003 reference check-up BM_Programm")
+    ap.add_argument("--at-throughput", type=float, default=None,
+                    help="target Ah-throughput for the check-up interpolation "
+                         "(default: the cycling block's timestamp mapped onto the axis)")
     args = ap.parse_args()
 
     partial, lower = extract_segments(CYCLING_FILE)
@@ -160,14 +247,27 @@ def main():
     # 007 SOC-resolved DCH RC at the SOH nearest 003's reference SOH.
     soh007, tab007 = load_soc_rc(RC_CELL, soh003)
 
+    # check-up-interpolated 003 ECM at the cycling block's aging state: blend
+    # qOCV + @50% RC between the two bracketing check-ups on the throughput axis.
+    checkups = discover_checkups(CELL)
+    target = args.at_throughput
+    if target is None:
+        target = block_throughput(partial["Zeit"].mean(), checkups)
+    rc_i, soh_i, grid_i, ocv_i, meta = interp_reference(CELL, target, checkups)
+
     cases = [
         run_case("003 @50% fixed", _const_tab(rc003), grid, ocv, q_full, i_cyc, partial, lower),
         run_case("007 @50% fixed",
                  _const_tab(rc_at(50.0, tab007)), grid, ocv, q_full, i_cyc, partial, lower),
         run_case("007 SOC-interp", tab007, grid, ocv, q_full, i_cyc, partial, lower),
+        run_case("003 checkup-interp",
+                 _const_tab(rc_i), grid_i, ocv_i, grid_i[-1], i_cyc, partial, lower),
     ]
 
     print(f"003 reference check-up BM{args.bm}  SOH {soh003}%   full capacity (qOCV) {q_full:.3f} Ah")
+    print(f"checkup-interp: throughput {meta['thr']:.2f} Ah  "
+          f"between BM{meta['bm_lo']}({meta['soh_lo']}%) and BM{meta['bm_hi']}({meta['soh_hi']}%)  "
+          f"w={meta['w']:.3f}  -> SOH {soh_i:.1f}%, capacity {grid_i[-1]:.3f} Ah")
     print(f"007 RC borrowed at SOH {soh007}%  ({RC_CELL.split('_')[-1]}, same VTC6 type)")
     print(f"  SOC anchors: " + ", ".join(
         f"{int(s)}%->R0={rc_at(s, tab007)['R0_ohm']*1e3:.1f} R2={rc_at(s, tab007)['R2_ohm']*1e3:.1f}mOhm "
@@ -186,7 +286,8 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(10, 6))
-    colors = {"003 @50% fixed": "C1", "007 @50% fixed": "C2", "007 SOC-interp": "C3"}
+    colors = {"003 @50% fixed": "C1", "007 @50% fixed": "C2", "007 SOC-interp": "C3",
+              "003 checkup-interp": "C4"}
     for c in cases:
         ax.plot(c["sim_ah"], c["sim_v"], "-", color=colors[c["name"]], lw=1.6,
                 label=f"pred {c['name']}: {c['q_pred']:.3f} Ah ({c['q_pred']/NOM*100:.1f}%)")
