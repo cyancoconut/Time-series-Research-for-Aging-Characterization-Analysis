@@ -1,6 +1,12 @@
 __pycache__
 /config.json
 /config_SE.json
+# Real battery configs carry MinIO credentials (minio_access_key /
+# minio_secret_key) and machine-local working_paths. Only the placeholder
+# battery_config_example.json is tracked.
+/battery_config_*_linux.json
+/battery_config_VTC*.json
+!/battery_config_example.json
 dig2mat.log
 /dist
 /env
