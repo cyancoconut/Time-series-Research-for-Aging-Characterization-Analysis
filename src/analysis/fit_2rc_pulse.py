@@ -61,7 +61,12 @@ Pipeline
 
 Standalone analysis utility — does not touch the pipeline. Run from ``src/``::
 
-    python -m analysis.fit_2rc_pulse [pulse.parquet] [--plot]
+    # every cell: takes working_path (and nom_capacity) from the pipeline config
+    python -m analysis.fit_2rc_pulse --battery-config ../battery_config_VTC_linux.json
+    # one cell, by name fragment
+    python -m analysis.fit_2rc_pulse --battery-config <cfg.json> --cell 003
+    # an explicit folder or file (wins over the config)
+    python -m analysis.fit_2rc_pulse <cell_folder|pulse.parquet> [--plot]
 """
 
 import argparse
@@ -117,11 +122,12 @@ SOC_SWEEP_DIRECTION = "discharge"
 SOC_SWEEP_STEP_PCT = 5.0
 PLATEAU_GAP_AH = None  # None -> derive nom_capacity * SOC_SWEEP_STEP_PCT / 100
 
-DEFAULT_FILE = (
-    "/home/ann/Documents/Data_Metabatt/20_export_pulse/"
-    "METABatt_Sony_Murata_18650VTC6_003/"
-    "METABatt_Sony_Murata_18650VTC6_003_pulse_BM5_96.1SOH.parquet"
-)
+#: Nominal capacity fallback (VTC6) when neither config supplies one.
+DEFAULT_NOM_CAPACITY = 3.0
+
+#: Pulse-export folder under ``working_path`` — one sub-folder per cell stem,
+#: written by ``output/export_pulse.py``.
+PULSE_EXPORT_DIR = "20_export_pulse"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -161,6 +167,62 @@ def load_2rc_config(path):
             globals()[glob_name] = cfg[key]
     logging.info("loaded 2RC config %s", os.path.basename(path))
     return cfg
+
+
+def load_battery_config(path):
+    """Load the pipeline's battery config (the one ``main.py`` takes).
+
+    Only two keys are used here — ``working_path`` (to locate the pulse exports)
+    and ``nom_capacity`` — so the analyzer stays runnable on any machine without
+    a hardcoded data path. A dedicated 2RC ``--config`` still wins on
+    ``nom_capacity``: it is the cell-specific one.
+    """
+    with open(path) as fh:
+        cfg = json.load(fh)
+    logging.info("loaded battery config %s", os.path.basename(path))
+    return cfg
+
+
+def resolve_cell_folders(cfg, cell_filters=None):
+    """Every cell's pulse-export folder under ``<working_path>/20_export_pulse``.
+
+    One sub-folder per ``cell_stem``. ``cell_filters`` subsets by name fragment,
+    matching ``main.py --cells``; ``None`` returns all of them. Folders holding
+    no ``*_pulse_BM*.parquet`` are skipped (a cell can be exported but have no
+    pulses). Raises ``FileNotFoundError`` with a pointed hint when the export
+    folder itself is missing — the usual cause is that the pipeline ran with
+    ``export_pulse`` at its default ``false``.
+    """
+    working_path = cfg.get("working_path")
+    if not working_path:
+        raise ValueError("battery config has no 'working_path'")
+    root = os.path.join(working_path, PULSE_EXPORT_DIR)
+    if not os.path.isdir(root):
+        raise FileNotFoundError(
+            f"no pulse exports at {root} — the pipeline writes them only with "
+            "'export_pulse': true (default false). With download_from='minio' "
+            "they may exist only in MinIO and need syncing to working_path first."
+        )
+
+    folders = []
+    for name in sorted(os.listdir(root)):
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        if cell_filters and not any(c in name for c in cell_filters):
+            continue
+        if not glob.glob(os.path.join(path, "*_pulse_BM*.parquet")):
+            logging.info("skip %s: no pulse exports in folder", name)
+            continue
+        folders.append(path)
+
+    if not folders:
+        raise FileNotFoundError(
+            f"no cell folder with pulse exports under {root}"
+            + (f" matching {cell_filters}" if cell_filters else "")
+        )
+    logging.info("%d cell folder(s) under %s", len(folders), root)
+    return folders
 
 
 # ---------------------------------------------------------------------------
@@ -1745,10 +1807,111 @@ def plot_warburg_vs_soh(results, out_png, title=""):
     logging.info("Warburg vs-SOH plot -> %s", out_png)
 
 
+def run_cell_folder(folder, args, out_csv=None):
+    """Fit every pulse export in one cell folder and plot the params vs SOH.
+
+    Outputs land beside the data, in the cell folder itself: ``2RC_vs_SOH.csv``
+    plus the joint / staged / Warburg vs-SOH plots. Returns the results frame
+    (empty when nothing fit), so a multi-cell run can concatenate them.
+    """
+    results = fit_folder(
+        folder, args.nom_capacity, args.remove_pulse_before_min, args.exclude_zc
+    )
+    if results.empty:
+        logging.warning("no pulses fit in %s", folder)
+        return results
+
+    folder_title = os.path.basename(os.path.normpath(folder))
+    pd.set_option("display.width", 200, "display.max_columns", 30)
+    cols = ["BM_Programm", "SOH_num", "pulse_type", "R0_ohm", "R1_ohm",
+            "tau1_s", "R2_ohm", "tau2_s", "rmse_mV"]
+    print(f"\n=== 2RC parameters across folder — {folder_title} ===")
+    print(results[cols].to_string(index=False))
+
+    out_csv = out_csv or os.path.join(folder, "2RC_vs_SOH.csv")
+    results.to_csv(out_csv, index=False)
+    logging.info("combined results -> %s", out_csv)
+
+    plot_vs_soh(results, os.path.join(folder, "2RC_vs_SOH.png"), title=folder_title)
+    plot_staged_vs_soh(
+        results, os.path.join(folder, "2RC_staged_vs_SOH.png"), title=folder_title,
+    )
+    plot_warburg_vs_soh(
+        results, os.path.join(folder, "2RC_warburg_vs_SOH.png"), title=folder_title,
+    )
+    return results
+
+
+def run_all_cells(battery_cfg, args):
+    """Fit every cell folder under ``<working_path>/20_export_pulse``.
+
+    One ``run_cell_folder`` pass per cell stem, each writing its own CSV/plots,
+    plus a combined table with a ``cell`` column at the export root. A cell that
+    raises is logged and skipped so one bad export cannot abort the fleet run.
+
+    Without ``--cell`` the selection falls back to the config's ``type_cell``
+    fragment (``main.py``'s own convention). This matters: one ``working_path``
+    can hold several chemistries side by side, and ``nom_capacity`` comes from
+    the config — fitting an A123 folder with a VTC6 capacity silently
+    misnormalizes every C-rate.
+    """
+    cell_filters = args.cell
+    if not cell_filters and battery_cfg.get("type_cell"):
+        cell_filters = [battery_cfg["type_cell"]]
+        logging.info("no --cell: restricting to type_cell=%r", cell_filters[0])
+    folders = resolve_cell_folders(battery_cfg, cell_filters)
+    frames, failed = [], []
+    for folder in folders:
+        cell = os.path.basename(os.path.normpath(folder))
+        logging.info("=== %s ===", cell)
+        try:
+            results = run_cell_folder(folder, args)
+        except Exception as exc:  # noqa: BLE001 — one cell must not kill the run
+            logging.warning("%s: fit failed (%s)", cell, exc)
+            failed.append(cell)
+            continue
+        if results.empty:
+            continue
+        frames.append(results.assign(cell=cell))
+
+    if not frames:
+        logging.warning("no pulses fit in any of the %d cell folder(s)", len(folders))
+        return
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined[["cell"] + [c for c in combined.columns if c != "cell"]]
+    root = os.path.join(battery_cfg["working_path"], PULSE_EXPORT_DIR)
+    out_csv = args.out or os.path.join(root, "2RC_vs_SOH_all_cells.csv")
+    combined.to_csv(out_csv, index=False)
+    logging.info(
+        "%d cell(s), %d pulse fit(s) -> %s",
+        combined["cell"].nunique(), len(combined), out_csv,
+    )
+    if failed:
+        logging.warning("%d cell(s) failed: %s", len(failed), ", ".join(failed))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Fit a 2RC ECM to HPPC pulse exports.")
-    ap.add_argument("parquet", nargs="?", default=DEFAULT_FILE, help="pulse parquet")
-    ap.add_argument("--nom-capacity", type=float, default=3.0, help="Ah (VTC6=3.0)")
+    ap.add_argument(
+        "parquet", nargs="?",
+        help="pulse parquet, or a cell folder of them. Omit and pass "
+        "--battery-config to fit every cell under <working_path>/20_export_pulse.",
+    )
+    ap.add_argument(
+        "--battery-config",
+        help="the pipeline battery config (as given to main.py): supplies "
+        "working_path (-> 20_export_pulse/<cell_stem>/) and nom_capacity",
+    )
+    ap.add_argument(
+        "--cell", nargs="*",
+        help="with --battery-config: only cells whose folder name contains one "
+        "of these fragments (same semantics as main.py --cells). Default: all.",
+    )
+    ap.add_argument(
+        "--nom-capacity", type=float,
+        help=f"Ah (VTC6={DEFAULT_NOM_CAPACITY}). Default: from --battery-config, "
+        f"else {DEFAULT_NOM_CAPACITY}. A --config value wins over both.",
+    )
     ap.add_argument(
         "--remove-pulse-before-min", type=float, default=REMOVE_PULSE_BEFORE_MIN,
         help="drop pulses earlier than this many minutes into a cycle (0=keep all)",
@@ -1762,7 +1925,11 @@ def main():
         help="dedicated 2RC JSON config (see config_2rc_example.json): pulse gate, "
         "nom_capacity and SOC-sweep params. Config values win over the flag defaults.",
     )
-    ap.add_argument("-o", "--out", help="output CSV (default: <stem>_2RC.csv)")
+    ap.add_argument(
+        "-o", "--out",
+        help="output CSV (default: <stem>_2RC.csv; per-folder 2RC_vs_SOH.csv; "
+        "all-cells 2RC_vs_SOH_all_cells.csv at the export root)",
+    )
     ap.add_argument("--plot", action="store_true", help="also save a fit overlay PNG")
     ap.add_argument(
         "--validate", action="store_true",
@@ -1776,6 +1943,14 @@ def main():
     )
     args = ap.parse_args()
 
+    # nom_capacity precedence: --config (cell-specific) > --nom-capacity >
+    # battery config > module default.
+    battery_cfg = {}
+    if args.battery_config:
+        battery_cfg = load_battery_config(args.battery_config)
+        if args.nom_capacity is None and battery_cfg.get("nom_capacity") is not None:
+            args.nom_capacity = float(battery_cfg["nom_capacity"])
+
     # A dedicated config overrides the module tunables (applied to globals) and the
     # flag defaults for nom_capacity / exclude-zc / remove-before.
     cfg = {}
@@ -1785,6 +1960,28 @@ def main():
             args.nom_capacity = cfg["nom_capacity"]
         args.exclude_zc = EXCLUDE_ZUSTAND_CURRENT
         args.remove_pulse_before_min = REMOVE_PULSE_BEFORE_MIN
+
+    if args.nom_capacity is None:
+        args.nom_capacity = DEFAULT_NOM_CAPACITY
+    logging.info("nom_capacity = %.3f Ah", args.nom_capacity)
+
+    # No explicit path: fit every cell folder the battery config points at.
+    if args.parquet is None:
+        if not battery_cfg:
+            ap.error(
+                "give a pulse parquet/folder, or --battery-config <cfg.json> to "
+                "fit every cell under <working_path>/20_export_pulse"
+            )
+        if args.relax:
+            ap.error("--relax needs an explicit path (it reads cycling data, "
+                     "not the pulse exports)")
+        try:
+            run_all_cells(battery_cfg, args)
+        except (FileNotFoundError, ValueError) as exc:
+            ap.error(str(exc))  # a config/layout problem, not a stack trace
+        return
+    if args.cell:
+        logging.info("--cell ignored: an explicit path was given")
 
     # Relaxation mode: fit rest curves (cycling data), not HPPC pulses.
     if args.relax:
@@ -1820,30 +2017,7 @@ def main():
 
     # Folder mode: fit every pulse file and plot the parameters vs SOH.
     if os.path.isdir(args.parquet):
-        results = fit_folder(
-            args.parquet, args.nom_capacity, args.remove_pulse_before_min, args.exclude_zc
-        )
-        if results.empty:
-            logging.warning("no pulses fit in %s", args.parquet)
-            return
-        pd.set_option("display.width", 200, "display.max_columns", 30)
-        cols = ["BM_Programm", "SOH_num", "pulse_type", "R0_ohm", "R1_ohm",
-                "tau1_s", "R2_ohm", "tau2_s", "rmse_mV"]
-        print("\n=== 2RC parameters across folder ===")
-        print(results[cols].to_string(index=False))
-        out_csv = args.out or os.path.join(args.parquet, "2RC_vs_SOH.csv")
-        results.to_csv(out_csv, index=False)
-        logging.info("combined results -> %s", out_csv)
-        folder_title = os.path.basename(os.path.normpath(args.parquet))
-        plot_vs_soh(
-            results, os.path.join(args.parquet, "2RC_vs_SOH.png"), title=folder_title,
-        )
-        plot_staged_vs_soh(
-            results, os.path.join(args.parquet, "2RC_staged_vs_SOH.png"), title=folder_title,
-        )
-        plot_warburg_vs_soh(
-            results, os.path.join(args.parquet, "2RC_warburg_vs_SOH.png"), title=folder_title,
-        )
+        run_cell_folder(args.parquet, args, out_csv=args.out)
         return
 
     df = pd.read_parquet(args.parquet)
