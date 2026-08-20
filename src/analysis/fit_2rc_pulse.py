@@ -91,7 +91,14 @@ REMOVE_PULSE_BEFORE_MIN = 0       # drop pulses earlier than this into a cycle
 # (the step is undersampled at ~0.2 s, so the early double-layer region the RC
 # needs is unmeasured). Dropped by label rather than by timing.
 EXCLUDE_ZUSTAND_CURRENT = ["DCH/-1.5"]
-CYCLE_ACTIVE_LIMIT_HOUR = 4.0     # time_diff > this starts a new cycle
+CYCLE_ACTIVE_LIMIT_HOUR = 3.5     # time_diff > this starts a new cycle
+# 3.5 h, not 4.0: the rest between two SOC stadiums is the SOC-adjust step, and
+# it *shrinks as the cell ages* (less Ah to move). On VTC6_004 it slides 4.46 h
+# (97% SOH) -> 3.71 h (60% SOH) and crossed the old 4.0 h limit at ~70% SOH,
+# after which the three stadiums collapsed into one cycle and every pulse fell
+# back to DEFAULT_SOC -- pooling 90/50/10% pulses into one "@50%" series and
+# making the aging trends look noisy. Intra-stadium gaps stay <= 1.0 h across
+# every cell on disk, so 3.5 h keeps a wide margin on both sides.
 # Amplitude-agnostic pulse-stability gate: a segment is a pulse when its current
 # plateau is *relatively* stable, std(I) <= PULSE_STD_FRACTION * |I|. Scales with
 # cell size (VTC6 ~1.5/3 A, the 28 Ah sweep ~9.87 A), so no per-chemistry level list.
