@@ -90,6 +90,19 @@ def _load_minio(client, cfg: dict, rel_dir: str) -> dict:
     return out
 
 
+def _load_minio_tagged(client, cfg: dict, rel_base: str) -> dict:
+    """Like ``_load_minio`` but unions the ``TRACY/`` and legacy ``10_TRACY/``
+    prefixes of a tagged dir, so a half-migrated bucket doesn't silently lose
+    the cells still sitting under the old tag (see io_router.list_tagged_union
+    / resolve_tagged_object_rel)."""
+    out = {}
+    for name in io_router.list_tagged_union(client, cfg, rel_base, ".csv"):
+        rel = io_router.resolve_tagged_object_rel(client, cfg, rel_base, name)
+        data = io_router.fetch_csv_object(client, cfg, rel, name)
+        _coerce(name[: -len(".csv")], pd.read_csv(io.BytesIO(data)), out)
+    return out
+
+
 def _merge_cell(h: pd.DataFrame, c: pd.DataFrame) -> pd.DataFrame:
     """Inner-join one cell's HDBSCAN and classifier rows on ID."""
     keep_ctx = [col for col in _CONTEXT_COLS if col in h.columns]
@@ -239,10 +252,11 @@ def main(config_path: str, source, hdbscan_dir, classifier_dir, out_dir) -> None
 
     if source == "minio":
         client = io_router.make_minio_client(cfg)
-        hdbscan_rel = io_router.resolve_tagged_rel(client, cfg, _HDBSCAN_REL_BASE)
-        logging.info(f"HDBSCAN    : minio <prefix>/{hdbscan_rel}/")
+        logging.info(
+            f"HDBSCAN    : minio <prefix>/{{TRACY,10_TRACY}}/{_HDBSCAN_REL_BASE}/ (unioned)"
+        )
         logging.info(f"classifier : minio <prefix>/{_CLASSIFIER_REL}/")
-        h_cells = _load_minio(client, cfg, hdbscan_rel)
+        h_cells = _load_minio_tagged(client, cfg, _HDBSCAN_REL_BASE)
         c_cells = _load_minio(client, cfg, _CLASSIFIER_REL)
     else:
         hdbscan_dir = hdbscan_dir or (
