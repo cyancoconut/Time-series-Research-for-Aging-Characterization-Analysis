@@ -49,7 +49,7 @@ pip install -r requirements.txt         # other platforms
 |-----|-------------|
 | `working_path` | Root data directory; required when reading or writing locally. BRONZE_CU parquet files must be under `<working_path>/BRONZE_CU/` |
 | `download_from` | `"local"` (default) reads BRONZE_CU from `working_path`; `"minio"` streams from `<bucket>/<minio_prefix>/BRONZE_CU/` |
-| `upload_to` | `"local"` (default) writes GOLD/X_silver to `working_path`; `"minio"` uploads them to `<bucket>/<minio_prefix>/10_TRACY/`; `"both"` does both |
+| `upload_to` | `"local"` (default) writes GOLD/X_silver to `working_path`; `"minio"` uploads them to `<bucket>/<minio_prefix>/TRACY/`; `"both"` does both (objects written before the rename are still read from the legacy `10_TRACY/` prefix) |
 | `minio_endpoint`, `bucket_name`, `minio_prefix` | Required when `download_from="minio"` or `upload_to` includes `"minio"` |
 | `V_max`, `V_min`, `V_nom` | Voltage limits and nominal voltage |
 | `Nom_Capacity` | Nominal capacity in Ah |
