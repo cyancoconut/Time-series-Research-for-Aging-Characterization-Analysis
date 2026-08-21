@@ -42,6 +42,7 @@ grpcio==1.70.0
 h5py==3.12.1
 hdbscan==0.8.40
 idna==3.7
+impedance==1.7.1
 importlib_metadata==8.6.1
 ipykernel==6.29.5
 ipympl==0.9.4
