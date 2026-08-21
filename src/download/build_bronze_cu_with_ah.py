@@ -355,8 +355,8 @@ def _manifest_local_path(out_bronze_cu: str) -> str:
     return os.path.join(os.path.dirname(out_bronze_cu), f"{stem}_manifest.json")
 
 
-def _manifest_minio_key(cell: str) -> str:
-    return f"BRONZE_CU/{cell}_manifest.json"
+def _manifest_minio_key(cell: str, layer: str = "BRONZE_CU") -> str:
+    return f"{layer}/{cell}_manifest.json"
 
 
 def _load_incremental_state(
@@ -365,6 +365,7 @@ def _load_incremental_state(
     out_bronze_cu: str | None,
     upload_minio: bool,
     minio_client: Minio | None,
+    layer: str = "BRONZE_CU",
 ) -> tuple:
     """Return (manifest, existing_bronze) — preferring local, else MinIO.
 
@@ -379,7 +380,7 @@ def _load_incremental_state(
 
     if upload_minio and minio_client is not None:
         bucket = cfg["bucket_name"]
-        mkey = f"{cfg['minio_prefix']}/{_manifest_minio_key(cell)}"
+        mkey = f"{cfg['minio_prefix']}/{_manifest_minio_key(cell, layer=layer)}"
         try:
             resp = minio_client.get_object(bucket, mkey)
             try:
@@ -390,7 +391,7 @@ def _load_incremental_state(
         except S3Error:
             return None, None
         try:
-            with io_router.fetch_bronze(minio_client, cfg, f"{cell}.parquet") as p:
+            with io_router.fetch_bronze(minio_client, cfg, f"{cell}.parquet", layer=layer) as p:
                 existing = pd.read_parquet(p)
         except S3Error:
             return None, None
@@ -409,6 +410,7 @@ def _save_manifest(
     ah_total,
     last_zeit,
     last_strom,
+    layer: str = "BRONZE_CU",
 ) -> None:
     payload = {
         "processed": sorted({_manifest_key(p) for p in processed}),
@@ -425,7 +427,7 @@ def _save_manifest(
         print(f"  Saved manifest:   {mpath}")
     if upload_minio and minio_client is not None:
         io_router._upload_bytes(
-            minio_client, cfg, _manifest_minio_key(cell),
+            minio_client, cfg, _manifest_minio_key(cell, layer=layer),
             text.encode("utf-8"), include_tag=False,
         )
 
@@ -439,28 +441,32 @@ def process_cell(
     minio_client: Minio | None = None,
     download_from: str = "minio",
     incremental: bool = False,
+    layer: str = "BRONZE_CU",
+    filter_key: str = "procedure_filter",
 ) -> None:
     bucket_name = cfg["bucket_name"]
     prefix = cfg["minio_prefix"]
     working_path = cfg.get("working_path")
     cell_file = f"{cell}.parquet"
-    # CU-file detection follows the config's procedure_filter (the check-up
-    # programme name in the 4th '='-delimited filename field).
-    cu_marker = cfg.get("procedure_filter")
+    # Test-file detection follows the config's procedure filter (the programme
+    # name in the 4th '='-delimited filename field).
+    cu_marker = cfg.get(filter_key)
     if not cu_marker:
         raise ValueError(
-            "procedure_filter must be set in the battery config — it is the "
-            "check-up programme name used to detect CU test files."
+            f"{filter_key} must be set in the battery config — it is the "
+            f"programme name used to detect {layer} test files."
         )
 
     # In incremental mode an existing BRONZE_CU is the base to append to, not a
     # reason to skip — the skip-on-exists check only applies to full builds.
     if not overwrite and not incremental:
         if out_bronze_cu and os.path.exists(out_bronze_cu):
-            print(f"{cell} - local BRONZE_CU already exists, skipping.")
+            print(f"{cell} - local {layer} already exists, skipping.")
             return
-        if upload_minio and io_router.bronze_exists_on_minio(minio_client, cfg, cell_file):
-            print(f"{cell} - MinIO BRONZE_CU already exists, skipping.")
+        if upload_minio and io_router.bronze_exists_on_minio(
+            minio_client, cfg, cell_file, layer=layer
+        ):
+            print(f"{cell} - MinIO {layer} already exists, skipping.")
             return
 
     if download_from == "local":
@@ -491,17 +497,17 @@ def process_cell(
     existing_bronze = None
     if incremental and not overwrite:
         manifest, existing_bronze = _load_incremental_state(
-            cfg, cell, out_bronze_cu, upload_minio, minio_client
+            cfg, cell, out_bronze_cu, upload_minio, minio_client, layer=layer
         )
         if manifest is None:
-            print(f"{cell} - no prior manifest/BRONZE_CU; doing a full build.")
+            print(f"{cell} - no prior manifest/{layer}; doing a full build.")
 
     pending = cell_tests
     if manifest is not None:
         processed = set(manifest.get("processed", []))
         pending = [t for t in cell_tests if _manifest_key(t) not in processed]
         if not pending:
-            print(f"{cell} - BRONZE_CU already up to date (no new test files).")
+            print(f"{cell} - {layer} already up to date (no new test files).")
             return
         print(f"{cell} - {len(pending)} new test file(s) since last build.")
 
@@ -533,13 +539,14 @@ def process_cell(
     if upload_minio:
         io_router.upload_parquet(
             minio_client, cfg, bronze,
-            io_router.bronze_object_key(f"{cell}.parquet"),
+            io_router.bronze_object_key(f"{cell}.parquet", layer=layer),
             include_tag=False,
         )
     _save_manifest(
         cfg, cell, out_bronze_cu, upload_minio, minio_client,
         processed=cell_tests, ah_total=ah_total,
         last_zeit=last_zeit, last_strom=last_strom,
+        layer=layer,
     )
 
 
@@ -557,10 +564,11 @@ def _list_cells_minio(minio_client: Minio, bucket_name: str, prefix: str) -> lis
 def _list_cells_local(working_path: str) -> list:
     if not working_path or not os.path.isdir(working_path):
         return []
-    reserved = {"BRONZE_CU", "preSILVER", "SILVER", "GOLD",
+    reserved = {"BRONZE_CU", "BRONZE_PARA", "preSILVER", "SILVER", "GOLD",
                 "with_features_pre_labeled", "with_features_post_labeled",
                 "20_export_pulse", "30_export_qocv", "40_capacity_monitore",
-                "50_evaluation"}
+                "50_evaluation", "10_initial_characterization",
+                "25_export_eis", "60_classifier"}
     cells = []
     for name in sorted(os.listdir(working_path)):
         full = os.path.join(working_path, name)
@@ -576,6 +584,8 @@ def run(
     target_cells: list = None,
     overwrite: bool = False,
     incremental: bool = False,
+    layer: str = "BRONZE_CU",
+    filter_key: str = "procedure_filter",
 ) -> None:
     bucket_name = cfg["bucket_name"]
     prefix = cfg["minio_prefix"]
@@ -617,12 +627,14 @@ def run(
         process_cell(
             cfg=cfg,
             cell=cell,
-            out_bronze_cu=os.path.join(working_path, "BRONZE_CU", f"{cell}.parquet") if save_local else None,
+            out_bronze_cu=os.path.join(working_path, layer, f"{cell}.parquet") if save_local else None,
             overwrite=overwrite,
             upload_minio=upload_minio,
             minio_client=minio_client,
             download_from=download_from,
             incremental=incremental,
+            layer=layer,
+            filter_key=filter_key,
         )
 
 
