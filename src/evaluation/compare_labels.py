@@ -44,7 +44,7 @@ import pandas as pd
 from util import io_router
 
 # MinIO relative dirs for the two label sets (under <minio_prefix>/).
-_HDBSCAN_REL = f"{io_router.UPLOAD_PREFIX_TAG}/with_features_post_labeled"  # 10_TRACY/...
+_HDBSCAN_REL_BASE = "with_features_post_labeled"  # resolved to TRACY/ or 10_TRACY/
 _CLASSIFIER_REL = "60_classifier/with_features_post_labeled"
 
 # Features that make a disagreement interpretable (a real CAP is a long,
@@ -239,9 +239,10 @@ def main(config_path: str, source, hdbscan_dir, classifier_dir, out_dir) -> None
 
     if source == "minio":
         client = io_router.make_minio_client(cfg)
-        logging.info(f"HDBSCAN    : minio <prefix>/{_HDBSCAN_REL}/")
+        hdbscan_rel = io_router.resolve_tagged_rel(client, cfg, _HDBSCAN_REL_BASE)
+        logging.info(f"HDBSCAN    : minio <prefix>/{hdbscan_rel}/")
         logging.info(f"classifier : minio <prefix>/{_CLASSIFIER_REL}/")
-        h_cells = _load_minio(client, cfg, _HDBSCAN_REL)
+        h_cells = _load_minio(client, cfg, hdbscan_rel)
         c_cells = _load_minio(client, cfg, _CLASSIFIER_REL)
     else:
         hdbscan_dir = hdbscan_dir or (

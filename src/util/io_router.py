@@ -5,10 +5,11 @@ Battery-config keys:
     upload_to     : "local" | "minio" | "both"  (default "local")
 
 When uploading to MinIO, outputs land under
-    <bucket>/<minio_prefix>/10_TRACY/<layer>/...
+    <bucket>/<minio_prefix>/TRACY/<layer>/...
 """
 
 import io
+import logging
 import os
 import tempfile
 from contextlib import contextmanager
@@ -17,7 +18,41 @@ import urllib3
 from minio import Minio
 from minio.error import S3Error
 
-UPLOAD_PREFIX_TAG = "10_TRACY"
+UPLOAD_PREFIX_TAG = "TRACY"
+
+#: Pre-rename tag. Objects uploaded before the rename still live under this
+#: prefix; readers fall back to it when the new prefix is empty, so nothing
+#: already on MinIO becomes unreachable. Writes always use UPLOAD_PREFIX_TAG.
+LEGACY_PREFIX_TAG = "10_TRACY"
+
+
+def tagged_rel(rel: str) -> str:
+    """Relative object dir under the current tag, e.g. `TRACY/GOLD`."""
+    return f"{UPLOAD_PREFIX_TAG}/{rel.strip('/')}"
+
+
+def _prefix_has_objects(client: Minio, cfg: dict, rel: str) -> bool:
+    base = f"{cfg['minio_prefix']}/{rel.strip('/')}/"
+    objs = client.list_objects(cfg["bucket_name"], prefix=base, recursive=False)
+    return any(True for _ in objs)
+
+
+def resolve_tagged_rel(client: Minio, cfg: dict, rel: str) -> str:
+    """`TRACY/<rel>` if anything is there, else the legacy `10_TRACY/<rel>`.
+
+    Read-side only. Lets a bucket written before the rename keep working
+    without a bulk server-side copy.
+    """
+    current = tagged_rel(rel)
+    if client is None:
+        return current
+    if _prefix_has_objects(client, cfg, current):
+        return current
+    legacy = f"{LEGACY_PREFIX_TAG}/{rel.strip('/')}"
+    if _prefix_has_objects(client, cfg, legacy):
+        logging.info("MinIO: %s empty, falling back to %s", current, legacy)
+        return legacy
+    return current
 
 
 def needs_minio(cfg: dict) -> bool:
@@ -59,7 +94,8 @@ def list_bronze_cells(client: Minio, cfg: dict) -> list:
 
 def list_gold_cells(client: Minio, cfg: dict) -> list:
     bucket = cfg["bucket_name"]
-    base = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/GOLD/"
+    rel = resolve_tagged_rel(client, cfg, "GOLD")
+    base = f"{cfg['minio_prefix']}/{rel}/"
     objs = client.list_objects(bucket, prefix=base, recursive=False)
     return sorted(
         os.path.basename(o.object_name)
@@ -160,7 +196,8 @@ class _MinioRangeFile:
 def open_gold_range(client: Minio, cfg: dict, cell: str) -> _MinioRangeFile:
     """Open a GOLD parquet on MinIO as a range-read file-like object."""
     bucket = cfg["bucket_name"]
-    key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/GOLD/{cell}"
+    rel = resolve_tagged_rel(client, cfg, "GOLD")
+    key = f"{cfg['minio_prefix']}/{rel}/{cell}"
     return _MinioRangeFile(client, bucket, key)
 
 
@@ -316,7 +353,8 @@ def list_x_silver_cells(client: Minio, cfg: dict) -> list:
     live under `<prefix>/10_TRACY/with_features_post_labeled/`.
     """
     bucket = cfg["bucket_name"]
-    base = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/with_features_post_labeled/"
+    rel = resolve_tagged_rel(client, cfg, "with_features_post_labeled")
+    base = f"{cfg['minio_prefix']}/{rel}/"
     objs = client.list_objects(bucket, prefix=base, recursive=False)
     return sorted(
         os.path.basename(o.object_name)
@@ -328,7 +366,8 @@ def list_x_silver_cells(client: Minio, cfg: dict) -> list:
 def fetch_x_silver_bytes(client: Minio, cfg: dict, name: str) -> bytes:
     """Fetch one `with_features_post_labeled/<name>.csv` payload from MinIO."""
     bucket = cfg["bucket_name"]
-    key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/with_features_post_labeled/{name}"
+    rel = resolve_tagged_rel(client, cfg, "with_features_post_labeled")
+    key = f"{cfg['minio_prefix']}/{rel}/{name}"
     response = client.get_object(bucket, key)
     try:
         return response.read()
