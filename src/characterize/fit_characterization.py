@@ -59,6 +59,8 @@ def _jsonable(value):
         return None
     if isinstance(value, (np.bool_, bool)):
         return bool(value)
+    if not isinstance(value, (list, tuple, dict, np.ndarray)) and pd.isna(value):
+        return None
     if isinstance(value, (pd.Timestamp, datetime)):
         return value.isoformat()
     if isinstance(value, (np.integer,)):
@@ -229,14 +231,21 @@ def run(cfg: dict, target_cells: list = None) -> None:
         logging.warning("no characterization cell folders under %s", root)
         return
 
+    n_ok, n_failed = 0, 0
     for stem in cells:
         cell_dir = os.path.join(root, stem)
         logging.info("fitting %s", stem)
-        payload = fit_cell(cell_dir, float(cfg["nom_capacity"]))
-        out_json = os.path.join(cell_dir, f"{stem}_parameters.json")
-        with open(out_json, "w") as f:
-            json.dump(payload, f, indent=2)
-        logging.info("%s: parameters -> %s", stem, out_json)
+        try:
+            payload = fit_cell(cell_dir, float(cfg["nom_capacity"]))
+            out_json = os.path.join(cell_dir, f"{stem}_parameters.json")
+            with open(out_json, "w") as f:
+                json.dump(payload, f, indent=2)
+            logging.info("%s: parameters -> %s", stem, out_json)
+            n_ok += 1
+        except Exception as exc:           # one bad cell must not abort the run
+            logging.warning("%s: fit_cell failed, skipping cell: %s", stem, exc)
+            n_failed += 1
+    logging.info("done: %d cell(s) fit, %d failed", n_ok, n_failed)
 
 
 def main() -> None:
