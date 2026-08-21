@@ -80,6 +80,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 
+from analysis import sweep_direction as sweep_direction_mod
+
 # --- preprocessing constants (user-supplied) --------------------------------
 SOC_ORDER = ["90%", "50%", "10%"]
 DEFAULT_SOC = "50%"  # used when a cell lacks len(SOC_ORDER) distinct cycles
@@ -1501,13 +1503,39 @@ def plot_validation(curves, val_df, out_png):
     logging.info("validation plot -> %s", out_png)
 
 
-def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
+def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc,
+               assign_soc=False, sweep_direction=None, soc_step_pct=None):
     """Fit every pulse file in ``folder`` and return one combined results table.
 
     Each BM_Programm can have several files (stale stubs + the rehydrated
     export); the **largest** file per BM is the rehydrated one, so that is the
     one kept. Files with SOH=NA are skipped. Adds ``BM_Programm``, ``SOH_num``
     and a ``pulse_type`` label (direction + |current| + SOC) for plotting vs SOH.
+
+    ``assign_soc=False`` (default) reproduces the original return value
+    exactly — the aging-checkup schema (``SOC`` from ``SOC_ORDER``,
+    ``pulse_type``) used by the existing paper-analysis workflows.
+
+    ``assign_soc=True`` additionally calls :func:`assign_pulse_soc` per
+    bundle (the largest file for each ``BM_Programm``, same loop) and merges
+    its ``SOC_pct``/``pulse_amplitude_A``/``pulse_C_rate``/``soc_plateau``
+    columns onto that bundle's results by ``pulse_segment_id`` — for a
+    full-SOC-sweep characterization run, where the categorical 90/50/10
+    ``SOC`` schema does not apply (a sweep has many more than 3 plateaus, so
+    every pulse would otherwise read the same ``DEFAULT_SOC``). ``labeled``
+    lacking ``Ah_throughput`` (or no pulses surviving ``assign_pulse_soc``'s
+    own filters) leaves that bundle without ``SOC_pct`` — logged, not raised;
+    the caller can tell from the absence of the column in the merged result.
+    ``sweep_direction`` forces the sweep direction for every bundle and skips
+    detection (``None`` -> per-bundle detection from the trend of each
+    bundle's fitted pre-pulse ``OCV_V``, in time order, via
+    :mod:`analysis.sweep_direction` — the same rule ``fit_eis`` uses for EIS
+    legs). ``soc_step_pct`` overrides :data:`SOC_SWEEP_STEP_PCT`. Diagnostics
+    (per-bundle direction source, whether SOC_pct is missing and why) are
+    attached to the returned frame's ``.attrs["soc_assignment"]``  — best
+    effort only: pandas does not guarantee ``.attrs`` survives every
+    downstream operation, so callers should treat it as informational, not
+    load-bearing.
     """
     files = glob.glob(os.path.join(folder, "*_pulse_BM*.parquet"))
     best = {}  # BM_Programm -> (size, path), keep the largest (rehydrated) file
@@ -1521,6 +1549,7 @@ def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
             best[bm] = (size, f)
 
     all_results = []
+    soc_assignment = {"bundles": [], "missing_reason": None}
     for bm in sorted(best):
         f = best[bm][1]
         soh = _parse_soh(os.path.splitext(os.path.basename(f))[0])
@@ -1534,6 +1563,15 @@ def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
             logging.warning("BM%s (SOH=%s): no pulses fit", bm, soh)
             continue
         res["BM_Programm"] = bm
+
+        if assign_soc:
+            res, diag = _assign_soc_to_bundle(
+                labeled, res, bm, nom_capacity, sweep_direction, soc_step_pct
+            )
+            soc_assignment["bundles"].append(diag)
+            if diag.get("reason") and soc_assignment["missing_reason"] is None:
+                soc_assignment["missing_reason"] = diag["reason"]
+
         all_results.append(res)
         logging.info("BM%s SOH=%s: fit %d pulses", bm, soh, len(res))
 
@@ -1546,7 +1584,57 @@ def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
         out["direction"] + " " + out["I_A"].abs().round(1).astype(str)
         + "A @" + out["SOC"].astype(str)
     )
-    return out.sort_values(["pulse_type", "SOH_num"]).reset_index(drop=True)
+    out = out.sort_values(["pulse_type", "SOH_num"]).reset_index(drop=True)
+    if assign_soc:
+        out.attrs["soc_assignment"] = soc_assignment
+    return out
+
+
+def _assign_soc_to_bundle(labeled, res, bm, nom_capacity, sweep_direction, soc_step_pct):
+    """One bundle's slice of ``fit_folder(assign_soc=True)``: detect/apply the
+    sweep direction and merge :func:`assign_pulse_soc`'s SOC_pct onto ``res``.
+    Returns ``(res, diagnostics)``; ``res`` is unchanged (no SOC_pct column)
+    when assignment isn't possible, and ``diagnostics["reason"]`` explains why.
+    """
+    diag = {"BM_Programm": bm, "reason": None}
+    if "Ah_throughput" not in labeled.columns:
+        diag["reason"] = (
+            "no SOC_pct — assign_pulse_soc needs Ah_throughput/Zustand in the bundle"
+        )
+        return res, diag
+
+    direction = sweep_direction
+    diag["direction_source"] = "config-override" if direction else "detected"
+    if not direction:
+        ocv = pd.to_numeric(res.get("OCV_V", pd.Series(dtype=float)), errors="coerce")
+        ocv = ocv.dropna().to_numpy()
+        if len(ocv) >= 2:
+            span = float(np.nanmax(ocv) - np.nanmin(ocv))
+            threshold = sweep_direction_mod.turn_threshold(span)
+            direction = sweep_direction_mod.direction_from_trend(
+                ocv[0], ocv[-1], threshold
+            )
+        if direction is None:
+            direction = SOC_SWEEP_DIRECTION
+            diag["direction_source"] = "assumed (ambiguous OCV trend)"
+            logging.warning(
+                "BM%s: pulse OCV trend ambiguous — assuming %s sweep", bm, direction
+            )
+    diag["direction"] = direction
+
+    soc_seg = assign_pulse_soc(
+        labeled, nom_capacity, sweep_direction=direction, soc_step_pct=soc_step_pct
+    )
+    if soc_seg.empty:
+        diag["reason"] = diag["reason"] or (
+            "no SOC_pct — assign_pulse_soc found no valid pulse plateaus"
+        )
+        return res, diag
+
+    merge_cols = ["pulse_segment_id", "SOC_pct", "pulse_amplitude_A",
+                  "pulse_C_rate", "soc_plateau"]
+    res = res.merge(soc_seg[merge_cols], on="pulse_segment_id", how="left")
+    return res, diag
 
 
 def plot_vs_soh(results, out_png, title=""):

@@ -731,7 +731,12 @@ def plot_fit_overlay(df: pd.DataFrame, table: pd.DataFrame, out_png: str,
                   + _z_zarc(row["R2_z"], row["tau2_z"], row["alpha2_z"], w)
                   + _z_diffusion_from_row(row, w))
             ax.plot(zz.real, -zz.imag, "-", color="#16a085", label=f"2ZARC+W ({row['zarc_rmse']:.3f})")
-        ax.set_title(f"SOC {row['SOC_pct']:.0f}%", fontsize=9)
+        title_bits = [f"SOC {row['SOC_pct']:.0f}%"]
+        if "zarc_rmse" in table.columns and np.isfinite(row.get("zarc_rmse", np.nan)):
+            title_bits.append(f"zarc rmse={row['zarc_rmse']:.3f}")
+        if bool(row.get("zarc_degenerate", False)):
+            title_bits.append("DEGENERATE")
+        ax.set_title(" | ".join(title_bits), fontsize=9)
         ax.set_xlabel("Z_real (mΩ)")
         ax.set_ylabel("-Z_imag (mΩ)")
         ax.grid(alpha=0.3)
@@ -772,6 +777,65 @@ def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, tit
     fig.savefig(out_png, dpi=120)
     plt.close(fig)
     logging.info("EIS Nyquist plot -> %s", out_png)
+
+
+def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title: str = ""):
+    """Raw measured EIS spectra: Nyquist + Bode (|Z|, phase) vs frequency.
+
+    No fit — this is the as-measured data, drawn before any model is trusted
+    (companion to :func:`plot_nyquist_by_soc`, which draws the Nyquist plane
+    alone; this adds the Bode pair). One series per ``eis_number``, coloured
+    by ``SOC_pct`` (from ``table``) so the sweep is readable at a glance.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import cm, colors
+
+    if df.empty:
+        logging.info("raw spectra plot: empty bundle, skipping")
+        return
+    soc = dict(zip(table["eis_number"], table["SOC_pct"]))
+    vals = [v for v in soc.values() if np.isfinite(v)]
+    vmin, vmax = (min(vals), max(vals)) if vals else (0.0, 100.0)
+    if vmin == vmax:
+        vmin, vmax = vmin - 1.0, vmax + 1.0
+    norm = colors.Normalize(vmin=vmin, vmax=vmax)
+    cmap = cm.viridis
+
+    fig, (ax_nyq, ax_mag, ax_ph) = plt.subplots(1, 3, figsize=(18, 5.5))
+    for eid, g in df.groupby("eis_number"):
+        g = g.sort_values("frequency")
+        color = cmap(norm(soc.get(eid, np.nan)))
+        ax_nyq.plot(g["Z_real"], -g["Z_imag"], "o-", ms=3, lw=1, color=color)
+        ax_mag.plot(g["frequency"], g["Z_abs"], "o-", ms=3, lw=1, color=color)
+        ax_ph.plot(g["frequency"], g["phase"], "o-", ms=3, lw=1, color=color)
+
+    ax_nyq.set_xlabel("Z_real (mΩ)")
+    ax_nyq.set_ylabel("-Z_imag (mΩ)")
+    ax_nyq.set_aspect("equal", adjustable="datalim")
+    ax_nyq.grid(alpha=0.3)
+    ax_nyq.set_title("Nyquist (measured)")
+
+    ax_mag.set_xscale("log")
+    ax_mag.set_xlabel("frequency (Hz)")
+    ax_mag.set_ylabel("|Z| (mΩ)")
+    ax_mag.grid(alpha=0.3, which="both")
+    ax_mag.set_title("Bode — magnitude")
+
+    ax_ph.set_xscale("log")
+    ax_ph.set_xlabel("frequency (Hz)")
+    ax_ph.set_ylabel("phase")
+    ax_ph.grid(alpha=0.3, which="both")
+    ax_ph.set_title("Bode — phase")
+
+    fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=[ax_nyq, ax_mag, ax_ph],
+                 label="SOC (%)", shrink=0.85, pad=0.02)
+    fig.suptitle(f"Raw EIS spectra (measured) — {title}", fontsize=11)
+    fig.savefig(out_png, dpi=120)
+    plt.close(fig)
+    logging.info("raw EIS spectra plot -> %s", out_png)
 
 
 def main():
