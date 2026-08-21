@@ -115,7 +115,8 @@ def list_gold_cells_local(working_path: str) -> list:
 
 def fetch_gold_bytes(client: Minio, cfg: dict, cell: str) -> bytes:
     bucket = cfg["bucket_name"]
-    key = f"{cfg['minio_prefix']}/{UPLOAD_PREFIX_TAG}/GOLD/{cell}"
+    rel = resolve_tagged_rel(client, cfg, "GOLD")
+    key = f"{cfg['minio_prefix']}/{rel}/{cell}"
     response = client.get_object(bucket, key)
     try:
         return response.read()
