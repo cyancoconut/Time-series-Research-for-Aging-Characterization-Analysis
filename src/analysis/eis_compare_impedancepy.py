@@ -376,6 +376,96 @@ def plot_overlay(df, res, out_png, n_show=6):
     logging.info("overlay -> %s", out_png)
 
 
+#: Model-C series: production vs the two ways of forcing φ = 0.5. Holding the
+#: model fixed and swapping only the optimizer (rows 2 vs 3) separates "our
+#: fitter is better" from "our diffusion element is better".
+#: ``(variant, stack, colour, figure legend, short in-panel tag)``
+MODEL_C_SERIES = [
+    ("C_2ZARC_genW", "ours", "#16a085", "ours — genW, φ fitted (production)", "ours genW"),
+    ("C0_2ZARC_cothW", "ours", "#c0392b", "ours — Wo, φ = 0.5", "ours Wo"),
+    ("C0_2ZARC_cothW", "impedance.py", "#8e44ad", "impedance.py — Wo, φ = 0.5", "imp.py Wo"),
+]
+
+
+def plot_model_c(df, res, out_png, n_show=4):
+    """Focused Model-C comparison: Nyquist, residual spectrum, params vs SOC.
+
+    Row 1 — measured vs the three fits at evenly spaced SOC.
+    Row 2 — per-frequency residual |Z_fit − Z_meas| for those same SOC, which
+            localises *where* the φ = 0.5 forms fail (the low-frequency tail).
+    Row 3 — RMSE and the diffusion parameters over the whole SOC sweep.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ids = res.drop_duplicates("eis_number").sort_values("SOC_pct")
+    pick = ids.iloc[np.linspace(len(ids) - 1, 0, min(n_show, len(ids))).astype(int)]
+
+    fig, axes = plt.subplots(3, n_show, figsize=(4.6 * n_show, 12.5))
+    handles = []
+
+    for col, (_, r0) in enumerate(pick.iterrows()):
+        spec = df[df["eis_number"] == r0["eis_number"]].sort_values("frequency")
+        fr = spec["frequency"].to_numpy(float)
+        w = 2 * np.pi * fr
+        zd = spec["Z_real"].to_numpy(float) + 1j * spec["Z_imag"].to_numpy(float)
+
+        ax_n, ax_r = axes[0, col], axes[1, col]
+        (ln,) = ax_n.plot(zd.real, -zd.imag, "o", ms=3.5, color="#2f6fdb",
+                          label="measured", zorder=3)
+        if col == 0:
+            handles.append(ln)
+        for variant, stack, colr, lab, tag in MODEL_C_SERIES:
+            m = res[(res["eis_number"] == r0["eis_number"])
+                    & (res["variant"] == variant) & (res["stack"] == stack)]
+            if m.empty or not np.isfinite(m.iloc[0]["R0"]):
+                continue
+            p = m.iloc[0].to_dict()
+            z = z_canon(p, w)
+            (ln,) = ax_n.plot(z.real, -z.imag, "-", lw=1.6, color=colr,
+                              label=f"{tag} ({p['rmse']:.3f})")
+            if col == 0:
+                handles.append(plt.Line2D([], [], color=colr, lw=1.6, label=lab))
+            ax_r.plot(fr, np.abs(z - zd), "-", lw=1.4, color=colr)
+        ax_n.set_title(f"SOC {r0['SOC_pct']:.0f}%", fontsize=10)
+        ax_n.set_xlabel("Z_real (mΩ)"); ax_n.set_ylabel("−Z_imag (mΩ)")
+        ax_n.grid(alpha=0.3); ax_n.legend(fontsize=7, loc="upper left")
+        ax_r.set_xscale("log"); ax_r.set_yscale("log")
+        ax_r.set_xlabel("frequency (Hz)"); ax_r.set_ylabel("|Z_fit − Z_meas| (mΩ)")
+        ax_r.grid(alpha=0.3, which="both")
+        ax_r.set_title(f"residual — SOC {r0['SOC_pct']:.0f}%", fontsize=9)
+
+    sweep = [("rmse", "complex RMSE (mΩ)", True),
+             ("R_d", "R_d — diffusion (mΩ)", True),
+             ("phi_d", "φ_d — diffusion exponent", False),
+             ("alpha1", "α1 — fast ZARC CPE exponent", False)]
+    for col, (c, label, logy) in enumerate(sweep[:n_show]):
+        ax = axes[2, col]
+        for variant, stack, colr, _lab, _tag in MODEL_C_SERIES:
+            g = res[(res["variant"] == variant) & (res["stack"] == stack)].sort_values("SOC_pct")
+            if g.empty:
+                continue
+            ax.plot(g["SOC_pct"], g[c], "o-", ms=4, color=colr)
+        ax.set_xlabel("SOC (%)"); ax.set_ylabel(label); ax.grid(alpha=0.3)
+        if logy:
+            ax.set_yscale("log")
+        if c in ("phi_d", "alpha1"):
+            ax.set_ylim(0.25, 1.05)
+            ax.axhline(0.5 if c == "phi_d" else 1.0, ls=":", lw=1, color="0.5")
+    for ax in axes[2, len(sweep):]:
+        ax.set_visible(False)
+
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9,
+               frameon=False, bbox_to_anchor=(0.5, 0.0))
+    fig.suptitle(
+        "Model C — 2×ZARC + L + finite-length Warburg: production vs impedance.py",
+        fontsize=13)
+    fig.tight_layout(rect=[0, 0.035, 1, 0.98])
+    fig.savefig(out_png, dpi=120); plt.close(fig)
+    logging.info("model-C comparison -> %s", out_png)
+
+
 def plot_params(res, out_png):
     import matplotlib
     matplotlib.use("Agg")
@@ -438,6 +528,7 @@ def main():
     print(agree.to_string(index=False, float_format=lambda v: f"{v:.3g}"))
 
     plot_overlay(df, res, f"{stem}_overlay.png")
+    plot_model_c(df, res, f"{stem}_model_C.png")
     plot_params(res, f"{stem}_params_vs_SOC.png")
 
 
