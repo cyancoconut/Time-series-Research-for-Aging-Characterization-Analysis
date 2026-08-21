@@ -7,7 +7,10 @@ can be repeated without redoing segmentation.
 
 Models are fixed defaults:
 
-* **pulse** — 2RC (:mod:`analysis.fit_2rc_pulse`).
+* **pulse** — 2RC (:mod:`characterize.pulse_fit`, a fork of
+  :mod:`analysis.fit_2rc_pulse` kept separate so characterization-only fixes
+  — notably SOC-plateau detection — don't touch the shared paper-analysis
+  module; see the fork notice at the top of ``characterize/pulse_fit.py``).
 * **EIS** — 2×ZARC + series-L + generalized Warburg
   (:func:`analysis.eis_vs_soc.fit_zarc_warburg_eis`). φ is fitted; τ_d is
   **pinned** by ``DIFFUSION_TAU_BOX``, so ``R_d_z`` is the amplitude at
@@ -38,8 +41,8 @@ import numpy as np
 import pandas as pd
 
 from analysis import eis_vs_soc, qocv_curve
-from analysis import fit_2rc_pulse as pulse_fit
 from analysis import sweep_direction as sweep_direction_mod
+from characterize import pulse_fit
 from main import load_config
 from util import io_router
 from util.run_context import CHARACTERIZATION
@@ -95,12 +98,21 @@ def _records(table: pd.DataFrame, cols: list) -> list:
     ]
 
 
-def _skipped_nasoh_bundles(files: list) -> list:
-    """Bundles ``fit_2rc_pulse.fit_folder`` will silently skip (SOH=NA), i.e.
-    no CAP segment was found for that BM_Programm so no SOH could be computed.
-    Mirrors ``fit_folder``'s per-BM "largest file wins" selection, so this
-    reports exactly the files it will actually evaluate and skip — not every
-    NASOH-named stub that happens to sit in the folder.
+def _skipped_nasoh_bundles(files: list, tail: str = "") -> list:
+    """Bundles with SOH=NA (no CAP segment found for that BM_Programm, so no
+    SOH could be computed) — shared by the pulse and EIS paths so the two
+    can never disagree about what counts as NA. SOH is parsed with
+    ``fit_2rc_pulse._parse_soh``, the same helper ``fit_folder`` uses
+    internally for the pulse path.
+
+    Mirrors the per-BM "largest file wins" selection every caller here uses
+    (``fit_folder`` for pulse, the ``best`` dict in ``fit_eis``), so this
+    reports exactly the files that will actually be evaluated and skipped —
+    not every NASOH-named stub that happens to sit in the folder. ``tail`` is
+    an optional caller-specific suffix appended to the reason string; the
+    ``skipped`` entry shape (``file``/``BM_Programm``/``reason`` keys) is
+    otherwise identical for pulse and EIS, so a params-file consumer never
+    needs to special-case by measurement type.
     """
     best = {}  # BM_Programm -> (size, path)
     for f in files:
@@ -115,32 +127,60 @@ def _skipped_nasoh_bundles(files: list) -> list:
     for bm, (_, f) in sorted(best.items()):
         soh = pulse_fit._parse_soh(os.path.splitext(os.path.basename(f))[0])
         if soh == "NA":
+            reason = "SOH=NA (no CAP segment for this BM_Programm)" + tail
+            logging.info("skip %s: %s", os.path.basename(f), reason)
             skipped.append({
                 "file": os.path.basename(f),
                 "BM_Programm": int(bm),
-                "reason": "SOH=NA (no CAP segment for this BM_Programm) — fit_folder skips these",
+                "reason": reason,
             })
     return skipped
+
+
+def _pulse_cell_stem(file_name: str) -> str:
+    """Strip ``_pulse_BM<n>_<soh>SOH`` off a pulse-export basename.
+
+    Mirrors the EIS naming (``eis_2zarc_warburg_{stem}_...`` where ``stem`` is
+    the *whole* source-file stem, which already embeds ``BM``/``SOH`` because
+    the EIS export filename does). The pulse export filename is
+    ``<cell_stem>_pulse_BM<bm>_<soh>SOH.parquet``; returning just
+    ``<cell_stem>`` lets the plot name rebuild ``BM``/``SOH`` explicitly from
+    the results table (not by re-parsing the filename string) while still
+    carrying the same identifying prefix. Falls back to the full stem if the
+    suffix doesn't match (defensive; shouldn't happen for files ``fit_folder``
+    actually fit).
+    """
+    stem = os.path.splitext(os.path.basename(str(file_name)))[0]
+    m = re.match(r"^(.*)_pulse_BM\d+_.+SOH$", stem)
+    return m.group(1) if m else stem
 
 
 def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = None) -> dict:
     """2RC fit of every pulse bundle in ``data_dir``.
 
-    Uses ``fit_2rc_pulse``'s full-SOC-sweep schema (``assign_soc=True`` ->
-    ``assign_pulse_soc``'s plateau-derived ``SOC_pct``), **not** its 90/50/10
-    aging-checkup schema (``SOC``/``pulse_type``) — a parametrization sweep has
-    on the order of 20 SOC plateaus, not 3 cycles, so the aging schema would
-    read every pulse as the same ``DEFAULT_SOC``. Sweep direction is detected
-    per bundle from the trend of each bundle's fitted pre-pulse ``OCV_V``
-    (rising -> charge, falling -> discharge), the same rule ``fit_eis`` uses
-    for EIS legs (:mod:`analysis.sweep_direction`); config ``soc_sweep_direction``
+    Uses ``characterize.pulse_fit``'s full-SOC-sweep schema
+    (``assign_pulse_soc``'s plateau-derived ``SOC_pct``, always applied by
+    this fork's ``fit_folder``), **not** the aging-checkup 90/50/10 schema
+    (``SOC``/``pulse_type``) — a parametrization sweep has on the order of 20
+    SOC plateaus, not 3 cycles, so that schema would read every pulse as the
+    same default SOC. Sweep direction is detected per bundle from the trend
+    of each bundle's fitted pre-pulse ``OCV_V`` (rising -> charge, falling ->
+    discharge), the same rule ``fit_eis`` uses for EIS legs
+    (:mod:`analysis.sweep_direction`); config ``soc_sweep_direction``
     overrides it, and ``soc_step_pct`` sets the SOC step — both shared with the
     EIS path (one sweep, one direction/step for both measurements).
+
+    One plot per ``BM_Programm`` (mirrors the EIS per-source/leg plots, not a
+    single folder-wide figure) named ``pulse_2rc_{cell_stem}_BM{bm}_{soh}SOH.png``
+    — ``cell_stem`` and ``soh`` read straight off the results table (``File``/
+    ``SOH`` columns), not reformatted, so e.g. ``99.5SOH`` stays ``99.5SOH``.
+    Every path (or, for a group with no figure, the skip reason) is recorded
+    in ``block["plots"]``, one entry per BM.
     """
     cfg = cfg or {}
     files = sorted(glob.glob(os.path.join(data_dir, "*_pulse_BM*.parquet")))
     block = {"model": PULSE_MODEL, "fits": [], "sources": [os.path.basename(f) for f in files]}
-    skipped = _skipped_nasoh_bundles(files)
+    skipped = _skipped_nasoh_bundles(files, tail=" — fit_folder skips these")
     if skipped:
         block["skipped"] = skipped
     if not files:
@@ -152,12 +192,11 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
     step = float(cfg["soc_step_pct"]) if cfg.get("soc_step_pct") is not None else pulse_fit.SOC_SWEEP_STEP_PCT
 
     try:
-        results = pulse_fit.fit_folder(
+        results, assignment = pulse_fit.fit_folder(
             data_dir,
             nom_capacity,
             pulse_fit.REMOVE_PULSE_BEFORE_MIN,
             pulse_fit.EXCLUDE_ZUSTAND_CURRENT,
-            assign_soc=True,
             sweep_direction=override,
             soc_step_pct=step,
         )
@@ -169,7 +208,6 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
         block["error"] = "no pulses fit"
         return block
 
-    assignment = results.attrs.get("soc_assignment", {})
     block["settings"] = {
         "mode": "full-SOC-sweep (assign_pulse_soc, plateau-derived SOC_pct) — "
                 "not the 90/50/10 aging-checkup schema",
@@ -180,25 +218,52 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
     }
     block["fits"] = _records(results, PULSE_COLS)
 
-    out_png = os.path.join(plots_dir, "pulse_2rc.png")
-    has_soc_pct = "SOC_pct" in results.columns and results["SOC_pct"].notna().any()
-    if has_soc_pct:
+    default_reason = (
+        "no SOC_pct — assign_pulse_soc needs Ah_throughput/Zustand in the bundle"
+    )
+    bundle_diag_by_bm = {
+        d.get("BM_Programm"): d for d in assignment.get("bundles", [])
+    }
+
+    plots = []
+    for bm, group in results.groupby("BM_Programm", sort=True):
+        bm_int = int(bm)
+        soh = str(group["SOH"].iloc[0])
+        cell_stem = (
+            _pulse_cell_stem(group["File"].iloc[0]) if "File" in group.columns else "cell"
+        )
+        out_png = os.path.join(plots_dir, f"pulse_2rc_{cell_stem}_BM{bm_int}_{soh}SOH.png")
+        entry = {"BM_Programm": bm_int, "SOH": soh}
+
+        has_soc_pct = "SOC_pct" in group.columns and group["SOC_pct"].notna().any()
+        if not has_soc_pct:
+            reason = bundle_diag_by_bm.get(bm_int, {}).get("reason") or default_reason
+            logging.info("BM%s: vs-SOC plot: %s", bm_int, reason)
+            entry["plot_skipped"] = reason
+            plots.append(entry)
+            continue
+
         try:
-            pulse_fit.plot_vs_soc(results, out_png, title="initial characterization")
+            pulse_fit.plot_vs_soc(
+                group, out_png, title=f"initial characterization — BM{bm_int} {soh}SOH"
+            )
         except Exception as exc:
-            logging.warning("pulse plot failed: %s", exc)
+            logging.warning("BM%s: pulse plot failed: %s", bm_int, exc)
+            entry["plot_skipped"] = f"{type(exc).__name__}: {exc}"
+            plots.append(entry)
+            continue
         # plot_vs_soc no-ops silently (logs, doesn't raise) when every fit is
         # degenerate — don't record a path to a file that wasn't written.
         if os.path.isfile(out_png) and os.path.getsize(out_png) > 0:
-            block["plot"] = os.path.relpath(out_png, os.path.dirname(plots_dir))
+            entry["plot"] = os.path.relpath(out_png, os.path.dirname(plots_dir))
         else:
-            block["plot_skipped"] = "SOC_pct present but plot_vs_soc wrote nothing (all fits degenerate?)"
-    else:
-        reason = assignment.get("missing_reason") or (
-            "no SOC_pct — assign_pulse_soc needs Ah_throughput/Zustand in the bundle"
-        )
-        logging.info("vs-SOC plot: %s", reason)
-        block["plot_skipped"] = reason
+            entry["plot_skipped"] = (
+                "SOC_pct present but plot_vs_soc wrote nothing (all fits degenerate?)"
+            )
+        plots.append(entry)
+
+    if plots:
+        block["plots"] = plots
     return block
 
 
@@ -395,6 +460,19 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     }
     if not files:
         logging.info("no EIS bundles in %s", data_dir)
+        return block
+
+    # NA-SOH bundles (no CAP segment for that BM_Programm) are excluded from
+    # fitting/plotting here, same as the pulse path (fit_folder skips them
+    # internally) — both use the shared _skipped_nasoh_bundles/_parse_soh so
+    # "NA" can never mean different things between the two measurement types.
+    skipped = _skipped_nasoh_bundles(files)
+    if skipped:
+        block["skipped"] = skipped
+    skip_names = {s["file"] for s in skipped}
+    files = [f for f in files if os.path.basename(f) not in skip_names]
+    if not files:
+        logging.info("EIS: every bundle in %s was SOH=NA — nothing to fit", data_dir)
         return block
 
     tables, leg_diag = [], []

@@ -1,5 +1,16 @@
 """Fit a Thevenin 2RC equivalent-circuit model to HPPC pulse exports.
 
+**Fork notice**: this module is a fork of ``analysis/fit_2rc_pulse.py`` taken
+at commit ``8302344`` (the commit immediately before ``5ba7153`` first wired
+SOC-plateau assignment into that module). It exists so the
+``characterize/`` initial-characterization path can diverge — most notably a
+correctness fix to SOC-plateau detection (``assign_pulse_soc``) — **without
+touching** ``analysis/fit_2rc_pulse.py``, which is shared with the user's
+paper-analysis workflows and must stay byte-identical to its pre-branch
+state. The two modules will drift; a fix made in one (bug fix, new
+diagnostic, etc.) may need porting to the other by hand — there is no
+shared base to merge from automatically.
+
 Pipeline
 --------
 1. **Preprocessing** (``label_time_diff`` / ``build_pulse_sequence``) — adapted
@@ -62,11 +73,11 @@ Pipeline
 Standalone analysis utility — does not touch the pipeline. Run from ``src/``::
 
     # every cell: takes working_path (and nom_capacity) from the pipeline config
-    python -m analysis.fit_2rc_pulse --battery-config ../battery_config_VTC_linux.json
+    python -m characterize.pulse_fit --battery-config ../battery_config_VTC_linux.json
     # one cell, by name fragment
-    python -m analysis.fit_2rc_pulse --battery-config <cfg.json> --cell 003
+    python -m characterize.pulse_fit --battery-config <cfg.json> --cell 003
     # an explicit folder or file (wins over the config)
-    python -m analysis.fit_2rc_pulse <cell_folder|pulse.parquet> [--plot]
+    python -m characterize.pulse_fit <cell_folder|pulse.parquet> [--plot]
 """
 
 import argparse
@@ -79,6 +90,8 @@ import re
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
+
+from analysis import sweep_direction as sweep_direction_mod
 
 # --- preprocessing constants (user-supplied) --------------------------------
 SOC_ORDER = ["90%", "50%", "10%"]
@@ -378,6 +391,26 @@ def build_pulse_sequence(labeled, output_columns):
     return seq[keep].copy()
 
 
+def _parse_proc_id(id_str):
+    """``<BM_Programm>_<procedure_number>`` -> ``(bm_str, proc_int)``.
+
+    Returns ``(None, None)`` when ``id_str`` is missing (``None``/``NaN``) or
+    malformed (no ``_`` separator, non-integer procedure field) — the caller
+    treats that as "ID not usable" and falls back to the Ah-gap rule. Mirrors
+    ``_proc_id``'s parsing (kept separate since that helper returns a shifted
+    ID string, not the parsed tuple this needs).
+    """
+    if id_str is None or (isinstance(id_str, float) and np.isnan(id_str)):
+        return None, None
+    bm, sep, proc = str(id_str).rpartition("_")
+    if not sep:
+        return None, None
+    try:
+        return bm, int(proc)
+    except ValueError:
+        return None, None
+
+
 def assign_pulse_soc(
     labeled,
     nom_capacity,
@@ -417,6 +450,7 @@ def assign_pulse_soc(
         return pd.DataFrame()
 
     pulses = labeled[labeled["Zustand"].isin(["CHA", "DCH"])]
+    has_id = "ID" in labeled.columns
     recs = []
     for seg_id, grp in pulses.groupby("pulse_segment_id", sort=False):
         if _is_bad_current_segment(grp):
@@ -434,6 +468,7 @@ def assign_pulse_soc(
                 "pulse_amplitude_A": round(amp, 3),
                 "pulse_C_rate": round(amp / nom_capacity, 3) if nom_capacity else np.nan,
                 "direction": "CHA" if i_signed > 0 else "DCH",
+                "ID": g["ID"].iloc[0] if has_id and "ID" in g.columns else None,
             }
         )
     seg = pd.DataFrame(recs)
@@ -441,22 +476,93 @@ def assign_pulse_soc(
         return seg
     seg = seg.sort_values("t0").reset_index(drop=True)
 
-    # plateau index from Ah_throughput jumps (monotone-increasing cumulative Ah)
+    # --- plateau detection ---------------------------------------------------
+    # Ah-gap plateau index, kept as fallback + cross-check regardless of which
+    # detector is used below. Diagnostic caveat: a jump *exactly equal* to
+    # plateau_gap_ah fails the strict ">" test and is missed — the failure mode
+    # that silently collapsed a whole sweep onto SOC_pct=100 (28 Ah cell, 5 %
+    # step, plateau_gap_ah=1.4 Ah, real steps landing at ~1.4 Ah).
     dah = seg["Ah_throughput"].diff()
-    new_plateau = dah.isna() | (dah.abs() > plateau_gap_ah)
-    seg["soc_plateau"] = new_plateau.cumsum().astype(int) - 1  # 0-based, top plateau = 0
+    ah_new_plateau = dah.isna() | (dah.abs() > plateau_gap_ah)
+    ah_plateau = (ah_new_plateau.cumsum().astype(int) - 1).astype(int)
+    n_ah_plateaus = int(ah_plateau.nunique())
+
+    # PRIMARY: procedure-number adjacency in ``ID`` (``<BM_Programm>_<n>``).
+    # Pulses at the same SOC plateau sit on adjacent procedure numbers — the
+    # same convention ``calculate.results_fetching.update_pulse.
+    # _filter_restore_pulses`` uses to identify a restore pulse ("proc_num
+    # exactly 1 more than the preceding PUL*"). Moving to the next plateau
+    # steps past an intervening SOC-adjust procedure, so the procedure-number
+    # gap to the previous pulse is > 1. No threshold to tune, and immune to
+    # the Ah-gap-vs-real-step degeneracy above.
+    parsed = seg["ID"].map(_parse_proc_id) if "ID" in seg.columns else None
+    id_ok = False
+    if parsed is not None:
+        bm_list = parsed.map(lambda p: p[0])
+        proc_list = parsed.map(lambda p: p[1])
+        id_ok = bool(proc_list.notna().all() and bm_list.notna().all())
+
+    if id_ok:
+        bm_prev = bm_list.shift()
+        proc_prev = proc_list.shift()
+        id_new_plateau = (
+            proc_prev.isna()
+            | (bm_list != bm_prev)
+            | ((proc_list - proc_prev).abs() > 1)
+        )
+        id_plateau = (id_new_plateau.cumsum().astype(int) - 1).astype(int)
+        n_id_plateaus = int(id_plateau.nunique())
+        seg["soc_plateau"] = id_plateau
+        detector = "id"
+        logging.info(
+            "assign_pulse_soc: plateau detector=id -> %d plateaus "
+            "(Ah-gap cross-check -> %d plateaus, gap %.3f Ah)",
+            n_id_plateaus, n_ah_plateaus, plateau_gap_ah,
+        )
+        if n_id_plateaus != n_ah_plateaus:
+            logging.warning(
+                "assign_pulse_soc: id-based (%d) and Ah-gap (%d) plateau counts "
+                "disagree — trusting the id-based detector; the Ah-gap threshold "
+                "(%.3f Ah) may be mistuned for this bundle",
+                n_id_plateaus, n_ah_plateaus, plateau_gap_ah,
+            )
+    else:
+        seg["soc_plateau"] = ah_plateau
+        detector = "ah_gap"
+        n_id_plateaus = None
+        logging.warning(
+            "assign_pulse_soc: ID missing/unparseable for this bundle — falling "
+            "back to Ah-gap plateau detection (gap %.3f Ah); this is the failure "
+            "mode that can silently collapse every pulse onto one SOC plateau",
+            plateau_gap_ah,
+        )
 
     if str(sweep_direction).lower().startswith("cha"):
         seg["SOC_pct"] = 0.0 + soc_step_pct * seg["soc_plateau"]
     else:  # discharge sweep
         seg["SOC_pct"] = 100.0 - soc_step_pct * seg["soc_plateau"]
 
-    n_plateaus = seg["soc_plateau"].nunique()
+    n_plateaus = int(seg["soc_plateau"].nunique())
+    if n_plateaus == 1 and len(seg) > 2:
+        logging.warning(
+            "assign_pulse_soc: only 1 SOC plateau detected across %d pulses "
+            "(detector=%s) — every pulse will read the same SOC_pct; this is "
+            "the silent-failure signature, check the ID/Ah_throughput data",
+            len(seg), detector,
+        )
     logging.info(
-        "assign_pulse_soc: %d pulses -> %d plateaus (gap %.3f Ah, %s sweep, SOC %.0f..%.0f%%)",
-        len(seg), n_plateaus, plateau_gap_ah, sweep_direction,
+        "assign_pulse_soc: %d pulses -> %d plateaus (detector=%s, gap %.3f Ah, "
+        "%s sweep, SOC %.0f..%.0f%%)",
+        len(seg), n_plateaus, detector, plateau_gap_ah, sweep_direction,
         seg["SOC_pct"].iloc[0], seg["SOC_pct"].iloc[-1],
     )
+    seg.attrs["plateau_detector"] = {
+        "detector": detector,
+        "n_plateaus": n_plateaus,
+        "n_pulses": len(seg),
+        "n_ah_plateaus": n_ah_plateaus,
+        "plateau_gap_ah": round(float(plateau_gap_ah), 4) if detector == "ah_gap" else None,
+    }
     return seg
 
 
@@ -1501,13 +1607,87 @@ def plot_validation(curves, val_df, out_png):
     logging.info("validation plot -> %s", out_png)
 
 
-def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
+def _assign_soc_to_bundle(labeled, res, bm, nom_capacity, sweep_direction, soc_step_pct):
+    """One bundle's slice of :func:`fit_folder`: detect/apply the sweep
+    direction and merge :func:`assign_pulse_soc`'s ``SOC_pct`` onto ``res``.
+
+    Returns ``(res, diagnostics)``; ``res`` is unchanged (no ``SOC_pct``
+    column) when assignment isn't possible, and ``diagnostics["reason"]``
+    explains why. ``diagnostics`` also carries the plateau-detector info
+    (``assign_pulse_soc``'s own ``.attrs["plateau_detector"]``, read here and
+    folded into a plain dict — the fragile ``DataFrame.attrs`` mechanism
+    never escapes this function).
+    """
+    diag = {"BM_Programm": bm, "reason": None}
+    if "Ah_throughput" not in labeled.columns:
+        diag["reason"] = (
+            "no SOC_pct — assign_pulse_soc needs Ah_throughput/Zustand in the bundle"
+        )
+        return res, diag
+
+    direction = sweep_direction
+    diag["direction_source"] = "config-override" if direction else "detected"
+    if not direction:
+        ocv = pd.to_numeric(res.get("OCV_V", pd.Series(dtype=float)), errors="coerce")
+        ocv = ocv.dropna().to_numpy()
+        if len(ocv) >= 2:
+            span = float(np.nanmax(ocv) - np.nanmin(ocv))
+            threshold = sweep_direction_mod.turn_threshold(span)
+            direction = sweep_direction_mod.direction_from_trend(
+                ocv[0], ocv[-1], threshold
+            )
+        if direction is None:
+            direction = SOC_SWEEP_DIRECTION
+            diag["direction_source"] = "assumed (ambiguous OCV trend)"
+            logging.warning(
+                "BM%s: pulse OCV trend ambiguous — assuming %s sweep", bm, direction
+            )
+    diag["direction"] = direction
+
+    soc_seg = assign_pulse_soc(
+        labeled, nom_capacity, sweep_direction=direction, soc_step_pct=soc_step_pct
+    )
+    diag["plateau_detector"] = dict(soc_seg.attrs.get("plateau_detector", {}))
+    if soc_seg.empty:
+        diag["reason"] = diag["reason"] or (
+            "no SOC_pct — assign_pulse_soc found no valid pulse plateaus"
+        )
+        return res, diag
+
+    merge_cols = ["pulse_segment_id", "SOC_pct", "pulse_amplitude_A",
+                  "pulse_C_rate", "soc_plateau"]
+    res = res.merge(soc_seg[merge_cols], on="pulse_segment_id", how="left")
+    return res, diag
+
+
+def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc,
+               sweep_direction=None, soc_step_pct=None):
     """Fit every pulse file in ``folder`` and return one combined results table.
 
     Each BM_Programm can have several files (stale stubs + the rehydrated
     export); the **largest** file per BM is the rehydrated one, so that is the
     one kept. Files with SOH=NA are skipped. Adds ``BM_Programm``, ``SOH_num``
     and a ``pulse_type`` label (direction + |current| + SOC) for plotting vs SOH.
+
+    Unlike the ``analysis/fit_2rc_pulse`` original this fork forked from, SOC
+    assignment (:func:`assign_pulse_soc`'s plateau-derived ``SOC_pct``) is
+    **always** applied per bundle — no ``assign_soc`` flag, since this module
+    has exactly one caller (the characterization path) and that caller always
+    wants it. ``sweep_direction`` forces the sweep direction for every bundle
+    and skips detection (``None`` -> per-bundle detection from the trend of
+    each bundle's fitted pre-pulse ``OCV_V``, in time order, via
+    :mod:`analysis.sweep_direction` — the same rule ``fit_eis`` uses for EIS
+    legs). ``soc_step_pct`` overrides :data:`SOC_SWEEP_STEP_PCT`.
+
+    Returns ``(results_df, soc_assignment)`` — a tuple, not a bare frame, and
+    diagnostics are returned directly rather than stashed on
+    ``DataFrame.attrs`` (attrs are not guaranteed to survive concat/merge/
+    sort, which this function does several of). ``soc_assignment`` is
+    ``{"bundles": [...], "missing_reason": str|None}``, one ``bundles`` entry
+    per BM_Programm with its direction source and plateau-detector diagnostics
+    (``detector``: ``"id"``/``"ah_gap"``, ``n_plateaus``, ``n_pulses``,
+    ``n_ah_plateaus``, ``plateau_gap_ah``). Empty input -> ``(pd.DataFrame(),
+    {"bundles": [], "missing_reason": None})``.
     """
     files = glob.glob(os.path.join(folder, "*_pulse_BM*.parquet"))
     best = {}  # BM_Programm -> (size, path), keep the largest (rehydrated) file
@@ -1521,6 +1701,7 @@ def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
             best[bm] = (size, f)
 
     all_results = []
+    soc_assignment = {"bundles": [], "missing_reason": None}
     for bm in sorted(best):
         f = best[bm][1]
         soh = _parse_soh(os.path.splitext(os.path.basename(f))[0])
@@ -1534,11 +1715,19 @@ def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
             logging.warning("BM%s (SOH=%s): no pulses fit", bm, soh)
             continue
         res["BM_Programm"] = bm
+
+        res, diag = _assign_soc_to_bundle(
+            labeled, res, bm, nom_capacity, sweep_direction, soc_step_pct
+        )
+        soc_assignment["bundles"].append(diag)
+        if diag.get("reason") and soc_assignment["missing_reason"] is None:
+            soc_assignment["missing_reason"] = diag["reason"]
+
         all_results.append(res)
         logging.info("BM%s SOH=%s: fit %d pulses", bm, soh, len(res))
 
     if not all_results:
-        return pd.DataFrame()
+        return pd.DataFrame(), soc_assignment
     out = pd.concat(all_results, ignore_index=True)
     out["SOH_num"] = pd.to_numeric(out["SOH"], errors="coerce")
     # include SOC so multi-SOC cells (90/50/10) don't collapse onto one line
@@ -1546,7 +1735,8 @@ def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
         out["direction"] + " " + out["I_A"].abs().round(1).astype(str)
         + "A @" + out["SOC"].astype(str)
     )
-    return out.sort_values(["pulse_type", "SOH_num"]).reset_index(drop=True)
+    out = out.sort_values(["pulse_type", "SOH_num"]).reset_index(drop=True)
+    return out, soc_assignment
 
 
 def plot_vs_soh(results, out_png, title=""):
@@ -1821,7 +2011,7 @@ def run_cell_folder(folder, args, out_csv=None):
     plus the joint / staged / Warburg vs-SOH plots. Returns the results frame
     (empty when nothing fit), so a multi-cell run can concatenate them.
     """
-    results = fit_folder(
+    results, _soc_assignment = fit_folder(
         folder, args.nom_capacity, args.remove_pulse_before_min, args.exclude_zc
     )
     if results.empty:
