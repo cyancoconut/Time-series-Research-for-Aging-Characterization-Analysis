@@ -156,10 +156,42 @@ def fit_2rc_eis(spec: pd.DataFrame, r_ohm0=None, r_tot0=None) -> dict:
         return {k: np.nan for k in ("R0", "L", "R1", "tau1", "R2", "tau2", "C1", "C2", "rmse")}
 
 
+#: Below this |Re(x)|, evaluate ``np.tanh(x)`` directly; at/above it, use the
+#: ±1 asymptote instead. ``tanh``/``coth`` reach the double-precision limit
+#: (``tanh(x) == ±1`` to the ULP) by |Re(x)| ≈ 20 — e.g. |tanh(20+0.3j) - 1|
+#: ≈ 5e-18, far below eps ≈ 2.2e-16 — so this cuts in ~17x before that, with
+#: huge margin left before the ``exp(2·Re(x))`` term inside numpy's
+#: sinh/cosh-based ``tanh`` starts losing precision (~Re(x) > 350) or the
+#: complex overflow/underflow warnings numpy raises past there. The branch is
+#: exact, not approximate: below the threshold nothing changes; at/above it
+#: the "wrong" formula would already have rounded to exactly ±1 anyway.
+_TANH_SAFE_RE = 20.0
+
+
+def _safe_tanh(x):
+    """``np.tanh(x)`` without overflow/underflow warnings for large |Re(x)|.
+
+    Scalar- and array-safe, preserves shape and complex dtype. For
+    ``|Re(x)| >= _TANH_SAFE_RE`` the result is the exact double-precision
+    limit ``tanh(x) -> sign(Re(x))`` (``+1`` as ``Re(x) -> +inf``, ``-1`` as
+    ``Re(x) -> -inf``) — see :data:`_TANH_SAFE_RE` for why that's already
+    what ``np.tanh`` itself would round to, just without the intermediate
+    overflow.
+    """
+    x = np.asarray(x, dtype=complex)
+    out = np.empty_like(x)
+    safe = np.abs(x.real) < _TANH_SAFE_RE
+    if np.any(safe):
+        out[safe] = np.tanh(x[safe])
+    if not np.all(safe):
+        out[~safe] = np.where(x.real[~safe] >= 0, 1.0, -1.0)
+    return out[()] if out.shape == () else out
+
+
 def _z_warburg(rd, td, w):
     """Finite-length (short) Warburg impedance R_d·tanh(√(jωτ_d))/√(jωτ_d)."""
     x = np.sqrt(1j * w * td)
-    return rd * np.tanh(x) / x
+    return rd * _safe_tanh(x) / x
 
 
 def fit_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None) -> dict:
@@ -254,7 +286,7 @@ def _z_warburg_reflective(a_w, td, w):
     so it carries the same units as ``R_d`` and stays comparable across fits.
     """
     x = np.pi * np.sqrt(1j * w * td)
-    return a_w / np.tanh(x) / x
+    return a_w / _safe_tanh(x) / x
 
 
 def _z_warburg_generalized(rd, td, phi, w):
@@ -273,7 +305,7 @@ def _z_warburg_generalized(rd, td, phi, w):
     Descriptive, not mechanistic — it says the transport is dispersed, not why.
     """
     x = (1j * w * td) ** phi
-    return rd / np.tanh(x) / x
+    return rd / _safe_tanh(x) / x
 
 
 def _z_zarc(r, tau, alpha, w):
