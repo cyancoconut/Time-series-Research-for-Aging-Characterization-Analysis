@@ -180,11 +180,18 @@ def _safe_tanh(x):
     """
     x = np.asarray(x, dtype=complex)
     out = np.empty_like(x)
-    safe = np.abs(x.real) < _TANH_SAFE_RE
+    # The overflow guard only fires for a genuinely large *finite* Re(x); NaN
+    # and +-inf (real or imaginary part) must fall through to np.tanh itself
+    # so non-finite input propagates exactly like np.tanh(x) -- e.g. NaN in
+    # -> NaN out, not a fabricated +-1. Do not "optimize" this finite check
+    # away. np.isfinite(nan) is False, so NaN never reaches the asymptote
+    # branch below.
+    large = np.isfinite(x.real) & (np.abs(x.real) >= _TANH_SAFE_RE)
+    safe = ~large
     if np.any(safe):
         out[safe] = np.tanh(x[safe])
-    if not np.all(safe):
-        out[~safe] = np.where(x.real[~safe] >= 0, 1.0, -1.0)
+    if np.any(large):
+        out[large] = np.where(x.real[large] >= 0, 1.0, -1.0)
     return out[()] if out.shape == () else out
 
 
