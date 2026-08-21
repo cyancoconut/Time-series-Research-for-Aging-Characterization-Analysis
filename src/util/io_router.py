@@ -81,9 +81,9 @@ def make_minio_client(cfg: dict) -> Minio:
     )
 
 
-def list_bronze_cells(client: Minio, cfg: dict) -> list:
+def list_bronze_cells(client: Minio, cfg: dict, layer: str = "BRONZE_CU") -> list:
     bucket = cfg["bucket_name"]
-    base = f"{cfg['minio_prefix']}/BRONZE_CU/"
+    base = f"{cfg['minio_prefix']}/{layer}/"
     objs = client.list_objects(bucket, prefix=base, recursive=False)
     return sorted(
         os.path.basename(o.object_name)
@@ -202,15 +202,17 @@ def open_gold_range(client: Minio, cfg: dict, cell: str) -> _MinioRangeFile:
     return _MinioRangeFile(client, bucket, key)
 
 
-def open_bronze_range(client: Minio, cfg: dict, cell: str) -> _MinioRangeFile:
-    """Open a BRONZE_CU parquet on MinIO as a range-read file-like object.
+def open_bronze_range(
+    client: Minio, cfg: dict, cell: str, layer: str = "BRONZE_CU"
+) -> _MinioRangeFile:
+    """Open a BRONZE parquet on MinIO as a range-read file-like object.
 
     Used to peek at a single column (e.g. Prozedur) without downloading the
     whole bronze file — the procedure-filter gate can then skip cells that
     don't match before fetch_bronze pulls the full payload.
     """
     bucket = cfg["bucket_name"]
-    key = f"{cfg['minio_prefix']}/BRONZE_CU/{cell}"
+    key = f"{cfg['minio_prefix']}/{layer}/{cell}"
     return _MinioRangeFile(client, bucket, key)
 
 
@@ -218,13 +220,15 @@ def gold_local_path(working_path: str, cell: str) -> str:
     return os.path.join(working_path, "GOLD", cell)
 
 
-def bronze_object_key(cell: str) -> str:
-    return f"BRONZE_CU/{cell}"
+def bronze_object_key(cell: str, layer: str = "BRONZE_CU") -> str:
+    return f"{layer}/{cell}"
 
 
-def bronze_exists_on_minio(client: Minio, cfg: dict, cell: str) -> bool:
+def bronze_exists_on_minio(
+    client: Minio, cfg: dict, cell: str, layer: str = "BRONZE_CU"
+) -> bool:
     bucket = cfg["bucket_name"]
-    key = f"{cfg['minio_prefix']}/BRONZE_CU/{cell}"
+    key = f"{cfg['minio_prefix']}/{layer}/{cell}"
     try:
         client.stat_object(bucket, key)
         return True
@@ -233,10 +237,10 @@ def bronze_exists_on_minio(client: Minio, cfg: dict, cell: str) -> bool:
 
 
 @contextmanager
-def fetch_bronze(client: Minio, cfg: dict, cell: str):
-    """Stream a BRONZE_CU object from MinIO into a tempfile; yield its path."""
+def fetch_bronze(client: Minio, cfg: dict, cell: str, layer: str = "BRONZE_CU"):
+    """Stream a BRONZE object from MinIO into a tempfile; yield its path."""
     bucket = cfg["bucket_name"]
-    key = f"{cfg['minio_prefix']}/BRONZE_CU/{cell}"
+    key = f"{cfg['minio_prefix']}/{layer}/{cell}"
     response = client.get_object(bucket, key)
     try:
         data = response.read()
@@ -289,7 +293,11 @@ def upload_csv(client: Minio, cfg: dict, df, key: str, include_tag: bool = True)
     _upload_bytes(client, cfg, key, payload, include_tag=include_tag)
 
 
-def gold_object_key(cell: str) -> str:
+def gold_object_key(cell: str, root: str | None = None) -> str:
+    # Under a characterization root the layer collapses to a single file, so a
+    # para run can never overwrite the shared GOLD/<cell>.parquet of a CU run.
+    if root:
+        return f"{root}/GOLD.parquet"
     return f"GOLD/{cell}"
 
 
@@ -337,8 +345,12 @@ def fetch_csv_object(client: Minio, cfg: dict, rel_dir: str, name: str) -> bytes
         response.release_conn()
 
 
-def x_silver_object_key(cell: str, classifier: bool = False) -> str:
+def x_silver_object_key(
+    cell: str, classifier: bool = False, root: str | None = None
+) -> str:
     stem = cell.split(".")[0]
+    if root:
+        return f"{root}/with_features_post_labeled.csv"
     # Classifier-path CSVs go to 60_classifier/ (untagged, caller passes
     # include_tag=False) so they sit beside the model and stay out of the tagged
     # 10_TRACY/with_features_post_labeled/ that train_classifier consumes.
@@ -377,20 +389,28 @@ def fetch_x_silver_bytes(client: Minio, cfg: dict, name: str) -> bytes:
         response.release_conn()
 
 
-def export_pulse_object_key(cell: str, filename: str) -> str:
+def export_pulse_object_key(cell: str, filename: str, root: str | None = None) -> str:
     stem = cell.split(".")[0]
+    if root:
+        return f"{root}/data/{filename}"
     return f"20_export_pulse/{stem}/{filename}"
 
 
-def export_qocv_object_key(cell: str, filename: str) -> str:
+def export_qocv_object_key(cell: str, filename: str, root: str | None = None) -> str:
     stem = cell.split(".")[0]
+    if root:
+        return f"{root}/data/{filename}"
     return f"30_export_qocv/{stem}/{filename}"
 
 
-def export_eis_object_key(cell: str, filename: str) -> str:
+def export_eis_object_key(cell: str, filename: str, root: str | None = None) -> str:
     stem = cell.split(".")[0]
+    if root:
+        return f"{root}/data/{filename}"
     return f"25_export_eis/{stem}/{filename}"
 
 
-def export_capacity_object_key(cell: str, filename: str) -> str:
+def export_capacity_object_key(cell: str, filename: str, root: str | None = None) -> str:
+    if root:
+        return f"{root}/{filename}"
     return f"40_capacity_monitore/{filename}"
