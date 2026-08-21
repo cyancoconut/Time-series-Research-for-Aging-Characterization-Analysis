@@ -14,9 +14,10 @@ import os
 import pandas as pd
 
 from util import io_router
+from util.run_context import CU, RunContext
 
 
-def export_capacity(df_export, soh, cell, cfg, paths, minio_client):
+def export_capacity(df_export, soh, cell, cfg, paths, minio_client, run_ctx: RunContext = CU):
     stem = cell.split(".")[0]
     df_cap = df_export[df_export["target"] == "CAP"]
     if df_cap.empty:
@@ -50,5 +51,7 @@ def export_capacity(df_export, soh, cell, cfg, paths, minio_client):
         summary.to_csv(local_path, index=False)
         logging.info(f"{cell}: export_capacity -> {local_path}")
     if io_router.writes_minio(cfg):
-        key = io_router.export_capacity_object_key(cell, filename)
+        key = io_router.export_capacity_object_key(
+            cell, filename, root=run_ctx.export_root(cell)
+        )
         io_router.upload_csv(minio_client, cfg, summary, key, include_tag=False)
