@@ -235,6 +235,7 @@ class PipelineUI(ctk.CTk):
         self.tabs.add("4. Monitor")
         self.tabs.add("5. Evaluation")
         self.tabs.add("6. Train Classifier")
+        self.tabs.add("7. Initial Characterization")
 
         self._build_download_tab(self.tabs.tab("1. Download"))
         self._build_bronze_tab(self.tabs.tab("2. Build BRONZE_CU"))
@@ -242,6 +243,7 @@ class PipelineUI(ctk.CTk):
         self._build_monitor_tab(self.tabs.tab("4. Monitor"))
         self._build_evaluation_tab(self.tabs.tab("5. Evaluation"))
         self._build_train_tab(self.tabs.tab("6. Train Classifier"))
+        self._build_characterization_tab(self.tabs.tab("7. Initial Characterization"))
 
         # Console + bottom controls
         bottom = ctk.CTkFrame(self)
@@ -521,6 +523,70 @@ class PipelineUI(ctk.CTk):
         )
         self.tr_run_btn.pack(side="right", padx=4)
 
+    def _build_characterization_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        s = _Section(parent, "Initial characterization (BOL parametrization)")
+        s.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        self.ch_cells = s.add_entry(
+            "Cells filter (--cells):",
+            placeholder="optional, space-separated, e.g. VTC_cell01 VTC_cell02",
+        )
+        self.ch_build = s.add_checkbox(
+            "Build BRONZE_PARA   →   BRONZE_PARA/<cell>.parquet"
+        )
+        self.ch_pipeline = s.add_checkbox(
+            "Run characterization pipeline   →   10_initial_characterization/<cell>/data/"
+        )
+        self.ch_fit_pulse = s.add_checkbox(
+            "Fit + plot pulse (2RC)   →   <cell>_parameters.json + plots/"
+        )
+        self.ch_fit_eis = s.add_checkbox(
+            "Fit + plot EIS (2×ZARC + Warburg)   →   <cell>_parameters.json + plots/"
+        )
+        self.ch_fit_qocv = s.add_checkbox(
+            "Plot qOCV   →   <cell>_parameters.json + plots/"
+        )
+        self.ch_overwrite = s.add_checkbox(
+            "--overwrite (rebuild / reprocess even if output exists)"
+        )
+
+        clu = ctk.CTkFrame(s, fg_color="transparent")
+        clu.grid(sticky="w", padx=4, pady=(2, 2))
+        ctk.CTkLabel(clu, text="Clustering:").pack(side="left", padx=(0, 6))
+        self.ch_clustering = ctk.CTkSegmentedButton(
+            clu, values=["Auto (config)", "HDBSCAN", "Classifier"],
+        )
+        self.ch_clustering.set("Auto (config)")
+        self.ch_clustering.pack(side="left")
+
+        ctk.CTkLabel(
+            parent,
+            text=(
+                "Each ticked stage runs in sequence. Needs para_procedure_filter in "
+                "the battery config — the list of programme-name substrings marking "
+                "the parametrization test files. Outputs go to <working_path>/"
+                "10_initial_characterization/<cell>/ (data/, plots/, "
+                "<cell>_parameters.json); the BOL capacity CSV stays out of "
+                "40_capacity_monitore/. Fixed models: 2RC (pulse), 2×ZARC + "
+                "generalized Warburg (EIS). The three fit blocks run "
+                "independently (--only): unticking one keeps its previous "
+                "results in <cell>_parameters.json instead of refitting it. "
+                "Not part of 'Run all' — this is a one-off BOL step, not part "
+                "of the aging loop."
+            ),
+            text_color="#888",
+            wraplength=900,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 6))
+
+        btns = ctk.CTkFrame(parent, fg_color="transparent")
+        btns.grid(row=2, column=0, sticky="ew", padx=8, pady=10)
+        self.ch_run_btn = ctk.CTkButton(
+            btns, text="▶ Run characterization", width=200,
+            command=self._run_characterization,
+        )
+        self.ch_run_btn.pack(side="right", padx=4)
+
     # ------------------------------------------------------------- state I/O
 
     def _restore_state(self) -> None:
@@ -543,6 +609,21 @@ class PipelineUI(ctk.CTk):
         self.tr_model_out.insert(0, s.get("tr_model_out", ""))
         self.tr_meta_out.insert(0, s.get("tr_meta_out", ""))
         self.tr_labels.set(s.get("tr_labels", "Config"))
+        self.ch_cells.insert(0, s.get("ch_cells", ""))
+        # Every stage defaults to ticked — the usual run is end to end.
+        if s.get("ch_build", True):
+            self.ch_build.select()
+        if s.get("ch_pipeline", True):
+            self.ch_pipeline.select()
+        if s.get("ch_fit_pulse", True):
+            self.ch_fit_pulse.select()
+        if s.get("ch_fit_eis", True):
+            self.ch_fit_eis.select()
+        if s.get("ch_fit_qocv", True):
+            self.ch_fit_qocv.select()
+        if s.get("ch_overwrite"):
+            self.ch_overwrite.select()
+        self.ch_clustering.set(s.get("ch_clustering", "Auto (config)"))
 
         dl = {**DEFAULT_DOWNLOAD_CFG, **s.get("download_cfg", {})}
         self._apply_download_cfg(dl)
@@ -562,6 +643,14 @@ class PipelineUI(ctk.CTk):
             "tr_model_out": self.tr_model_out.get(),
             "tr_meta_out": self.tr_meta_out.get(),
             "tr_labels": self.tr_labels.get(),
+            "ch_cells": self.ch_cells.get(),
+            "ch_build": bool(self.ch_build.get()),
+            "ch_pipeline": bool(self.ch_pipeline.get()),
+            "ch_fit_pulse": bool(self.ch_fit_pulse.get()),
+            "ch_fit_eis": bool(self.ch_fit_eis.get()),
+            "ch_fit_qocv": bool(self.ch_fit_qocv.get()),
+            "ch_overwrite": bool(self.ch_overwrite.get()),
+            "ch_clustering": self.ch_clustering.get(),
             "download_cfg": self._collect_download_cfg(),
         })
         _save_ui_state(self._state)
@@ -811,6 +900,77 @@ class PipelineUI(ctk.CTk):
             steps.append((label, argv))
         return steps
 
+    def _build_bronze_para_argv(self) -> list[str] | None:
+        cfg = self._battery_cfg_or_warn()
+        if not cfg:
+            return None
+        argv = [sys.executable, "download/build_bronze_para.py", cfg]
+        cells = self.ch_cells.get().strip().split()
+        if cells:
+            argv += ["--cells", *cells]
+        if self.ch_overwrite.get():
+            argv.append("--overwrite")
+        return argv
+
+    def _build_char_pipeline_argv(self) -> list[str] | None:
+        cfg = self._battery_cfg_or_warn()
+        if not cfg:
+            return None
+        argv = [sys.executable, "-m", "characterize.main_para", cfg]
+        cells = self.ch_cells.get().strip().split()
+        if cells:
+            argv += ["--cells", *cells]
+        if self.ch_overwrite.get():
+            argv.append("--overwrite")
+        clustering = {"HDBSCAN": "hdbscan", "Classifier": "classifier"}.get(
+            self.ch_clustering.get()
+        )
+        if clustering:
+            argv += ["--clustering", clustering]
+        return argv
+
+    def _char_fit_parts(self) -> list[str]:
+        """The ticked fit blocks, in the CLI's order."""
+        return [
+            part for ticked, part in (
+                (self.ch_fit_pulse.get(), "pulse"),
+                (self.ch_fit_eis.get(), "eis"),
+                (self.ch_fit_qocv.get(), "qocv"),
+            ) if ticked
+        ]
+
+    def _build_char_fit_argv(self) -> list[str] | None:
+        cfg = self._battery_cfg_or_warn()
+        if not cfg:
+            return None
+        argv = [sys.executable, "-m", "characterize.fit_characterization", cfg]
+        cells = self.ch_cells.get().strip().split()
+        if cells:
+            argv += ["--cells", *cells]
+        parts = self._char_fit_parts()
+        if len(parts) < 3:                 # all three ticked == the plain run
+            argv += ["--only", *parts]
+        return argv
+
+    def _collect_characterization_steps(self) -> list[tuple[str, list[str]]] | None:
+        """(label, argv) for each ticked stage; None if the config is invalid."""
+        fit_parts = self._char_fit_parts()
+        steps: list[tuple[str, list[str]]] = []
+        for ticked, label, builder in (
+            (self.ch_build.get(), "build_bronze_para", self._build_bronze_para_argv),
+            (self.ch_pipeline.get(), "characterization pipeline",
+             self._build_char_pipeline_argv),
+            (bool(fit_parts), f"characterization fit ({'/'.join(fit_parts)})",
+             self._build_char_fit_argv),
+        ):
+            if not ticked:
+                continue
+            argv = builder()
+            if argv is None:
+                return None
+            steps.append((label, argv))
+        return steps
+
     def _build_train_argv(self) -> list[str] | None:
         cfg = self._battery_cfg_or_warn()
         if not cfg:
@@ -873,6 +1033,21 @@ class PipelineUI(ctk.CTk):
         argv = self._build_train_argv()
         if argv:
             self._launch(argv, label="train classifier")
+
+    def _run_characterization(self):
+        if self._runner.is_running:
+            messagebox.showwarning("Busy", "A stage is already running.")
+            return
+        steps = self._collect_characterization_steps()
+        if steps is None:
+            return  # invalid config — error already shown
+        if not steps:
+            messagebox.showinfo(
+                "Nothing selected", "Tick at least one characterization stage to run."
+            )
+            return
+        self._append_console("=== Running initial characterization ===\n")
+        self._launch_chain(steps)
 
     def _run_all(self):
         if self._runner.is_running:

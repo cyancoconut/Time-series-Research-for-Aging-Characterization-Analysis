@@ -22,13 +22,14 @@ python main.py /path/to/battery_config_VTC_linux.json --cells VTC_cell01 VTC_cel
 
 The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` still works; `main.py` is the current entry point.
 
-**Unified UI**: `src/pipeline_ui.py` — customtkinter app wrapping six stages (Download / Build BRONZE_CU / Run Pipeline / Monitor / Evaluation / Train Classifier) with a shared config picker, per-tab Run buttons, a "Run all 1→2→3→4→5" chain, Stop, and a live console. Persists paths to `~/.config/metabatt_ui.json`. Tab 6 (Train Classifier) is intentionally **outside** the chain — an offline build step. Prereq on Linux: `sudo apt install python3-tk`. Each Run button spawns the matching CLI:
+**Unified UI**: `src/pipeline_ui.py` — customtkinter app wrapping seven stages (Download / Build BRONZE_CU / Run Pipeline / Monitor / Evaluation / Train Classifier / Initial Characterization) with a shared config picker, per-tab Run buttons, a "Run all 1→2→3→4→5" chain, Stop, and a live console. Persists paths to `~/.config/metabatt_ui.json`. Tab 6 (Train Classifier) and Tab 7 (Initial Characterization) are intentionally **outside** the chain — offline/one-off build steps. Prereq on Linux: `sudo apt install python3-tk`. Each Run button spawns the matching CLI:
 - Tab 1 → `download/run_download.py <download_cfg.json>` (headless wrapper of `download/download_GUI.py`)
 - Tab 2 → `download/build_bronze_cu_with_ah.py <battery_cfg> [--cells …] [--overwrite] [--incremental]`. Honors `download_from`/`upload_to` (same as `main.py`); `local` reads per-test parquets from `<working_path>/<cell>/*.parquet`, `minio` (default) from `<minio_prefix>/<cell>/`. Legacy `save_local`/`upload_s3` accepted when `upload_to` absent. Skips if the target BRONZE_CU already exists. **`--incremental`** appends only test files not yet in the per-cell manifest sidecar (`<cell>_manifest.json`, beside BRONZE_CU local + MinIO-untagged) instead of re-reading/re-integrating every file: the manifest carries the processed-file list + running Ah total + last sample, so the cumulative Ah integral continues seamlessly and the output equals a full rebuild. **Dead time between test files books no Ah**: any interval whose Δt exceeds the gap cut (auto `50 × median Δt`, or a fixed `ah_gap_threshold_s`) is masked, so a parked cell between files can't interpolate phantom throughput across the gap (`util/add_ah_throughput.py`). Applies on the incremental seed→first-new-row bridge too. Full builds also write the manifest; `--incremental` falls back to a full build when no prior state exists. Assumes new files have later timestamps (a backfilled earlier-`Zeit` file needs `--overwrite`). CU detection (`_is_cu`): per-test file is a check-up when its 4th `=`-delimited filename field contains `procedure_filter`, which is **required** (`process_cell` raises `ValueError` if unset). `procedure_filter` may be a single substring or a **list of substrings** (matches when the field contains **any** entry — e.g. `["jri_CU", "jri_Char"]` to fold a characterization run in with the routine checkup); normalized via `util.procedure_filter.as_filter_list`.
 - Tab 3 → `main.py <battery_cfg> [--cells …] [--overwrite] [--clustering …]`. A **Clustering** toggle (Auto / HDBSCAN / Classifier) maps to `--clustering`, so HDBSCAN can be forced even when the config sets `classifier_model_path`. A separate **Interpret clusters (LLM)** button runs `cluster.interpret_clusters` (label-only) on the existing CSVs.
 - Tab 4 → `python -m monitor.aging_status <battery_cfg> [-o …]`
 - Tab 5 → a checklist of evaluation outputs run in sequence by one "Run evaluation" button: **Fleet-wide capacity aggregation** → `python -m evaluation.export_cap_pulse <battery_cfg>`; **Capacity evaluation (Alterungsmatrix)** → `python -m evaluation.aging_matrix <battery_cfg>`. Pulse / qOCV evaluations are placeholder checkboxes (disabled) for future stages. The "Run all 1→2→3→4→5" chain runs stages 1–4 then every ticked Tab 5 evaluation.
 - Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …] [--labels …]`. A **Labels** toggle (Config / target / llm) maps to `--labels`; `Config` omits it so the config's `classifier_label_source` (default `target`) decides.
+- Tab 7 → `download/build_bronze_para.py` → `python -m characterize.main_para` → `python -m characterize.fit_characterization`, each gated by its checkbox and run in sequence. The fit stage has **one checkbox per block** (pulse / EIS / qOCV) → `--only`; all three ticked passes no flag, none ticked skips the stage. Outside the chain (one-off BOL step).
 
 The Download tab's "Save JSON" matches `download/get_user_input.py`; full-pipeline runs auto-write it to `.metabatt_ui_download.json` (gitignored).
 
@@ -75,7 +76,7 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
    - `20_export_pulse/<cell_stem>/<cell_stem>_pulse_BM<BM_Programm>_<SOH>SOH.parquet`
    - `30_export_qocv/<cell_stem>/<cell_stem>_qocv_{dch,cha}_BM<BM_Programm>_<SOH>SOH.parquet`
 
-   Routing follows `download_from`/`upload_to`. Export MinIO keys are **untagged** (no `10_TRACY`).
+   Routing follows `download_from`/`upload_to`. Export MinIO keys are **untagged** (no `TRACY`).
 
    - **`output/export_eis.py`** — optional per-`BM_Programm` EIS export (flag `export_eis`, default off). Unlike pulse/qOCV (which read GOLD segments), EIS impedance data lives in **standalone files** in the cell's download folder; the cycler timeline only carries an `EIS` *label* marking when a measurement fired. `export_eis` discovers those files (`util/io_eis.py`), reduces each to a settled per-frequency spectrum, matches each to a `BM_Programm` by nearest EIS-labelled segment time, and bundles **one file per program** with every matched spectrum stacked (tagged by `eis_number`/`Time`/`U`). SOH from the program's CAP, same as pulse/qOCV. File: `25_export_eis/<cell_stem>/<cell_stem>_eis_BM<BM_Programm>_<SOH>SOH.parquet` (MinIO untagged).
      - **EIS files** (`util/io_eis.py`): one measurement per file (csv or parquet), rows = per-second dwell samples of a frequency sweep. Recognised by the `=`-field measurement token `eis_file_marker` (default `(?:EIS|INS)\d+`, e.g. `EIS00017`; cycler tests carry `TS…`) — **not** by "EIS" in the procedure name (over-matches cycler EIS procedures). Reduction keeps the **last settled row per `ActFreq`** (`ActFreq>0 & Betrag>0`), canonical cols `Time, frequency (ActFreq), Z_real (Zreal1), Z_imag (Zimg1), Z_abs (Betrag), phase (Phase), U (U1)`. Filename metadata parsed layout-agnostically (cell_stem = field 1, a datetime field, the marker token). Source per `download_from` (local `<working_path>/<cell_stem>/`, minio `<minio_prefix>/<cell_stem>/`).
@@ -92,7 +93,7 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 
 - **Feature basis** (`FEATURE_COLS`, 12 cols) — scale-/chemistry-portable: current profile (`Current_{mean,std,max,min,range}`, `abs_Current_mean`, normalized ÷ `Nom_Capacity`), voltage **edges** (`Voltage_{max,min,range}`, ÷ `(V_max − V_min)`; `Voltage_range` is the SoC-swing proxy), `Duration_{minutes,quartile}`, and `prev_end_voltage_norm`. Voltage *curve shape* (`Voltage_mean/std`) and `Temperature_mean` are **excluded on purpose** (sensor-/chemistry-bound, no accuracy cost). Contract lives in `_meta.json["feature_columns"]`; `predict_classifier` reads it from there. `create_features` still computes the dropped cols (inert).
 - **Context feature** `prev_end_voltage_norm` (`create_features.py`): end-of-segment voltage of the most recent **non-PAU** predecessor (walk back ≤4 steps, skip PAU), normalized as `(V - V_min) / (V_max - V_min)` (same scale as `Voltage_*` features: 0 = bottom rail, 1 = top rail); `-1.0` if no predecessor exists. Mirrors `post_cluster_filter.previous_voltage` — the signal the CAP rule keys on (a true CAP discharge follows a full charge). Inert for HDBSCAN (3-col subset). **CSVs predating this column must be regenerated before training** — `train_classifier` aborts if it's absent.
-- **Training** (`python -m cluster.train_classifier <battery_cfg>`): reads every `with_features_post_labeled/*.csv` (post-#37 these carry all segments + `cluster_id`, supplying negatives), weak-labels leftovers via `bootstrap_leftover_labels`, runs leave-one-cell-out CV, then refits on all cells. **Output**: pipeline artifact → `<working_path>/60_classifier/models/<type_cell>_classifier_<UTC-timestamp>.joblib` + `_meta.json` (falls back to `../models/` only if `working_path` unset). Timestamped, so nothing is overwritten — **prune manually**, and `classifier_model_path` must point at a specific file. `--model-out`/`--meta-out` override the stem but a `_<timestamp>` suffix is always appended. Uploaded **untagged** to `<minio_prefix>/60_classifier/models/` when `upload_to` includes minio. **Source routing** (`_load_cell_csvs`): `local` globs `<working_path>/with_features_post_labeled/*.csv`; `minio` lists/fetches the tagged `<prefix>/10_TRACY/with_features_post_labeled/`. One config = one source.
+- **Training** (`python -m cluster.train_classifier <battery_cfg>`): reads every `with_features_post_labeled/*.csv` (post-#37 these carry all segments + `cluster_id`, supplying negatives), weak-labels leftovers via `bootstrap_leftover_labels`, runs leave-one-cell-out CV, then refits on all cells. **Output**: pipeline artifact → `<working_path>/60_classifier/models/<type_cell>_classifier_<UTC-timestamp>.joblib` + `_meta.json` (falls back to `../models/` only if `working_path` unset). Timestamped, so nothing is overwritten — **prune manually**, and `classifier_model_path` must point at a specific file. `--model-out`/`--meta-out` override the stem but a `_<timestamp>` suffix is always appended. Uploaded **untagged** to `<minio_prefix>/60_classifier/models/` when `upload_to` includes minio. **Source routing** (`_load_cell_csvs`): `local` globs `<working_path>/with_features_post_labeled/*.csv`; `minio` lists/fetches the tagged `<prefix>/TRACY/with_features_post_labeled/`. One config = one source.
 - **Bootstrap labels** (`bootstrap_leftover_labels`): names the stringified raw leftover clusters by scale-free signature, **without touching** final labels (`CAP`/`PUL`/`PUL*RES`/`qOCV_*`/`-1`). Runs in two places: (a) `main.py` HDBSCAN path — after target sync, applied to `X_silver` and mapped into `df_gold["target"]` so the CSV **and** GOLD carry `PREP_CHA`/`SOC_ADJUST`/`-1` (raw integer cluster kept in `cluster_id`); changes no numeric result. (b) `train_classifier._load_cell_csvs` — idempotent re-derivation for legacy CSVs. Rules:
   - `PREP_CHA` — charge (`Current_mean > 0`) at ≥ `min_prep_current` (default 0.1, ~C/10) ending near full (`Voltage_max > 0.95`).
   - `SOC_ADJUST` — partial charge/discharge at ≥ `min_prep_current` ending at intermediate SoC (`Voltage_max ≤ 0.95` charge, or `Voltage_min > 0.05` discharge). `PREP_CHA` wins ties.
@@ -116,7 +117,139 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 
 **Aging matrix** — `evaluation/aging_matrix.py` (`python -m evaluation.aging_matrix <cfg> [-o …]`): per-cell capacity loss normalized by Ah throughput, aggregated over the design space. Reuses `export_cap_pulse.build_capacity_table`; needs `Ah_throughput` (aborts otherwise). Per cell: `capacity_lost` = max−min `Capacity_py`, `Delta_Ah_throughput` = max−min `Ah_throughput`. Matrix: group by `(C_Rate, Temperature, DOD, SOC)` → mean/std, `candidate_count`, cell list, `capacity_lost_norm`. Output: `<working_path>/50_evaluation/aging_matrix.{csv,html}` (interactive plotly), MinIO untagged.
 
-**HDBSCAN vs classifier diff** — `evaluation/compare_labels.py` (`python -m evaluation.compare_labels <cfg> [--source local|minio] [--hdbscan-dir] [--classifier-dir] [-o]`): diffs the two per-segment label sets per cell (joined on `ID`) to see whether the classifier recovers CAP check-ups HDBSCAN missed (invisible to the LOCO report, which scores against HDBSCAN's own labels). Prereq: run the pipeline twice on the same cells (HDBSCAN, then classifier with `--overwrite`). `local` reads `<working_path>/with_features_post_labeled/` (HDBSCAN) + `…/60_classifier/with_features_post_labeled/` (classifier); `minio` reads tagged `10_TRACY/…` + untagged `60_classifier/…`. Reports cell coverage (both / classifier-only / HDBSCAN-only), per-`(cell, BM_Programm)` CAP-count delta, label transitions, and per-segment disagreements with explanatory features. Output (default `<working_path>/50_evaluation`): `label_diff_segments.csv`, `cap_count_diff.csv`, `cap_recovered_cells.csv` (always written locally).
+**HDBSCAN vs classifier diff** — `evaluation/compare_labels.py` (`python -m evaluation.compare_labels <cfg> [--source local|minio] [--hdbscan-dir] [--classifier-dir] [-o]`): diffs the two per-segment label sets per cell (joined on `ID`) to see whether the classifier recovers CAP check-ups HDBSCAN missed (invisible to the LOCO report, which scores against HDBSCAN's own labels). Prereq: run the pipeline twice on the same cells (HDBSCAN, then classifier with `--overwrite`). `local` reads `<working_path>/with_features_post_labeled/` (HDBSCAN) + `…/60_classifier/with_features_post_labeled/` (classifier); `minio` reads tagged `TRACY/…` (falling back to the legacy `10_TRACY/…`) + untagged `60_classifier/…`. Reports cell coverage (both / classifier-only / HDBSCAN-only), per-`(cell, BM_Programm)` CAP-count delta, label transitions, and per-segment disagreements with explanatory features. Output (default `<working_path>/50_evaluation`): `label_diff_segments.csv`, `cap_count_diff.csv`, `cap_recovered_cells.csv` (always written locally).
+
+## Initial characterization (BOL parametrization)
+
+A separate, one-off track for the parametrization run that precedes aging.
+Parametrization test files sit in the same per-cell download folders as the CU
+tests and are selected by `para_procedure_filter` (a **list** of programme-name
+substrings; one element is the normal case).
+
+1. **`download/build_bronze_para.py <cfg> [--cells …] [--overwrite]`**
+   — the CU builder (`build_bronze_cu_with_ah.run`) parameterized by
+   `layer="BRONZE_PARA"` + `filter_key="para_procedure_filter"`. Writes
+   `<working_path>/BRONZE_PARA/<cell>.parquet` + manifest sidecar; MinIO
+   `<prefix>/BRONZE_PARA/`. **No `--incremental`** — a parametrization run is a
+   one-off BOL measurement, not a growing aging series; rebuild with
+   `--overwrite`.
+2. **`python -m characterize.main_para <cfg> [--cells …] [--overwrite] [--clustering …]`**
+   — `main.run_pipeline` with the `CHARACTERIZATION` run context
+   (`util/run_context.py`). Same dismember → features → clustering → calculate
+   stages; reads BRONZE_PARA and forces the pulse/EIS/qOCV exports on.
+3. **`python -m characterize.fit_characterization <cfg> [--cells …]
+   [--only {pulse,eis,qocv} …]`** — fits and plots the bundles. Standalone, so
+   fits can be repeated without redoing segmentation. The three blocks are
+   independently selectable via `--only` (omit = all three); a subset run
+   **merges** into the existing `<cell>_parameters.json`, so the blocks left
+   out keep their previous results instead of being dropped.
+
+**`RunContext`** (`util/run_context.py`) carries what differs between run
+flavours — `bronze_layer`, `procedure_filter_key`, `export_root_prefix`,
+`force_exports` — threaded explicitly through `run_pipeline` →
+`_process_cell` → `_process_cell_inner` → the export modules, defaulting to
+`CU` (today's behaviour, unchanged).
+
+**Layout** — `export_root` covers *everything* the run writes, so a para run
+never overwrites the CU `GOLD/<cell>.parquet` or pollutes
+`40_capacity_monitore/`:
+
+```
+<working_path>/10_initial_characterization/<cell_stem>/
+├── <cell>_parameters.json
+├── <cell>_{pulse,eis,qocv}_fits.csv   # the JSON's fits[] as flat tables
+├── GOLD.parquet
+├── with_features_post_labeled.csv
+├── <cell>_capacity.csv
+├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
+└── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>.png
+            eis_{2zarc_warburg,raw_spectra,fit_overlay}_<stem>_<direction>.png
+            qocv.png
+```
+
+MinIO mirrors this under `<prefix>/10_initial_characterization/<cell_stem>/`,
+**untagged**. The `--overwrite` skip-check keys on this root's GOLD.
+
+**Models are fixed defaults**, not config keys: **2RC** for pulse
+(`analysis/fit_2rc_pulse.py`), **2×ZARC + series-L + generalized Warburg** for
+EIS (`analysis/eis_vs_soc.fit_zarc_warburg_eis`), and no fit for qOCV (the
+curve plus its throughput capacities). The EIS diffusion element has φ
+**fitted** (`DIFFUSION_PHI_BOX`) but τ_d **pinned** (`DIFFUSION_TAU_BOX`, 5 s):
+`R_d_z` is the amplitude at ω = 1/τ_d and `tau_d_z` a shape constant, not a
+result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — are
+recorded in `parameters.json`'s `eis.settings`; both were tuned on the NFPP
+sweep and may need retuning for another cell type or frequency range.
+
+**Sweep direction** — a full-SOC-sweep pulse or EIS run goes one way (start
+full and empty, or start empty and fill), and SOC is assigned by measurement
+*order*, so a wrong guess inverts the whole SOC axis. **One bundle = one
+direction**: a bundle is a single `BM_Programm`, and the parametrization
+procedure puts the charge and discharge sweeps in separate programmes. Both
+paths detect it the same way, from the first→last trend of a measured voltage
+(EIS: per-measurement terminal `U`, `_bundle_direction`; pulse: pre-pulse
+`OCV_V`, `pulse_fit._assign_soc_to_bundle`) via the shared turning-point rule
+in `analysis/sweep_direction.py`. Config `soc_sweep_direction` overrides
+detection for both. The result lands in three places: the plot **filename**,
+each fit record (`sweep_direction` + `sweep_direction_source` ∈
+`config-override`/`detected`/`assumed`), and `settings.bundles[]`. In
+`PULSE_COLS`, `sweep_direction` is distinct from `direction` — the latter is
+the pulse's own CHA/DCH polarity. A bundle that reverses mid-sweep is **not**
+split: `_bundle_direction` reports the excursion as `reversal_mV` and warns.
+
+**SOC from the qOCV curve** (`analysis/soc_from_qocv.py`) — the **only** source
+of SOC. The order-based **ladder** (`100 − 5·i` by measurement index) has been
+**removed** from `eis_vs_soc.build_eis_table` and `pulse_fit.assign_pulse_soc`,
+which now leave `SOC_pct` NaN for this module to fill. It assumed every step
+moved the same charge, and was wrong twice over: the measured voltages
+contradict it (the first NFPP EIS step drops 155 mV, the next ones ~15 mV, all
+labelled "5 %"), and the run puts a **CHA and a DCH pulse on each SOC step**, so
+the pulse index advanced twice per real step and the ladder ran **down to
+−75 % SOC**. With no same-direction qOCV, `SOC_pct` stays NaN and the vs-SOC
+plots skip with a recorded reason — an absent SOC is honest, a fabricated one
+is not. Each
+measurement's rest voltage (EIS `U`, pulse `OCV_V`) is interpolated onto the
+run's own qOCV curve, whose coulomb count gives `SOC(V) = 100·(Q−Q_min)/(Q_max−Q_min)`.
+`SOC_pct_ladder` no longer exists.
+Sweep selection: **same direction** (from the `_qocv_cha_`/`_qocv_dch_`
+filename token — the branches differ by the qOCV hysteresis) and **nearest in
+time** (the qOCV usually sits in a different `BM_Programm` than the bundle).
+The order-based value is kept as `SOC_pct_ladder` for comparison, and
+`settings.bundles[]` records `soc_source_file` / `soc_source_bm` /
+`soc_dt_hours` / `n_clipped` / `ir_correction`. With no same-direction qOCV in
+the folder the ladder is kept and a warning is logged — a missing qOCV never
+blanks the SOC axis.
+
+**IR correction** — the qOCV is measured *under load* at ~C/20 while the mapped
+values are **rest** voltages, so the branch's overpotential is removed first.
+It is measured from the pair itself, `η(SOC) = [V_cha(SOC) − V_dch(SOC)]/2`,
+and each branch shifted toward the middle (`V_dch + η`, `V_cha − η`). An
+independently measured resistance is **not** usable: on the NFPP cell η implies
+~11.9 mΩ mid-SOC while a 30 s pulse's 2RC fit gives `R0+R1+R2` = 5.6 mΩ (`R0`
+alone 3.8 mΩ) — over a 20 h sweep slow diffusion adds resistance a short pulse
+never sees, so a pulse/EIS-derived R removes only about half the offset.
+Correcting both branches by their own η makes them coincide, so this is
+equivalent to mapping on the cha/dch mean, but expressed per SOC and recorded.
+Verified by branch convergence: a rest voltage mapped on cha vs dch disagreed
+by mean −3.92 / max 14.78 SOC% uncorrected, and mean 0.00 / max 0.05 SOC%
+corrected. Falls back to the scalar `qocv_ir_ohm` (`V ∓ I·R`, `I` read from the
+sweep) when only one branch was exported, and to no correction when neither is
+available.
+
+**Nyquist zoom insets** (`eis_vs_soc.add_hf_inset`) — the full Nyquist view is
+dominated by the low-frequency diffusion tail, collapsing the kinetics into a
+few pixels at the origin. Both Nyquist axes (`plot_nyquist_by_soc` and the
+Nyquist panel of `plot_raw_spectra`) carry two zoom insets along the
+bottom-right: **R0 region** (tight on the real-axis intercept, so each SOC
+curve's crossing of −Z_imag = 0 is readable) and **MF arc** (the whole
+mid-frequency semicircle). Widths come from the fitted ZARC diameters — R0
+from `R1_z` alone, MF from `R1_z + R2_z`, since the visible arc is both. The
+y-window is scaled to the arc, **not** the data minimum: above the arc the cell
+turns inductive and −Z_imag dives to −5.9 mΩ (~14× the arc), which would
+flatten the semicircle to a line. Missing SOC (no qOCV) draws grey instead of
+a colormap artefact.
+
+**UI**: Tab 7 runs the three stages as a checklist. Like Tab 6 it is **outside**
+the "Run all 1→2→3→4→5" chain.
 
 ## Aging-status monitor
 
@@ -138,6 +271,7 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 | `cap_temp` | Target temperature(s) in °C for CAP segments. Scalar or list; each matches `Temperature_mean` within ±3 °C, OR-combined. |
 | `qOCV_CRate` | C-rate threshold for quasi-OCV (`0.05` → C/20, ~1200 min) |
 | `tolerances.qocv_duration_tolerance` | Multiplier on nominal qOCV duration (`60/qOCV_CRate` min) for `find_qocv`'s upper bound (default `1.2`) |
+| `tolerances.qocv_current_tolerance` | Half-width of `fetch_qOCV`'s **two-sided** current band, in **Amps** (absolute, not a C-rate; default `0.01`). A qOCV's mean current must satisfy `qOCV_CRate × Nom_Capacity ± qocv_current_tolerance`. The lower bound matters: with an upper bound only, a 0 A rest / EIS-dwell segment mislabelled `QOCV*` passed trivially and fell through `sign(0) != 1` to `qOCV_DCH`, exporting a bundle with no current and zero integrated capacity. |
 | `tolerances.qocv_std_tolerance` | Max current std for a qOCV in `fetch_qOCV`, as a C-rate (× `Nom_Capacity` → Amps; default `0.002`). Replaces the old absolute `0.001 A` cap that didn't scale with cell size. |
 | `pau_duration` | Pause threshold (min) for procedure boundaries (default 9.9) |
 | `min_rows` | Min rows to keep a segment (default 20) |
@@ -156,6 +290,8 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 | `classifier_meta_path` | Optional. Defaults to `<model stem>_meta.json`. |
 | `classifier_label_source` | `target` (default) or `llm` — training-target space for `train_classifier` (CLI `--labels` overrides). `llm` trains on the free-form `llm_label` column; inference maps it back via measured C-rate. |
 | `llm_interpret` | When true (or `main.py --interpret`), the HDBSCAN run is a label-only LLM pass: writes `llm_*` into the per-segment CSV and skips GOLD/exports. Default false. |
+| `para_procedure_filter` | **List** of programme-name substrings marking parametrization test files (single-element list is normal). Required by `build_bronze_para.py` and `characterize.main_para`. |
+| `qocv_ir_ohm` | Optional (Ω). Fallback IR correction for the qOCV→SOC mapping when only **one** branch was exported, so the pair-derived `η(SOC)` isn't available: the branch is shifted by `I·R` with `I` read from the sweep. Ignored when both cha and dch exist. Omit for no scalar fallback. |
 
 `hdbscan_para_layer_1["min_cluster_size"]` defaults to `max(2, n_programs − 1)`; an explicit config value wins (merged last). `cluster_selection_epsilon` must be **0.3** (not 3.0) for correct qOCV separation.
 
@@ -177,6 +313,8 @@ After each test pulse a C/2 restore returns the cell to its original SoC. `updat
 | `--overwrite` | Reprocess cells even if GOLD already exists |
 | `--clustering {auto,hdbscan,classifier}` | Override the clustering path. `auto` (default) lets `classifier_model_path` decide; `hdbscan` forces HDBSCAN even if a classifier model is configured; `classifier` requires one. |
 | `--interpret` | Label-only LLM route: force HDBSCAN, LLM-name each cluster into the per-segment CSV (`llm_*` columns), then stop — **no GOLD, no capacity/pulse/qOCV exports**. Sets config `llm_interpret`. Keys its skip-check on the GOLD path, so pair with `--overwrite` when GOLD already exists. |
+
+`characterize.main_para` takes the same `--cells` / `--overwrite` / `--clustering` flags as `main.py`.
 
 ## Post-labeling target sync
 

@@ -21,6 +21,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from util import io_router
+from util.run_context import CU, RunContext
 
 # BRONZE_CU is German-named and unsegmented; mirror dismember_raw_cell's rename.
 _BRONZE_RENAME = {
@@ -74,7 +75,10 @@ def _rehydrate_pau(stub_rows, bronze_df, columns):
     return out
 
 
-def export_pulse(df_export, soh, cell, cfg, paths, minio_client, bronze_path=None):
+def export_pulse(
+    df_export, soh, cell, cfg, paths, minio_client, bronze_path=None,
+    run_ctx: RunContext = CU,
+):
     stem = cell.split(".")[0]
     df_pul = df_export[df_export["target"] == "PUL"]
     if df_pul.empty:
@@ -128,5 +132,7 @@ def export_pulse(df_export, soh, cell, cfg, paths, minio_client, bronze_path=Non
             group.to_parquet(local_path, index=False)
             logging.info(f"{cell}: export_pulse -> {local_path}")
         if write_minio:
-            key = io_router.export_pulse_object_key(cell, filename)
+            key = io_router.export_pulse_object_key(
+                cell, filename, root=run_ctx.export_root(cell)
+            )
             io_router.upload_parquet(minio_client, cfg, group, key, include_tag=False)

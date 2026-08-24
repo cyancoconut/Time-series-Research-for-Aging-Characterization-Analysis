@@ -44,7 +44,7 @@ import pandas as pd
 from util import io_router
 
 # MinIO relative dirs for the two label sets (under <minio_prefix>/).
-_HDBSCAN_REL = f"{io_router.UPLOAD_PREFIX_TAG}/with_features_post_labeled"  # 10_TRACY/...
+_HDBSCAN_REL_BASE = "with_features_post_labeled"  # resolved to TRACY/ or 10_TRACY/
 _CLASSIFIER_REL = "60_classifier/with_features_post_labeled"
 
 # Features that make a disagreement interpretable (a real CAP is a long,
@@ -86,6 +86,19 @@ def _load_minio(client, cfg: dict, rel_dir: str) -> dict:
     out = {}
     for name in io_router.list_csv_objects(client, cfg, rel_dir):
         data = io_router.fetch_csv_object(client, cfg, rel_dir, name)
+        _coerce(name[: -len(".csv")], pd.read_csv(io.BytesIO(data)), out)
+    return out
+
+
+def _load_minio_tagged(client, cfg: dict, rel_base: str) -> dict:
+    """Like ``_load_minio`` but unions the ``TRACY/`` and legacy ``10_TRACY/``
+    prefixes of a tagged dir, so a half-migrated bucket doesn't silently lose
+    the cells still sitting under the old tag (see io_router.list_tagged_union
+    / resolve_tagged_object_rel)."""
+    out = {}
+    for name in io_router.list_tagged_union(client, cfg, rel_base, ".csv"):
+        rel = io_router.resolve_tagged_object_rel(client, cfg, rel_base, name)
+        data = io_router.fetch_csv_object(client, cfg, rel, name)
         _coerce(name[: -len(".csv")], pd.read_csv(io.BytesIO(data)), out)
     return out
 
@@ -239,9 +252,11 @@ def main(config_path: str, source, hdbscan_dir, classifier_dir, out_dir) -> None
 
     if source == "minio":
         client = io_router.make_minio_client(cfg)
-        logging.info(f"HDBSCAN    : minio <prefix>/{_HDBSCAN_REL}/")
+        logging.info(
+            f"HDBSCAN    : minio <prefix>/{{TRACY,10_TRACY}}/{_HDBSCAN_REL_BASE}/ (unioned)"
+        )
         logging.info(f"classifier : minio <prefix>/{_CLASSIFIER_REL}/")
-        h_cells = _load_minio(client, cfg, _HDBSCAN_REL)
+        h_cells = _load_minio_tagged(client, cfg, _HDBSCAN_REL_BASE)
         c_cells = _load_minio(client, cfg, _CLASSIFIER_REL)
     else:
         hdbscan_dir = hdbscan_dir or (

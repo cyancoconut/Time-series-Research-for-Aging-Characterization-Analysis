@@ -29,6 +29,7 @@ import pandas as pd
 
 from util import io_eis
 from util import io_router
+from util.run_context import CU, RunContext
 
 
 def _discover_and_load(cell_stem, cfg, minio_client, marker):
@@ -80,7 +81,7 @@ def _eis_anchors(df_gold, proc_filter):
     return df_gold.loc[mask, ["BM_Programm", "Time"]]
 
 
-def export_eis(df_gold, soh, cell, cfg, paths, minio_client):
+def export_eis(df_gold, soh, cell, cfg, paths, minio_client, run_ctx: RunContext = CU):
     stem = cell.split(".")[0]
     marker = cfg.get("eis_file_marker", io_eis.DEFAULT_EIS_FILE_MARKER)
     proc_filter = cfg.get("eis_procedure_filter", "EIS")
@@ -137,7 +138,9 @@ def export_eis(df_gold, soh, cell, cfg, paths, minio_client):
                 f"({group['eis_number'].nunique()} measurement(s))"
             )
         if write_minio:
-            key = io_router.export_eis_object_key(cell, filename)
+            key = io_router.export_eis_object_key(
+                cell, filename, root=run_ctx.export_root(cell)
+            )
             io_router.upload_parquet(minio_client, cfg, group, key, include_tag=False)
 
     if n_unmatched:

@@ -22,6 +22,7 @@ from output.export_qocv import export_qocv
 from output.export_eis import export_eis
 from output.export_capacity import export_capacity
 from util import io_router
+from util.run_context import CU, RunContext
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -59,7 +60,12 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = False):
+def run_pipeline(
+    cfg: dict,
+    target_specimen: list = None,
+    overwrite: bool = False,
+    run_ctx: RunContext = CU,
+):
     working_path = cfg.get("working_path")
     download_from = cfg.get("download_from", "local")
     upload_to = cfg.get("upload_to", "local")
@@ -69,11 +75,11 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
     )
 
     if download_from == "minio":
-        cells = io_router.list_bronze_cells(minio_client, cfg)
+        cells = io_router.list_bronze_cells(minio_client, cfg, layer=run_ctx.bronze_layer)
     else:
         if not working_path:
             raise ValueError("working_path required when download_from='local'")
-        cells = glob.glob1(os.path.join(working_path, "BRONZE_CU"), "*.parquet")
+        cells = glob.glob1(os.path.join(working_path, run_ctx.bronze_layer), "*.parquet")
 
     if target_specimen:
         cells = [c for c in cells if any(t in c for t in target_specimen)]
@@ -87,13 +93,13 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
 
         # Local skip-check only applies when we'd write a local GOLD file
         if io_router.writes_local(cfg) and working_path and not overwrite:
-            gold_path = _build_paths(cell, working_path)["gold"]
+            gold_path = _build_paths(cell, working_path, run_ctx=run_ctx)["gold"]
             if os.path.exists(gold_path):
                 logging.info(f"Skipping {cell} — local GOLD already exists")
                 continue
 
         try:
-            _process_cell(cell, cfg, minio_client, exceptions)
+            _process_cell(cell, cfg, minio_client, exceptions, run_ctx=run_ctx)
             processed += 1
         except Exception as e:
             logging.warning(f"{cell}: {type(e).__name__}: {e}")
@@ -132,12 +138,19 @@ def _interpret_x_silver(X_silver, cell, cfg):
     X_silver.drop(columns=["bootstrap_label"], inplace=True, errors="ignore")
 
 
-def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
+def _process_cell(
+    cell: str, cfg: dict, minio_client, exceptions: dict, run_ctx: RunContext = CU
+):
     working_path = cfg.get("working_path")
     download_from = cfg.get("download_from", "local")
 
     paths = (
-        _build_paths(cell, working_path, classifier=bool(cfg.get("classifier_model_path")))
+        _build_paths(
+            cell,
+            working_path,
+            classifier=bool(cfg.get("classifier_model_path")),
+            run_ctx=run_ctx,
+        )
         if working_path
         else None
     )
@@ -147,10 +160,12 @@ def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
     # Procedure-filter gate: peek at just the Prozedur column before pulling
     # the full bronze payload. On MinIO this uses an HTTP range-read so a
     # filtered-out cell never triggers fetch_bronze's full-file download.
-    procedure_filter = cfg.get("procedure_filter", None)
+    procedure_filter = cfg.get(run_ctx.procedure_filter_key, None)
     if procedure_filter is not None:
         if download_from == "minio":
-            with io_router.open_bronze_range(minio_client, cfg, cell) as src:
+            with io_router.open_bronze_range(
+                minio_client, cfg, cell, layer=run_ctx.bronze_layer
+            ) as src:
                 matched = processing_procedure_filter(src, procedure_filter)
         else:
             matched = processing_procedure_filter(paths["bronze"], procedure_filter)
@@ -161,20 +176,24 @@ def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
             return
 
     if download_from == "minio":
-        bronze_ctx = io_router.fetch_bronze(minio_client, cfg, cell)
+        bronze_ctx = io_router.fetch_bronze(
+            minio_client, cfg, cell, layer=run_ctx.bronze_layer
+        )
     else:
         bronze_ctx = nullcontext(paths["bronze"])
 
     with bronze_ctx as bronze_path:
         return _process_cell_inner(
-            cell, cfg, bronze_path, paths, minio_client, exceptions
+            cell, cfg, bronze_path, paths, minio_client, exceptions, run_ctx=run_ctx
         )
 
 
-def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions):
+def _process_cell_inner(
+    cell, cfg, bronze_path, paths, minio_client, exceptions, run_ctx: RunContext = CU
+):
     # --- preSILVER ---
     logging.info(f"{cell}: dismembering")
-    procedure_filter = cfg.get("procedure_filter", None)
+    procedure_filter = cfg.get(run_ctx.procedure_filter_key, None)
     dismembered_df = dismember_raw_cell(
         cell,
         bronze_path,
@@ -288,11 +307,11 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     # HDBSCAN path only (the classifier route's CSV is not training data).
     if cfg.get("llm_interpret") and not classifier_path:
         _interpret_x_silver(X_silver, cell, cfg)
-        _write_x_silver(X_silver, cell, cfg, paths, minio_client)
+        _write_x_silver(X_silver, cell, cfg, paths, minio_client, run_ctx=run_ctx)
         logging.info(f"{cell}: llm_interpret route — wrote CSV with llm_* only, skipping GOLD/exports")
         return
 
-    _write_x_silver(X_silver, cell, cfg, paths, minio_client)
+    _write_x_silver(X_silver, cell, cfg, paths, minio_client, run_ctx=run_ctx)
 
     # --- GOLD ---
     logging.info(f"{cell}: calculating results")
@@ -338,7 +357,7 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         leftover_map = X_silver.set_index("ID")["target"]
         df_gold["target"] = df_gold["ID"].map(leftover_map).fillna(df_gold["target"])
 
-    _write_x_silver(X_silver, cell, cfg, paths, minio_client)
+    _write_x_silver(X_silver, cell, cfg, paths, minio_client, run_ctx=run_ctx)
 
     # Both paths continue to GOLD. The classifier is a drop-in for HDBSCAN: its
     # segment CSV is namespaced under 60_classifier/ (kept out of the training
@@ -359,7 +378,7 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
             df_gold[col] = df_gold[col].astype(str)
 
     if cfg.get("export_gold", True):
-        _write_gold(df_gold, cell, cfg, paths, minio_client)
+        _write_gold(df_gold, cell, cfg, paths, minio_client, run_ctx=run_ctx)
     else:
         logging.info(f"{cell}: export_gold=false — skipping GOLD write")
 
@@ -367,15 +386,17 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA", "PAU"])
     ]
     soh = _build_soh_map(df_export, cfg["nom_capacity"])
-    export_capacity(df_export, soh, cell, cfg, paths, minio_client)
-    if cfg.get("export_pulse"):
-        export_pulse(df_export, soh, cell, cfg, paths, minio_client, bronze_path)
-    if cfg.get("export_qocv"):
-        export_qocv(df_export, soh, cell, cfg, paths, minio_client)
-    if cfg.get("export_eis"):
+    export_capacity(df_export, soh, cell, cfg, paths, minio_client, run_ctx=run_ctx)
+    if cfg.get("export_pulse") or run_ctx.force_exports:
+        export_pulse(
+            df_export, soh, cell, cfg, paths, minio_client, bronze_path, run_ctx=run_ctx
+        )
+    if cfg.get("export_qocv") or run_ctx.force_exports:
+        export_qocv(df_export, soh, cell, cfg, paths, minio_client, run_ctx=run_ctx)
+    if cfg.get("export_eis") or run_ctx.force_exports:
         # df_gold (not df_export): EIS spectra are matched to the cell's EIS-
         # labelled segments, which df_export filters out.
-        export_eis(df_gold, soh, cell, cfg, paths, minio_client)
+        export_eis(df_gold, soh, cell, cfg, paths, minio_client, run_ctx=run_ctx)
 
 
 def _build_soh_map(df_export, nom_capacity):
@@ -424,24 +445,36 @@ def _resolve_classifier_paths(cfg, minio_client, model_path, meta_path, cell):
     return resolve(model_path, "model"), resolve(meta_path, "meta")
 
 
-def _write_x_silver(df, cell, cfg, paths, minio_client):
+def _write_x_silver(df, cell, cfg, paths, minio_client, run_ctx: RunContext = CU):
     classifier = bool(cfg.get("classifier_model_path"))
+    root = run_ctx.export_root(cell)
     if io_router.writes_local(cfg) and paths:
         os.makedirs(os.path.dirname(paths["X_silver"]), exist_ok=True)
         df.to_csv(paths["X_silver"], index=False)
         logging.info(f"{cell}: X_silver -> {paths['X_silver']}")
     if io_router.writes_minio(cfg):
-        key = io_router.x_silver_object_key(cell, classifier=classifier)
-        io_router.upload_csv(minio_client, cfg, df, key, include_tag=not classifier)
+        key = io_router.x_silver_object_key(cell, classifier=classifier, root=root)
+        # Rooted runs are untagged: they live beside their own data/ and plots/,
+        # not under the shared TRACY/ layer tree.
+        io_router.upload_csv(
+            minio_client, cfg, df, key, include_tag=not (classifier or root)
+        )
 
 
-def _write_gold(df, cell, cfg, paths, minio_client):
+def _write_gold(df, cell, cfg, paths, minio_client, run_ctx: RunContext = CU):
+    root = run_ctx.export_root(cell)
     if io_router.writes_local(cfg) and paths:
         os.makedirs(os.path.dirname(paths["gold"]), exist_ok=True)
         df.to_parquet(paths["gold"], index=False)
         logging.info(f"{cell}: GOLD -> {paths['gold']}")
     if io_router.writes_minio(cfg):
-        io_router.upload_parquet(minio_client, cfg, df, io_router.gold_object_key(cell))
+        io_router.upload_parquet(
+            minio_client,
+            cfg,
+            df,
+            io_router.gold_object_key(cell, root=root),
+            include_tag=not root,
+        )
 
 
 def _run_clustering(
@@ -538,8 +571,29 @@ def _run_clustering(
     return df_final, X_final
 
 
-def _build_paths(cell: str, working_path: str, classifier: bool = False) -> dict:
+def _build_paths(
+    cell: str, working_path: str, classifier: bool = False, run_ctx: RunContext = CU
+) -> dict:
     stem = cell.split(".")[0]
+    bronze = os.path.join(working_path, run_ctx.bronze_layer, cell)
+
+    export_root = run_ctx.export_root(cell)
+    if export_root:
+        # Characterization: every artefact under one per-cell root, so a para
+        # run never collides with the CU GOLD / capacity CSV of the same cell.
+        base = os.path.join(working_path, *export_root.split("/"))
+        data = os.path.join(base, "data")
+        return {
+            "bronze": bronze,
+            "X_silver": os.path.join(base, "with_features_post_labeled.csv"),
+            "gold": os.path.join(base, "GOLD.parquet"),
+            "export_pulse_dir": data,
+            "export_eis_dir": data,
+            "export_qocv_dir": data,
+            "export_capacity_dir": base,
+            "root": base,
+        }
+
     # The classifier path's CSVs are *not* valid training data, so they are
     # routed to 60_classifier/ (away from the HDBSCAN with_features_post_labeled/
     # that train_classifier reads) — keeping the two label sets side by side and
@@ -550,13 +604,14 @@ def _build_paths(cell: str, working_path: str, classifier: bool = False) -> dict
         else "with_features_post_labeled"
     )
     return {
-        "bronze": os.path.join(working_path, "BRONZE_CU", cell),
+        "bronze": bronze,
         "X_silver": os.path.join(working_path, x_silver_dir, stem + ".csv"),
         "gold": os.path.join(working_path, "GOLD", cell),
         "export_pulse_dir": os.path.join(working_path, "20_export_pulse", stem),
         "export_eis_dir": os.path.join(working_path, "25_export_eis", stem),
         "export_qocv_dir": os.path.join(working_path, "30_export_qocv", stem),
         "export_capacity_dir": os.path.join(working_path, "40_capacity_monitore"),
+        "root": None,
     }
 
 
