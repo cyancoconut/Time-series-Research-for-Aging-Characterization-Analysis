@@ -172,6 +172,21 @@ class DismemblerFunctions:
                 programm_df["pre_target"] = pd.NA
             programm_df.loc[pure_pau_proc, "pre_target"] = "PAU"
 
+            # Same treatment for the EIS dwell windows relabeled above: a pause
+            # inside an "_EIS_" procedure becomes Zustand "EIS", which takes it
+            # out of PAU_Columns and therefore out of the pure-PAU rule. Without
+            # its own pre-label it stays target -1 and reaches the feature table
+            # as a 0 A segment the clusterer/classifier has to guess at (it
+            # reads like a very slow sweep and gets called qOCV). It is a
+            # measurement window, not a procedure: label it here so it is
+            # excluded from clustering and doubles as an export_eis match anchor.
+            # Only *pure* EIS procedures qualify — a pulse with EIS rows in it
+            # stays a pulse.
+            pure_eis_proc = programm_df.groupby("BM_Programm_procedure")[
+                "Zustand"
+            ].transform(lambda x: (x == "EIS").all())
+            programm_df.loc[pure_eis_proc, "pre_target"] = "EIS"
+
             # Check if the procedure is too short (PAU stubs are exempt)
             for df_name, df_procedure in programm_df.groupby("BM_Programm_procedure"):
                 if df_procedure["Zustand"].isin(PAU_Columns).all():
@@ -235,14 +250,18 @@ def allocate_IDs(result_df, start_date=None, end_date=None):
 
     # Propagate dismember-time pre-labels to every row of the affected IDs.
     # `pre_target` is set in DismembererFunctions.dismember():
+    #   EIS   — pure EIS dwell windows (Zustand relabeled from PAU inside an
+    #           "_EIS_" procedure); joins the "EIS" target the Prozedur-NaN rule
+    #           above already produces
     #   PAU   — long-pause stubs (set after the PAU group handling, before the
     #           too-short discard sweep, so bucket-0 holds only PAU rows then)
     #   AGING — cyclic-data stubs (kept whole programms of ≤2 rows)
     # Promoting per-ID here ensures contaminating rows later dumped into the same
     # ID (typically <BM>_0) still carry the label, so the discard bucket is
-    # excluded from clustering wholesale.
+    # excluded from clustering wholesale. EIS goes first so a mixed bucket-0 that
+    # swallowed an EIS window still ends up PAU (the discard-bucket semantics).
     if "pre_target" in result_df.columns:
-        for label in ("PAU", "AGING"):
+        for label in ("EIS", "PAU", "AGING"):
             id_mask = result_df.groupby("ID")["pre_target"].transform(
                 lambda x, lbl=label: (x == lbl).any()
             )
