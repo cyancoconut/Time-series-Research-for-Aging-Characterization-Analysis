@@ -200,6 +200,7 @@ the "Run all 1→2→3→4→5" chain.
 | `cap_temp` | Target temperature(s) in °C for CAP segments. Scalar or list; each matches `Temperature_mean` within ±3 °C, OR-combined. |
 | `qOCV_CRate` | C-rate threshold for quasi-OCV (`0.05` → C/20, ~1200 min) |
 | `tolerances.qocv_duration_tolerance` | Multiplier on nominal qOCV duration (`60/qOCV_CRate` min) for `find_qocv`'s upper bound (default `1.2`) |
+| `tolerances.qocv_current_tolerance` | Half-width of `fetch_qOCV`'s **two-sided** current band, in **Amps** (absolute, not a C-rate; default `0.01`). A qOCV's mean current must satisfy `qOCV_CRate × Nom_Capacity ± qocv_current_tolerance`. The lower bound matters: with an upper bound only, a 0 A rest / EIS-dwell segment mislabelled `QOCV*` passed trivially and fell through `sign(0) != 1` to `qOCV_DCH`, exporting a bundle with no current and zero integrated capacity. |
 | `tolerances.qocv_std_tolerance` | Max current std for a qOCV in `fetch_qOCV`, as a C-rate (× `Nom_Capacity` → Amps; default `0.002`). Replaces the old absolute `0.001 A` cap that didn't scale with cell size. |
 | `pau_duration` | Pause threshold (min) for procedure boundaries (default 9.9) |
 | `min_rows` | Min rows to keep a segment (default 20) |

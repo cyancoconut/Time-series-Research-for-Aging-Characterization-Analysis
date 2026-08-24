@@ -115,10 +115,19 @@ class calculation:
         return abs(trimmed.mean()), trimmed.std()
 
     def fetch_qOCV(self, group, ID):
-        # when current mean is smaller than C/15, and the std is small, this must be a attempted qOCV measurement
+        # A qOCV is a steady sweep at the configured rate: its mean current sits
+        # in a two-sided band around qOCV_CRate x Nom_Capacity, and its std is
+        # small. The band is two-sided because the upper bound alone admits
+        # anything *below* the rate — including a segment at exactly 0 A. Rest
+        # / EIS-dwell segments mislabelled QOCV* pass an upper-bound-only test
+        # trivially (0 < i_nom, std 0 < cap) and then fall through the
+        # sign(0) != 1 branch to "qOCV_DCH", producing a bundle with zero
+        # current, zero integrated capacity and no sweep at all.
+        i_nom = self.qOCV_CRate * self.Nom_Capacity
         abs_current_mean, current_std = self._qocv_current_amps(group, ID)
         if (
-            abs_current_mean < (self.qOCV_CRate * self.Nom_Capacity) + self.qocv_current_tolerance
+            (abs_current_mean > i_nom - self.qocv_current_tolerance)
+            & (abs_current_mean < i_nom + self.qocv_current_tolerance)
         ) & (abs(current_std) < self.qocv_std_tolerance * self.Nom_Capacity):
             calculated_capacity = self.Ah_calculation(group)
             if np.sign(group["Current"].mean()) == 1:
