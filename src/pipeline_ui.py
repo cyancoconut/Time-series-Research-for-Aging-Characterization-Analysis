@@ -549,9 +549,6 @@ class PipelineUI(ctk.CTk):
         self.ch_overwrite = s.add_checkbox(
             "--overwrite (rebuild / reprocess even if output exists)"
         )
-        self.ch_incremental = s.add_checkbox(
-            "--incremental (BRONZE_PARA build: append only new test files)"
-        )
 
         clu = ctk.CTkFrame(s, fg_color="transparent")
         clu.grid(sticky="w", padx=4, pady=(2, 2))
@@ -626,8 +623,6 @@ class PipelineUI(ctk.CTk):
             self.ch_fit_qocv.select()
         if s.get("ch_overwrite"):
             self.ch_overwrite.select()
-        if s.get("ch_incremental"):
-            self.ch_incremental.select()
         self.ch_clustering.set(s.get("ch_clustering", "Auto (config)"))
 
         dl = {**DEFAULT_DOWNLOAD_CFG, **s.get("download_cfg", {})}
@@ -655,7 +650,6 @@ class PipelineUI(ctk.CTk):
             "ch_fit_eis": bool(self.ch_fit_eis.get()),
             "ch_fit_qocv": bool(self.ch_fit_qocv.get()),
             "ch_overwrite": bool(self.ch_overwrite.get()),
-            "ch_incremental": bool(self.ch_incremental.get()),
             "ch_clustering": self.ch_clustering.get(),
             "download_cfg": self._collect_download_cfg(),
         })
@@ -916,8 +910,6 @@ class PipelineUI(ctk.CTk):
             argv += ["--cells", *cells]
         if self.ch_overwrite.get():
             argv.append("--overwrite")
-        if self.ch_incremental.get():
-            argv.append("--incremental")
         return argv
 
     def _build_char_pipeline_argv(self) -> list[str] | None:

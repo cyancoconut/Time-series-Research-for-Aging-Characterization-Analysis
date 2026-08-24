@@ -6,8 +6,11 @@ test files: the ones whose 4th '='-delimited filename field matches
 case). Output goes to ``<working_path>/BRONZE_PARA/`` and, when uploading,
 ``<minio_prefix>/BRONZE_PARA/``.
 
-    python download/build_bronze_para.py <battery_cfg> [--cells …]
-                                         [--overwrite] [--incremental]
+    python download/build_bronze_para.py <battery_cfg> [--cells …] [--overwrite]
+
+No ``--incremental`` here (unlike the CU builder): a parametrization run is a
+one-off BOL measurement, not a growing aging series, so there is nothing to
+append to. Rebuild with ``--overwrite``.
 """
 
 import argparse
@@ -32,12 +35,6 @@ def main() -> None:
     parser.add_argument(
         "--overwrite", action="store_true", help="Rebuild even if output exists"
     )
-    parser.add_argument(
-        "--incremental",
-        action="store_true",
-        help="Append only new test files to an existing BRONZE_PARA (uses the "
-             "manifest sidecar); full build if no prior state exists.",
-    )
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -53,7 +50,6 @@ def main() -> None:
         cfg,
         target_cells=args.cells,
         overwrite=args.overwrite,
-        incremental=args.incremental,
         layer=LAYER,
         filter_key=FILTER_KEY,
     )

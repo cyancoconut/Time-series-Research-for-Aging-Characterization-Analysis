@@ -126,11 +126,13 @@ Parametrization test files sit in the same per-cell download folders as the CU
 tests and are selected by `para_procedure_filter` (a **list** of programme-name
 substrings; one element is the normal case).
 
-1. **`download/build_bronze_para.py <cfg> [--cells …] [--overwrite] [--incremental]`**
+1. **`download/build_bronze_para.py <cfg> [--cells …] [--overwrite]`**
    — the CU builder (`build_bronze_cu_with_ah.run`) parameterized by
    `layer="BRONZE_PARA"` + `filter_key="para_procedure_filter"`. Writes
    `<working_path>/BRONZE_PARA/<cell>.parquet` + manifest sidecar; MinIO
-   `<prefix>/BRONZE_PARA/`.
+   `<prefix>/BRONZE_PARA/`. **No `--incremental`** — a parametrization run is a
+   one-off BOL measurement, not a growing aging series; rebuild with
+   `--overwrite`.
 2. **`python -m characterize.main_para <cfg> [--cells …] [--overwrite] [--clustering …]`**
    — `main.run_pipeline` with the `CHARACTERIZATION` run context
    (`util/run_context.py`). Same dismember → features → clustering → calculate

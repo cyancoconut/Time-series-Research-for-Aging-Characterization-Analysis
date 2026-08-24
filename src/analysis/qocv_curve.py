@@ -170,7 +170,7 @@ def plot_qocv(cha_path, dch_path, out_png, nom_capacity=NOM_CAPACITY_DEFAULT):
     fig, ax = plt.subplots(figsize=(9, 6))
     ax.plot(soc_c, vc, color="C3", lw=1.6, label=f"charge  ({qc.max():.2f} Ah)")
     ax.plot(soc_d, vd, color="C0", lw=1.6, label=f"discharge  ({qd.max():.2f} Ah)")
-    ax.plot(grid, (vc_i + vd_i) / 2, color="0.35", lw=1.0, ls="--", label="mean (≈ true OCV)")
+    ax.plot(grid, (vc_i + vd_i) / 2, color="0.35", lw=1.0, ls="--", label="mean")
     ax.set_xlabel("SOC (%)  [throughput-normalised]")
     ax.set_ylabel("Voltage (V)")
     soh = _parse_soh(os.path.basename(cha_path))
