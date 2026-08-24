@@ -870,7 +870,7 @@ def _draw_zoom_inset(ax, df, soc, cmap, norm, rect, window, title, marker):
     """One zoomed copy of the spectra on ``ax``, framed by ``window``."""
     x_lo, x_hi, y_lo, y_hi = window
     axin = ax.inset_axes(rect)
-    for eid, g in df.groupby("eis_number"):
+    for eid, g in _spectra_by_soc(df, soc):
         g = g.sort_values("frequency")
         axin.plot(g["Z_real"], -g["Z_imag"], marker, ms=2.5, lw=0.9,
                   color=_soc_color(soc.get(eid), cmap, norm))
@@ -923,6 +923,25 @@ def add_hf_inset(ax, df: pd.DataFrame, table: pd.DataFrame, soc: dict,
     return tuple(out)
 
 
+def _spectra_by_soc(df: pd.DataFrame, soc: dict):
+    """``(eis_number, spectrum)`` pairs ordered **low SOC first**.
+
+    Drawing order is z-order: whatever is plotted last sits on top. Iterating
+    the raw groupby draws in ``eis_number`` order, which for a discharge sweep
+    is high SOC first — so the SOC-0 spectrum ends up painted over SOC 100,
+    hiding the very curve the high-frequency zooms exist to show. Sorting
+    ascending puts the top-SOC spectrum last, on top. Spectra with no SOC
+    (no qOCV mapping) sort first, underneath everything.
+    """
+    def key(item):
+        value = soc.get(item[0])
+        if value is None or not np.isfinite(value):
+            return (0, 0.0)
+        return (1, float(value))
+
+    return sorted(df.groupby("eis_number"), key=key)
+
+
 def _soc_color(value, cmap, norm):
     """Colour for a SOC value; grey when SOC is missing (no qOCV mapping)."""
     if value is None or not np.isfinite(value):
@@ -947,7 +966,7 @@ def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, tit
     cmap = cm.viridis
 
     fig, ax = plt.subplots(figsize=(7.5, 6.5))
-    for eid, g in df.groupby("eis_number"):
+    for eid, g in _spectra_by_soc(df, soc):
         g = g.sort_values("frequency")
         ax.plot(g["Z_real"], -g["Z_imag"], "-", lw=1,
                 color=_soc_color(soc.get(eid), cmap, norm))
@@ -990,7 +1009,7 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     cmap = cm.viridis
 
     fig, (ax_nyq, ax_mag, ax_ph) = plt.subplots(1, 3, figsize=(18, 5.5))
-    for eid, g in df.groupby("eis_number"):
+    for eid, g in _spectra_by_soc(df, soc):
         g = g.sort_values("frequency")
         color = _soc_color(soc.get(eid), cmap, norm)
         ax_nyq.plot(g["Z_real"], -g["Z_imag"], "o-", ms=3, lw=1, color=color)
