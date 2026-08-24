@@ -27,6 +27,12 @@ Models are fixed defaults:
 * **qOCV** — no fit; the curve and its throughput-normalised capacities.
 
     python -m characterize.fit_characterization <battery_cfg> [--cells …]
+        [--only {pulse,eis,qocv} …]
+
+The three blocks fit independently: ``--only eis`` refits (and replots) EIS
+alone and merges it into the existing ``<cell>_parameters.json``, leaving the
+``pulse``/``qocv`` blocks of the previous run in place. Omitting ``--only``
+fits all three, as before.
 """
 
 import argparse
@@ -51,6 +57,11 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 PULSE_MODEL = "2rc"
 EIS_MODEL = "2zarc_warburg"
+
+#: The independently fittable blocks, in payload order. A run may do any
+#: subset (``--only``); the untouched blocks are carried over from the
+#: existing ``<cell>_parameters.json`` instead of being dropped.
+FIT_PARTS = ("pulse", "eis", "qocv")
 
 #: Columns lifted from the 2RC results table into the params file. No ``SOC``/
 #: ``pulse_type`` here on purpose: those are the aging-checkup 90/50/10 schema
@@ -595,29 +606,70 @@ def summarize_qocv(data_dir: str, plots_dir: str, nom_capacity: float) -> dict:
     return block
 
 
-def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None) -> dict:
-    """Fit one `10_initial_characterization/<cell>/` folder; return the payload."""
+def normalize_parts(parts) -> list:
+    """Validate/order a ``--only`` selection; ``None`` (or empty) → all parts."""
+    if not parts:
+        return list(FIT_PARTS)
+    wanted = {str(p).strip().lower() for p in parts}
+    unknown = sorted(wanted - set(FIT_PARTS))
+    if unknown:
+        raise ValueError(
+            f"unknown fit part(s) {unknown} — pick from {list(FIT_PARTS)}"
+        )
+    return [p for p in FIT_PARTS if p in wanted]
+
+
+def _merge_parameters(out_json: str, payload: dict) -> dict:
+    """Overlay `payload` on the existing params file, keeping unfitted blocks."""
+    if not os.path.isfile(out_json):
+        return payload
+    try:
+        with open(out_json) as f:
+            previous = json.load(f)
+    except (OSError, ValueError) as exc:
+        logging.warning("%s unreadable, writing a fresh one: %s", out_json, exc)
+        return payload
+    if not isinstance(previous, dict):
+        logging.warning("%s is not a JSON object, writing a fresh one", out_json)
+        return payload
+    return {**previous, **payload}
+
+
+def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
+             parts: list = None) -> dict:
+    """Fit one `10_initial_characterization/<cell>/` folder; return the payload.
+
+    `parts` selects which blocks to (re)fit — any subset of `FIT_PARTS`;
+    ``None`` means all of them. Blocks left out are simply absent from the
+    returned payload (`run` merges them into the existing parameters.json).
+    """
     cfg = cfg or {}
+    parts = normalize_parts(parts)
     stem = os.path.basename(os.path.normpath(cell_dir))
     data_dir = os.path.join(cell_dir, "data")
     plots_dir = os.path.join(cell_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
-    return {
+    payload = {
         "cell": stem,
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "nom_capacity": nom_capacity,
-        "pulse": fit_pulse(data_dir, plots_dir, nom_capacity, cfg=cfg),
-        "eis": fit_eis(
+    }
+    if "pulse" in parts:
+        payload["pulse"] = fit_pulse(data_dir, plots_dir, nom_capacity, cfg=cfg)
+    if "eis" in parts:
+        payload["eis"] = fit_eis(
             data_dir, plots_dir,
             soc_direction=cfg.get("soc_sweep_direction"),
             soc_step_pct=cfg.get("soc_step_pct"),
-        ),
-        "qocv": summarize_qocv(data_dir, plots_dir, nom_capacity),
-    }
+        )
+    if "qocv" in parts:
+        payload["qocv"] = summarize_qocv(data_dir, plots_dir, nom_capacity)
+    return payload
 
 
-def run(cfg: dict, target_cells: list = None) -> None:
+def run(cfg: dict, target_cells: list = None, parts: list = None) -> None:
+    parts = normalize_parts(parts)
     working_path = cfg.get("working_path")
     if not working_path:
         raise ValueError("working_path required in the battery config")
@@ -647,12 +699,14 @@ def run(cfg: dict, target_cells: list = None) -> None:
     n_ok, n_failed = 0, 0
     for stem in cells:
         cell_dir = os.path.join(root, stem)
-        logging.info("fitting %s", stem)
+        logging.info("fitting %s (%s)", stem, ", ".join(parts))
         try:
-            payload = fit_cell(cell_dir, float(cfg["nom_capacity"]), cfg=cfg)
+            payload = fit_cell(
+                cell_dir, float(cfg["nom_capacity"]), cfg=cfg, parts=parts,
+            )
             out_json = os.path.join(cell_dir, f"{stem}_parameters.json")
             with open(out_json, "w") as f:
-                json.dump(payload, f, indent=2)
+                json.dump(_merge_parameters(out_json, payload), f, indent=2)
             logging.info("%s: parameters -> %s", stem, out_json)
             n_ok += 1
         except Exception as exc:           # one bad cell must not abort the run
@@ -667,8 +721,16 @@ def main() -> None:
     )
     parser.add_argument("config", help="Path to battery config JSON")
     parser.add_argument("--cells", nargs="*", help="Optional subset of cell stems")
+    parser.add_argument(
+        "--only", nargs="+", choices=list(FIT_PARTS), metavar="PART",
+        help=(
+            "Fit only these blocks (%s). Omit for all three. The blocks left "
+            "out keep their previous results in <cell>_parameters.json."
+            % "/".join(FIT_PARTS)
+        ),
+    )
     args = parser.parse_args()
-    run(load_config(args.config), target_cells=args.cells)
+    run(load_config(args.config), target_cells=args.cells, parts=args.only)
 
 
 if __name__ == "__main__":

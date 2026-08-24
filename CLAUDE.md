@@ -29,7 +29,7 @@ The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` still 
 - Tab 4 → `python -m monitor.aging_status <battery_cfg> [-o …]`
 - Tab 5 → a checklist of evaluation outputs run in sequence by one "Run evaluation" button: **Fleet-wide capacity aggregation** → `python -m evaluation.export_cap_pulse <battery_cfg>`; **Capacity evaluation (Alterungsmatrix)** → `python -m evaluation.aging_matrix <battery_cfg>`. Pulse / qOCV evaluations are placeholder checkboxes (disabled) for future stages. The "Run all 1→2→3→4→5" chain runs stages 1–4 then every ticked Tab 5 evaluation.
 - Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …] [--labels …]`. A **Labels** toggle (Config / target / llm) maps to `--labels`; `Config` omits it so the config's `classifier_label_source` (default `target`) decides.
-- Tab 7 → `download/build_bronze_para.py` → `python -m characterize.main_para` → `python -m characterize.fit_characterization`, each gated by its checkbox and run in sequence. Outside the chain (one-off BOL step).
+- Tab 7 → `download/build_bronze_para.py` → `python -m characterize.main_para` → `python -m characterize.fit_characterization`, each gated by its checkbox and run in sequence. The fit stage has **one checkbox per block** (pulse / EIS / qOCV) → `--only`; all three ticked passes no flag, none ticked skips the stage. Outside the chain (one-off BOL step).
 
 The Download tab's "Save JSON" matches `download/get_user_input.py`; full-pipeline runs auto-write it to `.metabatt_ui_download.json` (gitignored).
 
@@ -135,9 +135,12 @@ substrings; one element is the normal case).
    — `main.run_pipeline` with the `CHARACTERIZATION` run context
    (`util/run_context.py`). Same dismember → features → clustering → calculate
    stages; reads BRONZE_PARA and forces the pulse/EIS/qOCV exports on.
-3. **`python -m characterize.fit_characterization <cfg> [--cells …]`** — fits
-   and plots the bundles. Standalone, so fits can be repeated without redoing
-   segmentation.
+3. **`python -m characterize.fit_characterization <cfg> [--cells …]
+   [--only {pulse,eis,qocv} …]`** — fits and plots the bundles. Standalone, so
+   fits can be repeated without redoing segmentation. The three blocks are
+   independently selectable via `--only` (omit = all three); a subset run
+   **merges** into the existing `<cell>_parameters.json`, so the blocks left
+   out keep their previous results instead of being dropped.
 
 **`RunContext`** (`util/run_context.py`) carries what differs between run
 flavours — `bronze_layer`, `procedure_filter_key`, `export_root_prefix`,

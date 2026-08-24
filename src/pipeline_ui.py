@@ -537,8 +537,14 @@ class PipelineUI(ctk.CTk):
         self.ch_pipeline = s.add_checkbox(
             "Run characterization pipeline   →   10_initial_characterization/<cell>/data/"
         )
-        self.ch_fit = s.add_checkbox(
-            "Fit + plot (pulse / EIS / qOCV)   →   <cell>_parameters.json + plots/"
+        self.ch_fit_pulse = s.add_checkbox(
+            "Fit + plot pulse (2RC)   →   <cell>_parameters.json + plots/"
+        )
+        self.ch_fit_eis = s.add_checkbox(
+            "Fit + plot EIS (2×ZARC + Warburg)   →   <cell>_parameters.json + plots/"
+        )
+        self.ch_fit_qocv = s.add_checkbox(
+            "Plot qOCV   →   <cell>_parameters.json + plots/"
         )
         self.ch_overwrite = s.add_checkbox(
             "--overwrite (rebuild / reprocess even if output exists)"
@@ -565,8 +571,11 @@ class PipelineUI(ctk.CTk):
                 "10_initial_characterization/<cell>/ (data/, plots/, "
                 "<cell>_parameters.json); the BOL capacity CSV stays out of "
                 "40_capacity_monitore/. Fixed models: 2RC (pulse), 2×ZARC + "
-                "generalized Warburg (EIS). Not part of 'Run all' — this is a "
-                "one-off BOL step, not part of the aging loop."
+                "generalized Warburg (EIS). The three fit blocks run "
+                "independently (--only): unticking one keeps its previous "
+                "results in <cell>_parameters.json instead of refitting it. "
+                "Not part of 'Run all' — this is a one-off BOL step, not part "
+                "of the aging loop."
             ),
             text_color="#888",
             wraplength=900,
@@ -604,13 +613,17 @@ class PipelineUI(ctk.CTk):
         self.tr_meta_out.insert(0, s.get("tr_meta_out", ""))
         self.tr_labels.set(s.get("tr_labels", "Config"))
         self.ch_cells.insert(0, s.get("ch_cells", ""))
-        # All three stages default to ticked — the usual run is end to end.
+        # Every stage defaults to ticked — the usual run is end to end.
         if s.get("ch_build", True):
             self.ch_build.select()
         if s.get("ch_pipeline", True):
             self.ch_pipeline.select()
-        if s.get("ch_fit", True):
-            self.ch_fit.select()
+        if s.get("ch_fit_pulse", True):
+            self.ch_fit_pulse.select()
+        if s.get("ch_fit_eis", True):
+            self.ch_fit_eis.select()
+        if s.get("ch_fit_qocv", True):
+            self.ch_fit_qocv.select()
         if s.get("ch_overwrite"):
             self.ch_overwrite.select()
         if s.get("ch_incremental"):
@@ -638,7 +651,9 @@ class PipelineUI(ctk.CTk):
             "ch_cells": self.ch_cells.get(),
             "ch_build": bool(self.ch_build.get()),
             "ch_pipeline": bool(self.ch_pipeline.get()),
-            "ch_fit": bool(self.ch_fit.get()),
+            "ch_fit_pulse": bool(self.ch_fit_pulse.get()),
+            "ch_fit_eis": bool(self.ch_fit_eis.get()),
+            "ch_fit_qocv": bool(self.ch_fit_qocv.get()),
             "ch_overwrite": bool(self.ch_overwrite.get()),
             "ch_incremental": bool(self.ch_incremental.get()),
             "ch_clustering": self.ch_clustering.get(),
@@ -922,6 +937,16 @@ class PipelineUI(ctk.CTk):
             argv += ["--clustering", clustering]
         return argv
 
+    def _char_fit_parts(self) -> list[str]:
+        """The ticked fit blocks, in the CLI's order."""
+        return [
+            part for ticked, part in (
+                (self.ch_fit_pulse.get(), "pulse"),
+                (self.ch_fit_eis.get(), "eis"),
+                (self.ch_fit_qocv.get(), "qocv"),
+            ) if ticked
+        ]
+
     def _build_char_fit_argv(self) -> list[str] | None:
         cfg = self._battery_cfg_or_warn()
         if not cfg:
@@ -930,16 +955,21 @@ class PipelineUI(ctk.CTk):
         cells = self.ch_cells.get().strip().split()
         if cells:
             argv += ["--cells", *cells]
+        parts = self._char_fit_parts()
+        if len(parts) < 3:                 # all three ticked == the plain run
+            argv += ["--only", *parts]
         return argv
 
     def _collect_characterization_steps(self) -> list[tuple[str, list[str]]] | None:
         """(label, argv) for each ticked stage; None if the config is invalid."""
+        fit_parts = self._char_fit_parts()
         steps: list[tuple[str, list[str]]] = []
         for ticked, label, builder in (
             (self.ch_build.get(), "build_bronze_para", self._build_bronze_para_argv),
             (self.ch_pipeline.get(), "characterization pipeline",
              self._build_char_pipeline_argv),
-            (self.ch_fit.get(), "characterization fit", self._build_char_fit_argv),
+            (bool(fit_parts), f"characterization fit ({'/'.join(fit_parts)})",
+             self._build_char_fit_argv),
         ):
             if not ticked:
                 continue
