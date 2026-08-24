@@ -537,10 +537,14 @@ def assign_pulse_soc(
             plateau_gap_ah,
         )
 
-    if str(sweep_direction).lower().startswith("cha"):
-        seg["SOC_pct"] = 0.0 + soc_step_pct * seg["soc_plateau"]
-    else:  # discharge sweep
-        seg["SOC_pct"] = 100.0 - soc_step_pct * seg["soc_plateau"]
+    # No order-based SOC ladder. `100 - step * plateau_index` assumes every
+    # plateau moved exactly `step` of charge, which is false: the run puts a
+    # CHA *and* a DCH pulse on each SOC step, so the index advances twice per
+    # real step and the ladder ran to -75 % on the NFPP bundle. SOC is instead
+    # measured from the run's own qOCV curve (`analysis/soc_from_qocv.py`),
+    # which reads each pulse's own pre-pulse OCV. Left as NaN here: an absent
+    # SOC is honest, a fabricated one is not.
+    seg["SOC_pct"] = np.nan
 
     n_plateaus = int(seg["soc_plateau"].nunique())
     if n_plateaus == 1 and len(seg) > 2:
@@ -552,9 +556,8 @@ def assign_pulse_soc(
         )
     logging.info(
         "assign_pulse_soc: %d pulses -> %d plateaus (detector=%s, gap %.3f Ah, "
-        "%s sweep, SOC %.0f..%.0f%%)",
+        "%s sweep) — SOC_pct left NaN, filled from the qOCV curve",
         len(seg), n_plateaus, detector, plateau_gap_ah, sweep_direction,
-        seg["SOC_pct"].iloc[0], seg["SOC_pct"].iloc[-1],
     )
     seg.attrs["plateau_detector"] = {
         "detector": detector,
@@ -1619,14 +1622,14 @@ def _assign_soc_to_bundle(labeled, res, bm, nom_capacity, sweep_direction, soc_s
     never escapes this function).
     """
     diag = {"BM_Programm": bm, "reason": None}
-    if "Ah_throughput" not in labeled.columns:
-        diag["reason"] = (
-            "no SOC_pct — assign_pulse_soc needs Ah_throughput/Zustand in the bundle"
-        )
-        return res, diag
 
+    # Detect the sweep direction *before* the Ah_throughput guard: it reads
+    # only OCV_V, so every pulse record can carry a direction even when SOC
+    # assignment itself is impossible. One bundle = one direction (the
+    # parametrization procedure puts each sweep in its own BM_Programm), same
+    # as the EIS path's per-bundle detection.
     direction = sweep_direction
-    diag["direction_source"] = "config-override" if direction else "detected"
+    direction_source = "config-override" if direction else "detected"
     if not direction:
         ocv = pd.to_numeric(res.get("OCV_V", pd.Series(dtype=float)), errors="coerce")
         ocv = ocv.dropna().to_numpy()
@@ -1638,11 +1641,24 @@ def _assign_soc_to_bundle(labeled, res, bm, nom_capacity, sweep_direction, soc_s
             )
         if direction is None:
             direction = SOC_SWEEP_DIRECTION
-            diag["direction_source"] = "assumed (ambiguous OCV trend)"
+            direction_source = "assumed (ambiguous OCV trend)"
             logging.warning(
                 "BM%s: pulse OCV trend ambiguous — assuming %s sweep", bm, direction
             )
+    diag["direction_source"] = direction_source
     diag["direction"] = direction
+    # `direction` is already taken in `res` for the pulse's own CHA/DCH
+    # polarity — this is the direction of the SOC *sweep* the pulse sits in,
+    # i.e. which hysteresis branch of the qOCV curve it should be mapped on.
+    res = res.copy()
+    res["sweep_direction"] = direction
+    res["sweep_direction_source"] = direction_source
+
+    if "Ah_throughput" not in labeled.columns:
+        diag["reason"] = (
+            "no SOC_pct — assign_pulse_soc needs Ah_throughput/Zustand in the bundle"
+        )
+        return res, diag
 
     soc_seg = assign_pulse_soc(
         labeled, nom_capacity, sweep_direction=direction, soc_step_pct=soc_step_pct

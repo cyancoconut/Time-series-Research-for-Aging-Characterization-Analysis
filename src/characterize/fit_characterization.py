@@ -19,7 +19,7 @@ Models are fixed defaults:
   bundle's charge/discharge sweep leg(s) are detected from its own
   per-measurement terminal voltage (config ``soc_sweep_direction`` overrides
   detection; ``soc_step_pct`` sets the SOC step, default 5.0) — see
-  ``fit_eis`` / ``_split_bundle_into_legs``. The pulse fit shares the same
+  ``fit_eis`` / ``_bundle_direction``. The pulse fit shares the same
   ``soc_sweep_direction``/``soc_step_pct`` keys: a run sweeps SOC one way for
   both measurements, and pulses use ``fit_2rc_pulse.assign_pulse_soc`` to
   derive per-plateau ``SOC_pct`` (see ``fit_pulse``), not the module's
@@ -47,6 +47,7 @@ import numpy as np
 import pandas as pd
 
 from analysis import eis_vs_soc, qocv_curve
+from analysis import soc_from_qocv
 from analysis import sweep_direction as sweep_direction_mod
 from characterize import pulse_fit
 from main import load_config
@@ -68,15 +69,22 @@ FIT_PARTS = ("pulse", "eis", "qocv")
 #: (``fit_2rc_pulse.SOC_ORDER``) which a full-SOC-sweep characterization run
 #: does not fit — every pulse would read the same ``DEFAULT_SOC``. ``SOC_pct``
 #: (from ``assign_pulse_soc``, see ``fit_pulse``) is the only SOC that appears.
+#: ``direction`` is the pulse's own CHA/DCH polarity; ``sweep_direction`` is
+#: the direction of the SOC sweep it sits in (which qOCV hysteresis branch it
+#: maps against). Two different things — hence two columns.
 PULSE_COLS = [
     "pulse_segment_id", "ID", "BM_Programm", "SOH", "direction",
+    "sweep_direction", "sweep_direction_source",
     "I_A", "C_rate", "OCV_V", "R0_ohm", "R1_ohm", "tau1_s", "R2_ohm",
-    "tau2_s", "rmse_mV", "SOC_pct", "pulse_amplitude_A", "pulse_C_rate",
+    "tau2_s", "rmse_mV", "SOC_pct",
+    "pulse_amplitude_A", "pulse_C_rate",
 ]
 
 #: Columns lifted from the EIS table into the params file.
 EIS_COLS = [
-    "eis_number", "SOC_pct", "U", "R_ohm", "R1_z", "tau1_z", "alpha1_z",
+    "eis_number", "SOC_pct", "U",
+    "sweep_direction", "sweep_direction_source",
+    "R_ohm", "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
     "zarc_rmse", "zarc_degenerate",
 ]
@@ -219,18 +227,25 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
         block["error"] = "no pulses fit"
         return block
 
+    bundle_diags = assignment.get("bundles", [])
+    results = _map_pulse_soc_from_qocv(
+        results, data_dir, files, bundle_diags, ir_ohm=cfg.get("qocv_ir_ohm")
+    )
+
     block["settings"] = {
-        "mode": "full-SOC-sweep (assign_pulse_soc, plateau-derived SOC_pct) — "
-                "not the 90/50/10 aging-checkup schema",
+        "mode": "full-SOC-sweep — SOC_pct mapped on the same-direction qOCV "
+                "curve (the order-based ladder was removed); not the "
+                "90/50/10 aging-checkup schema",
         "soc_step_pct": step,
         "soc_direction_override": override,
         "plateau_gap_ah": round(nom_capacity * step / 100.0, 4),
-        "bundles": assignment.get("bundles", []),
+        "bundles": bundle_diags,
     }
     block["fits"] = _records(results, PULSE_COLS)
 
     default_reason = (
-        "no SOC_pct — assign_pulse_soc needs Ah_throughput/Zustand in the bundle"
+        "no SOC_pct — needs a same-direction qOCV sweep to map against, and "
+        "Ah_throughput/Zustand in the bundle for plateau detection"
     )
     bundle_diag_by_bm = {
         d.get("BM_Programm"): d for d in assignment.get("bundles", [])
@@ -243,8 +258,17 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
         cell_stem = (
             _pulse_cell_stem(group["File"].iloc[0]) if "File" in group.columns else "cell"
         )
-        out_png = os.path.join(plots_dir, f"pulse_2rc_{cell_stem}_BM{bm_int}_{soh}SOH.png")
-        entry = {"BM_Programm": bm_int, "SOH": soh}
+        # Sweep direction in the filename, matching the EIS plots.
+        direction = (
+            str(group["sweep_direction"].iloc[0])
+            if "sweep_direction" in group.columns
+               and pd.notna(group["sweep_direction"].iloc[0])
+            else bundle_diag_by_bm.get(bm_int, {}).get("direction", "unknown")
+        )
+        out_png = os.path.join(
+            plots_dir, f"pulse_2rc_{cell_stem}_BM{bm_int}_{soh}SOH_{direction}.png"
+        )
+        entry = {"BM_Programm": bm_int, "SOH": soh, "sweep_direction": direction}
 
         has_soc_pct = "SOC_pct" in group.columns and group["SOC_pct"].notna().any()
         if not has_soc_pct:
@@ -278,6 +302,62 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
     return block
 
 
+def _bundle_start_times(files: list) -> dict:
+    """``BM_Programm -> earliest Time`` for each pulse bundle file.
+
+    The pulse results table carries no timestamp, but matching a bundle to the
+    nearest qOCV sweep needs one, so read just the ``Time`` column back from
+    each bundle parquet.
+    """
+    times = {}
+    for path in files:
+        try:
+            df = pd.read_parquet(path, columns=["Time", "BM_Programm"])
+        except Exception as exc:
+            logging.warning("%s: cannot read Time/BM_Programm: %s", os.path.basename(path), exc)
+            continue
+        for bm, group in df.groupby("BM_Programm"):
+            t = pd.to_datetime(group["Time"], errors="coerce").min()
+            if pd.notna(t):
+                times[int(bm)] = min(t, times[int(bm)]) if int(bm) in times else t
+    return times
+
+
+def _map_pulse_soc_from_qocv(results, data_dir: str, files: list,
+                             bundle_diags: list, ir_ohm: float = None):
+    """Per BM_Programm, remap ``SOC_pct`` onto the same-direction qOCV curve.
+
+    Each bundle's own detected ``sweep_direction`` picks the branch, and its
+    start time picks the nearest qOCV sweep. Diagnostics are merged into the
+    matching entry of ``bundle_diags`` so ``parameters.json`` records which
+    qOCV file every SOC came from.
+    """
+    sweeps = soc_from_qocv.find_sweeps(data_dir)
+    if not sweeps:
+        logging.warning(
+            "no qOCV export in %s — pulse SOC_pct stays NaN", data_dir
+        )
+        return results
+    if "sweep_direction" not in results.columns:
+        return results
+
+    start_times = _bundle_start_times(files)
+    diag_by_bm = {d.get("BM_Programm"): d for d in bundle_diags}
+
+    out = []
+    for bm, group in results.groupby("BM_Programm", sort=False):
+        group = group.copy()
+        direction = str(group["sweep_direction"].iloc[0])
+        diag = soc_from_qocv.map_table(
+            group, "OCV_V", direction, sweeps,
+            t_ref=start_times.get(int(bm)), label=f"pulse BM{int(bm)}",
+            ir_ohm=ir_ohm,
+        )
+        diag_by_bm.get(int(bm), {}).update(diag)
+        out.append(group)
+    return pd.concat(out, ignore_index=True) if out else results
+
+
 def _normalize_sweep_direction(direction: str) -> str:
     """Validate + normalize a ``soc_sweep_direction`` config override.
 
@@ -296,154 +376,93 @@ def _normalize_sweep_direction(direction: str) -> str:
         ) from None
 
 
-#: Turning-point sensitivity for leg detection: a reversal only counts as a
-#: real turning point (not sensor noise) once the U excursion since the last
-#: extreme exceeds max(this absolute floor, this fraction of the bundle's
-#: total U span). Same rule the pulse path uses on OCV_V, via
-#: :mod:`analysis.sweep_direction` (``turn_threshold``/``direction_from_trend``).
+#: Turning-point sensitivity for direction detection: a voltage excursion only
+#: counts as a real trend (not sensor noise) once it exceeds max(this absolute
+#: floor, this fraction of the bundle's total U span). Same rule the pulse path
+#: uses on OCV_V, via :mod:`analysis.sweep_direction`
+#: (``turn_threshold``/``direction_from_trend``).
 EIS_U_TURN_ABS_THRESHOLD_V = sweep_direction_mod.U_TURN_ABS_THRESHOLD_V
 EIS_U_TURN_FRAC_OF_SPAN = sweep_direction_mod.U_TURN_FRAC_OF_SPAN
 
-#: Legs shorter than this many measurements are folded into a neighbour —
-#: too few points to trust as their own sweep direction.
-EIS_MIN_LEG_POINTS = 3
 
-
-def _zigzag_pivot_indices(u: np.ndarray, threshold: float) -> list:
-    """Indices of alternating peaks/valleys in ``u`` (plus the first and last
-    index), i.e. the classic "zigzag" turning-point filter: a reversal is
-    only recorded once the excursion from the running extreme exceeds
-    ``threshold``, so small non-monotonic wobbles don't fragment the series.
-    """
-    n = len(u)
-    if n <= 1:
-        return list(range(n))
-    pivots = [0]
-    trend = 0  # 0 = undetermined yet, 1 = rising, -1 = falling
-    cand_idx, cand_val = 0, u[0]
-    for i in range(1, n):
-        v = u[i]
-        if trend == 0:
-            if v - cand_val > threshold:
-                trend, cand_idx, cand_val = 1, i, v
-            elif cand_val - v > threshold:
-                trend, cand_idx, cand_val = -1, i, v
-            elif abs(v - u[0]) < abs(cand_val - u[0]):
-                # still flat; track the running extreme anyway for later
-                pass
-        elif trend == 1:
-            if v >= cand_val:
-                cand_idx, cand_val = i, v
-            elif cand_val - v > threshold:
-                pivots.append(cand_idx)
-                trend, cand_idx, cand_val = -1, i, v
-        else:  # trend == -1
-            if v <= cand_val:
-                cand_idx, cand_val = i, v
-            elif v - cand_val > threshold:
-                pivots.append(cand_idx)
-                trend, cand_idx, cand_val = 1, i, v
-    if pivots[-1] != n - 1:
-        pivots.append(n - 1)
-    return pivots
-
-
-def _detect_sweep_legs(u: np.ndarray, threshold: float) -> list:
-    """Split a U-vs-order series into monotonic legs (start, end) index pairs
-    (inclusive, consecutive legs sharing their boundary point). Legs with
-    fewer than :data:`EIS_MIN_LEG_POINTS` measurements are folded into a
-    neighbour rather than reported on their own.
-    """
-    n = len(u)
-    if n == 0:
-        return []
-    pivots = _zigzag_pivot_indices(u, threshold)
-    legs = [(pivots[k], pivots[k + 1]) for k in range(len(pivots) - 1)] or [(0, n - 1)]
-
-    changed = True
-    while changed and len(legs) > 1:
-        changed = False
-        for i, leg in enumerate(legs):
-            if leg[1] - leg[0] + 1 < EIS_MIN_LEG_POINTS:
-                if i == 0:
-                    legs[0:2] = [(legs[0][0], legs[1][1])]
-                else:
-                    legs[i - 1:i + 1] = [(legs[i - 1][0], legs[i][1])]
-                changed = True
-                break
-    return legs
-
-
-def _split_bundle_into_legs(df: pd.DataFrame, step: float, override: str,
-                            source_name: str) -> tuple:
-    """Detect charge/discharge legs in one EIS bundle from its per-measurement
-    terminal voltage ``U`` (rising = charge, falling = discharge — the signal
+def _bundle_direction(df: pd.DataFrame, override: str, source_name: str) -> tuple:
+    """Sweep direction of one EIS bundle, from its per-measurement terminal
+    voltage ``U`` (rising = charge, falling = discharge — the signal
     ``build_eis_table`` already computes per ``eis_number``, ordered by
-    ``Time``), and build a per-leg SOC table for each with the correct
-    direction. Returns ``(tables, leg_diagnostics, leg_raw_dfs)`` — the third
-    element is each leg's raw measured-spectra slice (for the raw-spectra /
-    fit-overlay plots, which need the actual per-frequency points, not just
-    the reduced per-measurement table).
+    ``Time``).
+
+    **One bundle carries one direction**: a bundle is a single
+    ``BM_Programm``, and the parametrization procedure puts a charge sweep and
+    a discharge sweep in separate programmes. So the direction is the plain
+    first->last trend, matching how the pulse path reads ``OCV_V``. A bundle
+    that nevertheless reverses mid-sweep is reported in ``reversal_mV`` and
+    warned about rather than silently split — its SOC axis (assigned by
+    measurement *order* in ``build_eis_table``) would be wrong either way, and
+    a warning is more use than a quietly mislabelled half.
+
+    Returns ``(direction, diagnostics)``; ``(None, {})`` for an empty bundle.
     """
     order = df.groupby("eis_number")["Time"].min().sort_values().index.tolist()
     if not order:
-        return [], [], []
+        return None, {}
     u_means = df.groupby("eis_number")["U"].mean()
     u = np.array([float(u_means[e]) for e in order], dtype=float)
     total_span = float(np.nanmax(u) - np.nanmin(u)) if len(u) > 1 else 0.0
     threshold = max(EIS_U_TURN_ABS_THRESHOLD_V, EIS_U_TURN_FRAC_OF_SPAN * total_span)
 
-    leg_ranges = [(0, len(u) - 1)] if override else _detect_sweep_legs(u, threshold)
+    if override:
+        direction, source = override, "config-override"
+    else:
+        direction = sweep_direction_mod.direction_from_trend(u[0], u[-1], threshold)
+        source = "detected"
+        if direction is None:
+            direction, source = "discharge", "assumed (ambiguous U trend)"
+            logging.warning(
+                "EIS direction ambiguous (U span %.1f mV < %.1f mV threshold) "
+                "in %s — assuming %s",
+                abs(u[-1] - u[0]) * 1000, threshold * 1000, source_name, direction,
+            )
 
-    tables, leg_info, leg_dfs = [], [], []
-    for leg_idx, (s, e) in enumerate(leg_ranges):
-        eids = order[s:e + 1]
-        leg_df = df[df["eis_number"].isin(eids)]
-        assumed = False
-        if override:
-            direction = override
-        else:
-            direction = sweep_direction_mod.direction_from_trend(u[s], u[e], threshold)
-            if direction is None:
-                assumed = True
-                direction = "discharge"
-                logging.warning(
-                    "EIS direction ambiguous (U span %.1f mV < %.1f mV threshold) "
-                    "in %s leg %d — assuming %s",
-                    abs(u[e] - u[s]) * 1000, threshold * 1000,
-                    source_name, leg_idx, direction,
-                )
-        table = eis_vs_soc.build_eis_table(leg_df, direction=direction, step=step)
-        table["direction"] = direction
-        table["sweep_leg"] = leg_idx
-        tables.append(table)
-        leg_dfs.append(leg_df)
-        leg_info.append({
-            "source": source_name,
-            "sweep_leg": leg_idx,
-            "direction": direction,
-            "assumed": assumed,
-            "n_measurements": len(eids),
-            "u_start_V": float(u[s]),
-            "u_end_V": float(u[e]),
-        })
-    return tables, leg_info, leg_dfs
+    # Largest excursion against the overall trend: 0 for a clean monotonic
+    # sweep, large only if the bundle really does turn around.
+    signed = u - u[0] if direction == "charge" else u[0] - u
+    reversal = (
+        max(0.0, float(np.max(np.maximum.accumulate(signed) - signed)))
+        if len(u) > 1 else 0.0
+    )
+    if reversal > threshold:
+        logging.warning(
+            "%s: U reverses by %.1f mV against the %s trend (threshold %.1f mV) — "
+            "this bundle may contain more than one sweep; its SOC axis assumes one",
+            source_name, reversal * 1000, direction, threshold * 1000,
+        )
+
+    return direction, {
+        "source": source_name,
+        "sweep_direction": direction,
+        "sweep_direction_source": source,
+        "n_measurements": len(order),
+        "u_start_V": float(u[0]),
+        "u_end_V": float(u[-1]),
+        "reversal_mV": round(reversal * 1000, 1),
+    }
 
 
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
-            soc_step_pct: float = None) -> dict:
+            soc_step_pct: float = None, ir_ohm: float = None) -> dict:
     """2×ZARC + generalized-Warburg fit of every spectrum in every bundle.
 
-    Direction is **detected per sweep leg** from the bundle's own per-
-    measurement terminal voltage ``U`` (rising -> charge, falling ->
-    discharge) rather than declared once for the whole cell: a single
-    parametrization run may contain a charge sweep, a discharge sweep, or
-    both back to back, so one config value can't describe it and a wrong one
-    silently inverts the SOC axis (SOC is assigned by measurement *order* in
-    ``build_eis_table``, not measured). ``soc_direction`` is an optional
-    override that forces every leg's direction and skips detection —
-    ``None`` (default) means "detect". ``soc_step_pct`` sets the SOC step
-    (default matches ``build_eis_table``'s ``SOC_SWEEP_STEP_PCT``, 5.0).
+    Direction is **detected per bundle** from its own per-measurement terminal
+    voltage ``U`` (rising -> charge, falling -> discharge) rather than declared
+    once for the whole cell: a parametrization run holds a charge sweep and a
+    discharge sweep in separate ``BM_Programm``s, so one config value can't
+    describe both and a wrong one silently inverts the SOC axis (SOC is
+    assigned by measurement *order* in ``build_eis_table``, not measured).
+    One bundle = one direction (see :func:`_bundle_direction`).
+    ``soc_direction`` is an optional override that forces every bundle's
+    direction and skips detection — ``None`` (default) means "detect".
+    ``soc_step_pct`` sets the SOC step (default matches ``build_eis_table``'s
+    ``SOC_SWEEP_STEP_PCT``, 5.0).
     """
     override = _normalize_sweep_direction(soc_direction) if soc_direction is not None else None
     step = float(soc_step_pct) if soc_step_pct is not None else eis_vs_soc.SOC_SWEEP_STEP_PCT
@@ -464,7 +483,7 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             "soc_direction_override": override,
             "soc_turn_threshold_abs_V": EIS_U_TURN_ABS_THRESHOLD_V,
             "soc_turn_threshold_frac_of_span": EIS_U_TURN_FRAC_OF_SPAN,
-            "legs": [],
+            "bundles": [],
         },
         "fits": [],
         "sources": [os.path.basename(f) for f in files],
@@ -486,41 +505,57 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         logging.info("EIS: every bundle in %s was SOH=NA — nothing to fit", data_dir)
         return block
 
-    tables, leg_diag = [], []
-    leg_raw_by_key = {}  # (source, sweep_leg) -> raw measured-spectra df
+    qocv_sweeps = soc_from_qocv.find_sweeps(data_dir)
+    if not qocv_sweeps:
+        logging.warning(
+            "no qOCV export in %s — EIS SOC_pct stays NaN", data_dir
+        )
+    tables, bundle_diag = [], []
+    raw_by_source = {}  # source -> raw measured-spectra df
     for path in files:
         name = os.path.basename(path)
         try:
-            leg_tables, leg_info, leg_dfs = _split_bundle_into_legs(
-                pd.read_parquet(path), step, override, name
-            )
-            for table, leg_df in zip(leg_tables, leg_dfs):
-                table["source"] = name
-                leg_raw_by_key[(name, int(table["sweep_leg"].iloc[0]))] = leg_df
-            tables.extend(leg_tables)
-            leg_diag.extend(leg_info)
+            bundle_df = pd.read_parquet(path)
+            direction, diag = _bundle_direction(bundle_df, override, name)
+            if direction is None:
+                logging.warning("%s: no EIS measurements — skipping", name)
+                continue
+            table = eis_vs_soc.build_eis_table(bundle_df, direction=direction, step=step)
+            table["sweep_direction"] = direction
+            table["sweep_direction_source"] = diag["sweep_direction_source"]
+            table["source"] = name
+            # Replace the order-based SOC ladder with the measured qOCV curve
+            # of the same direction; SOC_pct is NaN until this runs.
+            diag.update(soc_from_qocv.map_table(
+                table, "U", direction, qocv_sweeps,
+                t_ref=table["Time"].min() if "Time" in table.columns else None,
+                label=f"EIS {name}", ir_ohm=ir_ohm,
+            ))
+            raw_by_source[name] = bundle_df
+            tables.append(table)
+            bundle_diag.append(diag)
         except Exception as exc:
             logging.warning("EIS fit failed for %s: %s", name, exc)
             block.setdefault("errors", []).append(
                 {"source": name, "error": f"{type(exc).__name__}: {exc}"}
             )
-    block["settings"]["legs"] = leg_diag
+    block["settings"]["bundles"] = bundle_diag
     if not tables:
         return block
 
     combined = pd.concat(tables, ignore_index=True)
-    block["fits"] = _records(combined, EIS_COLS + ["source", "direction", "sweep_leg"])
+    block["fits"] = _records(combined, EIS_COLS + ["source"])
     n_deg = int(combined.get("zarc_degenerate", pd.Series(dtype=bool)).sum())
     if n_deg:
         logging.warning("%d/%d EIS fits flagged degenerate", n_deg, len(combined))
     block["n_degenerate"] = n_deg
 
     # plot_zarc_vs_soc (and the raw-spectra / fit-overlay plots below) overlay
-    # every row's SOC axis on one figure with no per-series separation — two
-    # BM_Programms, or two legs of the same bundle, would silently overlay
-    # (each leg's SOC restarts at its own sweep). Since that grouping can't be
-    # expressed without editing analysis/eis_vs_soc.py, plot one figure per
-    # (source, leg) instead and record every path.
+    # every row's SOC axis on one figure with no per-series separation, so two
+    # BM_Programms would silently overlay (each bundle's SOC restarts at its
+    # own sweep). Since that grouping can't be expressed without editing
+    # analysis/eis_vs_soc.py, plot one figure per source and record every path.
+    # The sweep direction goes in the filename, matching the pulse plots.
     def _try_plot(kind, fn, out_png, *args, **kwargs):
         """Call a plotter and record its path only if it actually wrote a
         (non-empty) file — several of these plotters no-op silently on
@@ -530,44 +565,53 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         try:
             fn(*args, out_png, **kwargs)
         except Exception as exc:
-            logging.warning("EIS %s plot failed for %s leg %s: %s", kind, source, leg, exc)
+            logging.warning("EIS %s plot failed for %s: %s", kind, source, exc)
             return
         if not (os.path.isfile(out_png) and os.path.getsize(out_png) > 0):
-            logging.info("EIS %s plot: nothing written for %s leg %s", kind, source, leg)
+            logging.info("EIS %s plot: nothing written for %s", kind, source)
             return
         plots.append({
             "kind": kind,
             "source": source,
-            "sweep_leg": int(leg),
-            "direction": direction,
+            "sweep_direction": direction,
             "plot": os.path.relpath(out_png, os.path.dirname(plots_dir)),
         })
 
     plots = []
-    for (source, leg), group in combined.groupby(["source", "sweep_leg"], sort=False):
+    for source, group in combined.groupby("source", sort=False):
         stem = os.path.splitext(str(source))[0]
-        direction = group["direction"].iloc[0]
-        leg_title = f"initial characterization — {source} leg{leg} ({direction})"
-        leg_df = leg_raw_by_key.get((source, int(leg)))
-
-        out_png = os.path.join(plots_dir, f"eis_2zarc_warburg_{stem}_leg{leg}_{direction}.png")
-        _try_plot("zarc_params_vs_soc", eis_vs_soc.plot_zarc_vs_soc, out_png,
-                  group, title=leg_title)
-
-        if leg_df is None or leg_df.empty:
+        direction = group["sweep_direction"].iloc[0]
+        # Every vs-SOC plotter sorts on SOC_pct; with no qOCV to map against it
+        # is all-NaN and they would draw an empty axis instead of failing.
+        if group["SOC_pct"].isna().all():
             logging.warning(
-                "no raw spectra retained for %s leg %s — skipping raw/overlay plots",
-                source, leg,
+                "%s: no SOC (no qOCV mapping) — skipping the vs-SOC plots", source
+            )
+            plots.append({
+                "source": source, "sweep_direction": direction,
+                "plot_skipped": "no SOC_pct — no qOCV sweep to map against",
+            })
+            continue
+        title = f"initial characterization — {source} ({direction})"
+        raw_df = raw_by_source.get(source)
+
+        out_png = os.path.join(plots_dir, f"eis_2zarc_warburg_{stem}_{direction}.png")
+        _try_plot("zarc_params_vs_soc", eis_vs_soc.plot_zarc_vs_soc, out_png,
+                  group, title=title)
+
+        if raw_df is None or raw_df.empty:
+            logging.warning(
+                "no raw spectra retained for %s — skipping raw/overlay plots", source,
             )
             continue
 
-        raw_png = os.path.join(plots_dir, f"eis_raw_spectra_{stem}_leg{leg}_{direction}.png")
+        raw_png = os.path.join(plots_dir, f"eis_raw_spectra_{stem}_{direction}.png")
         _try_plot("raw_spectra", eis_vs_soc.plot_raw_spectra, raw_png,
-                  leg_df, group, title=leg_title)
+                  raw_df, group, title=title)
 
-        overlay_png = os.path.join(plots_dir, f"eis_fit_overlay_{stem}_leg{leg}_{direction}.png")
+        overlay_png = os.path.join(plots_dir, f"eis_fit_overlay_{stem}_{direction}.png")
         _try_plot("fit_overlay", eis_vs_soc.plot_fit_overlay, overlay_png,
-                  leg_df, group, title=leg_title)
+                  raw_df, group, title=title)
     if plots:
         block["plots"] = plots
     return block
@@ -662,10 +706,40 @@ def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
             data_dir, plots_dir,
             soc_direction=cfg.get("soc_sweep_direction"),
             soc_step_pct=cfg.get("soc_step_pct"),
+            ir_ohm=cfg.get("qocv_ir_ohm"),
         )
     if "qocv" in parts:
         payload["qocv"] = summarize_qocv(data_dir, plots_dir, nom_capacity)
     return payload
+
+
+def write_fit_csvs(cell_dir: str, stem: str, payload: dict) -> list:
+    """Write one flat CSV per fitted block beside ``<stem>_parameters.json``.
+
+    The JSON stays the authoritative output — these are the same ``fits``
+    records as a table, because reading a SOC sweep out of nested JSON is
+    needless work. Only blocks present in ``payload`` are written, so a
+    ``--only`` run refreshes just its own CSVs and leaves the others in place
+    (mirroring how ``run`` merges the JSON).
+    """
+    written = []
+    for part in FIT_PARTS:
+        block = payload.get(part)
+        if not isinstance(block, dict):
+            continue
+        fits = block.get("fits") or []
+        if not fits:
+            logging.info("%s: no %s fits to write as CSV", stem, part)
+            continue
+        out_csv = os.path.join(cell_dir, f"{stem}_{part}_fits.csv")
+        try:
+            pd.DataFrame(fits).to_csv(out_csv, index=False)
+        except Exception as exc:          # a CSV failure must not lose the JSON
+            logging.warning("%s: %s CSV failed: %s", stem, part, exc)
+            continue
+        logging.info("%s: %s fits -> %s", stem, part, out_csv)
+        written.append(out_csv)
+    return written
 
 
 def run(cfg: dict, target_cells: list = None, parts: list = None) -> None:
@@ -705,9 +779,14 @@ def run(cfg: dict, target_cells: list = None, parts: list = None) -> None:
                 cell_dir, float(cfg["nom_capacity"]), cfg=cfg, parts=parts,
             )
             out_json = os.path.join(cell_dir, f"{stem}_parameters.json")
+            # Merge *before* opening for write: "w" truncates, so reading the
+            # previous file inside the with-block would always see it empty
+            # and a --only run would drop the blocks it didn't refit.
+            merged = _merge_parameters(out_json, payload)
             with open(out_json, "w") as f:
-                json.dump(_merge_parameters(out_json, payload), f, indent=2)
+                json.dump(merged, f, indent=2)
             logging.info("%s: parameters -> %s", stem, out_json)
+            write_fit_csvs(cell_dir, stem, payload)
             n_ok += 1
         except Exception as exc:           # one bad cell must not abort the run
             logging.warning("%s: fit_cell failed, skipping cell: %s", stem, exc)

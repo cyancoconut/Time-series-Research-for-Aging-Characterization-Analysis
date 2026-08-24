@@ -538,14 +538,15 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
                 feat.update(wfit)
                 if fit_zarc:
                     feat.update(fit_zarc_warburg_eis(spec, seed=wfit, r_tot0=feat["R_tot"]))
-        if str(direction).lower().startswith("cha"):
-            soc = 0.0 + step * i
-        else:
-            soc = 100.0 - step * i
+        # No order-based SOC ladder: `100 - step * i` assumes every step moved
+        # the same charge, which the measured voltages contradict (the first
+        # NFPP step drops 155 mV, the next ones ~15 mV, all labelled "5 %").
+        # SOC is measured from the run's own qOCV curve
+        # (`analysis/soc_from_qocv.py`) using each measurement's own U.
         feat.update(
             {
                 "eis_number": eid,
-                "SOC_pct": soc,
+                "SOC_pct": np.nan,
                 "U": float(spec["U"].mean()),
                 "Time": spec["Time"].min(),
             }
@@ -553,8 +554,9 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
         rows.append(feat)
     out = pd.DataFrame(rows)
     logging.info(
-        "eis_vs_soc: %d measurements -> SOC %.0f..%.0f%% (%s sweep, %.1f%% step)",
-        len(out), out["SOC_pct"].iloc[0], out["SOC_pct"].iloc[-1], direction, step,
+        "eis_vs_soc: %d measurements (%s sweep) — SOC_pct left NaN, filled "
+        "from the qOCV curve",
+        len(out), direction,
     )
     return out
 
@@ -789,8 +791,151 @@ def plot_fit_overlay(df: pd.DataFrame, table: pd.DataFrame, out_png: str,
     logging.info("EIS fit overlay -> %s", out_png)
 
 
+#: Inset geometry on the parent Nyquist axes: [left, bottom, width, height] in
+#: axes fractions. Two side by side along the bottom-right, clear of the arcs
+#: which rise to the left: the narrow R0 zoom then the wider MF-arc zoom.
+R0_INSET_RECT = (0.34, 0.08, 0.29, 0.29)
+MF_INSET_RECT = (0.68, 0.08, 0.29, 0.29)
+
+#: Zoom widths, as multiples of a fitted arc diameter. ``R0`` frames just the
+#: real-axis intercept region (first ZARC only); ``MF`` frames the whole
+#: mid-frequency arc, which is *both* ZARCs — on the NFPP bundle ``R1_z`` alone
+#: is 0.41 mOhm while the arc plainly runs to ~3 mOhm because ``R2_z``
+#: (1.62 mOhm) is the bulk of it.
+R0_INSET_SPAN_ARCS = 2.2
+MF_INSET_SPAN_ARCS = 1.6
+
+
+def _arc_diameter(table: pd.DataFrame, cols: tuple) -> float:
+    """Summed median of the given fitted ZARC diameters; 0 if unavailable."""
+    arc = 0.0
+    for col in cols:
+        if col in table.columns:
+            vals = pd.to_numeric(table[col], errors="coerce")
+            if vals.notna().any():
+                med = float(vals.median())
+                if np.isfinite(med) and med > 0:
+                    arc += med
+    return arc
+
+
+def _hf_zoom_window(df: pd.DataFrame, table: pd.DataFrame,
+                    arc_cols: tuple = ("R1_z", "R2_z"),
+                    span: float = MF_INSET_SPAN_ARCS,
+                    fallback_frac: float = 0.25) -> tuple:
+    """``(x0, x1, y0, y1)`` framing a high-frequency region and its real-axis
+    crossing, or ``None`` if the data can't support a sensible window.
+
+    The window is anchored on the **measured** high-frequency intercept
+    (min ``Z_real``) rather than a fitted value, so it still frames correctly
+    when a fit is degenerate. Its width comes from the fitted ZARC diameters in
+    ``arc_cols`` (the physical scale of the region) and falls back to a
+    fraction of the total Nyquist span. ``y0`` is pushed below zero on purpose:
+    the point of the zoom is to see the curve *cross* -Z_imag = 0.
+    """
+    zr = pd.to_numeric(df["Z_real"], errors="coerce")
+    zi = -pd.to_numeric(df["Z_imag"], errors="coerce")
+    if not np.isfinite(zr).any():
+        return None
+    x0 = float(np.nanmin(zr))
+    total_span = float(np.nanmax(zr) - x0)
+    if not np.isfinite(total_span) or total_span <= 0:
+        return None
+
+    arc = _arc_diameter(table, arc_cols)
+    width = arc * span if arc > 0 else total_span * fallback_frac
+    width = min(width, total_span)          # never zoom out past the full plot
+
+    pad = width * 0.06
+    x_lo, x_hi = x0 - pad, x0 + width
+    in_win = (zr >= x_lo) & (zr <= x_hi)
+    y_vals = zi[in_win].dropna()
+
+    # Height comes from the arc, not from the data minimum: above the arc the
+    # cell turns inductive and -Z_imag dives (to -5.9 mΩ on the NFPP bundle,
+    # ~14x the 0.41 mΩ arc). Framing that tail would flatten the semicircle
+    # into a line — the opposite of what the zoom is for. Show only enough
+    # below zero to make the real-axis crossing legible.
+    positive = y_vals[y_vals > 0]
+    y_top = float(positive.max()) if len(positive) else width * 0.3
+    if not np.isfinite(y_top) or y_top <= 0:
+        y_top = width * 0.3
+    y_lo, y_hi = -0.6 * y_top, 1.15 * y_top
+    if not (np.isfinite(y_lo) and np.isfinite(y_hi)) or y_hi <= y_lo:
+        return None
+    return x_lo, x_hi, y_lo, y_hi
+
+
+def _draw_zoom_inset(ax, df, soc, cmap, norm, rect, window, title, marker):
+    """One zoomed copy of the spectra on ``ax``, framed by ``window``."""
+    x_lo, x_hi, y_lo, y_hi = window
+    axin = ax.inset_axes(rect)
+    for eid, g in df.groupby("eis_number"):
+        g = g.sort_values("frequency")
+        axin.plot(g["Z_real"], -g["Z_imag"], marker, ms=2.5, lw=0.9,
+                  color=_soc_color(soc.get(eid), cmap, norm))
+    axin.axhline(0.0, color="0.35", lw=0.8, zorder=1)
+    axin.set_xlim(x_lo, x_hi)
+    axin.set_ylim(y_lo, y_hi)
+    axin.set_aspect("equal", adjustable="box")
+    axin.tick_params(labelsize=6.5, length=2)
+    axin.grid(alpha=0.25)
+    axin.set_title(title, fontsize=8, pad=2)
+    for spine in axin.spines.values():
+        spine.set_edgecolor("0.4")
+    try:
+        ax.indicate_inset_zoom(axin, edgecolor="0.4", alpha=0.45)
+    except Exception:            # older matplotlib without the connector API
+        pass
+    return axin
+
+
+def add_hf_inset(ax, df: pd.DataFrame, table: pd.DataFrame, soc: dict,
+                 cmap, norm, marker: str = "o-"):
+    """Draw two zoomed copies of the high-frequency corner as insets on ``ax``.
+
+    The full Nyquist view is dominated by the low-frequency diffusion tail, so
+    everything that carries the kinetics collapses into a few pixels near the
+    origin. Two scales are useful and one can't serve both:
+
+    * **R0 region** — tight on the real-axis intercept, where the series
+      resistance is read off. Narrow enough that the individual SOC curves
+      separate at their crossing of -Z_imag = 0.
+    * **MF arc** — the whole mid-frequency semicircle (both ZARCs), wide
+      enough that the arc closes instead of running off the top.
+
+    Returns ``(ax_r0, ax_mf)``; either may be ``None`` if its window couldn't
+    be built.
+    """
+    out = []
+    for rect, arc_cols, span, frac, title in (
+        (R0_INSET_RECT, ("R1_z",), R0_INSET_SPAN_ARCS, 0.08, "R0 region"),
+        (MF_INSET_RECT, ("R1_z", "R2_z"), MF_INSET_SPAN_ARCS, 0.25, "MF arc"),
+    ):
+        window = _hf_zoom_window(df, table, arc_cols=arc_cols, span=span,
+                                 fallback_frac=frac)
+        if window is None:
+            logging.info("Nyquist %s inset: no usable window, skipping", title)
+            out.append(None)
+            continue
+        out.append(_draw_zoom_inset(ax, df, soc, cmap, norm, rect, window,
+                                    title, marker))
+    return tuple(out)
+
+
+def _soc_color(value, cmap, norm):
+    """Colour for a SOC value; grey when SOC is missing (no qOCV mapping)."""
+    if value is None or not np.isfinite(value):
+        return "0.6"
+    return cmap(norm(value))
+
+
 def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title: str = ""):
-    """All spectra on one Nyquist plane, coloured by SOC (context companion)."""
+    """All spectra on one Nyquist plane, coloured by SOC (context companion).
+
+    Carries a bottom-right inset zoomed on the high-frequency arc — see
+    :func:`add_hf_inset`.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -805,11 +950,12 @@ def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, tit
     for eid, g in df.groupby("eis_number"):
         g = g.sort_values("frequency")
         ax.plot(g["Z_real"], -g["Z_imag"], "-", lw=1,
-                color=cmap(norm(soc.get(eid, np.nan))))
+                color=_soc_color(soc.get(eid), cmap, norm))
     ax.set_xlabel("Z_real (mΩ)")
     ax.set_ylabel("-Z_imag (mΩ)")
     ax.set_aspect("equal", adjustable="datalim")
     ax.grid(alpha=0.3)
+    add_hf_inset(ax, df, table, soc, cmap, norm, marker="-")
     fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="SOC (%)")
     fig.suptitle(f"EIS Nyquist by SOC — {title}", fontsize=11)
     fig.tight_layout()
@@ -846,7 +992,7 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     fig, (ax_nyq, ax_mag, ax_ph) = plt.subplots(1, 3, figsize=(18, 5.5))
     for eid, g in df.groupby("eis_number"):
         g = g.sort_values("frequency")
-        color = cmap(norm(soc.get(eid, np.nan)))
+        color = _soc_color(soc.get(eid), cmap, norm)
         ax_nyq.plot(g["Z_real"], -g["Z_imag"], "o-", ms=3, lw=1, color=color)
         ax_mag.plot(g["frequency"], g["Z_abs"], "o-", ms=3, lw=1, color=color)
         ax_ph.plot(g["frequency"], g["phase"], "o-", ms=3, lw=1, color=color)
@@ -856,6 +1002,7 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     ax_nyq.set_aspect("equal", adjustable="datalim")
     ax_nyq.grid(alpha=0.3)
     ax_nyq.set_title("Nyquist (measured)")
+    add_hf_inset(ax_nyq, df, table, soc, cmap, norm)
 
     ax_mag.set_xscale("log")
     ax_mag.set_xlabel("frequency (Hz)")

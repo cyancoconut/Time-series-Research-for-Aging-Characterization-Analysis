@@ -157,11 +157,14 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
 ```
 <working_path>/10_initial_characterization/<cell_stem>/
 ├── <cell>_parameters.json
+├── <cell>_{pulse,eis,qocv}_fits.csv   # the JSON's fits[] as flat tables
 ├── GOLD.parquet
 ├── with_features_post_labeled.csv
 ├── <cell>_capacity.csv
 ├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
-└── plots/  pulse_2rc.png · eis_2zarc_warburg.png · qocv.png
+└── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>.png
+            eis_{2zarc_warburg,raw_spectra,fit_overlay}_<stem>_<direction>.png
+            qocv.png
 ```
 
 MinIO mirrors this under `<prefix>/10_initial_characterization/<cell_stem>/`,
@@ -176,6 +179,74 @@ curve plus its throughput capacities). The EIS diffusion element has φ
 result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — are
 recorded in `parameters.json`'s `eis.settings`; both were tuned on the NFPP
 sweep and may need retuning for another cell type or frequency range.
+
+**Sweep direction** — a full-SOC-sweep pulse or EIS run goes one way (start
+full and empty, or start empty and fill), and SOC is assigned by measurement
+*order*, so a wrong guess inverts the whole SOC axis. **One bundle = one
+direction**: a bundle is a single `BM_Programm`, and the parametrization
+procedure puts the charge and discharge sweeps in separate programmes. Both
+paths detect it the same way, from the first→last trend of a measured voltage
+(EIS: per-measurement terminal `U`, `_bundle_direction`; pulse: pre-pulse
+`OCV_V`, `pulse_fit._assign_soc_to_bundle`) via the shared turning-point rule
+in `analysis/sweep_direction.py`. Config `soc_sweep_direction` overrides
+detection for both. The result lands in three places: the plot **filename**,
+each fit record (`sweep_direction` + `sweep_direction_source` ∈
+`config-override`/`detected`/`assumed`), and `settings.bundles[]`. In
+`PULSE_COLS`, `sweep_direction` is distinct from `direction` — the latter is
+the pulse's own CHA/DCH polarity. A bundle that reverses mid-sweep is **not**
+split: `_bundle_direction` reports the excursion as `reversal_mV` and warns.
+
+**SOC from the qOCV curve** (`analysis/soc_from_qocv.py`) — the **only** source
+of SOC. The order-based **ladder** (`100 − 5·i` by measurement index) has been
+**removed** from `eis_vs_soc.build_eis_table` and `pulse_fit.assign_pulse_soc`,
+which now leave `SOC_pct` NaN for this module to fill. It assumed every step
+moved the same charge, and was wrong twice over: the measured voltages
+contradict it (the first NFPP EIS step drops 155 mV, the next ones ~15 mV, all
+labelled "5 %"), and the run puts a **CHA and a DCH pulse on each SOC step**, so
+the pulse index advanced twice per real step and the ladder ran **down to
+−75 % SOC**. With no same-direction qOCV, `SOC_pct` stays NaN and the vs-SOC
+plots skip with a recorded reason — an absent SOC is honest, a fabricated one
+is not. Each
+measurement's rest voltage (EIS `U`, pulse `OCV_V`) is interpolated onto the
+run's own qOCV curve, whose coulomb count gives `SOC(V) = 100·(Q−Q_min)/(Q_max−Q_min)`.
+`SOC_pct_ladder` no longer exists.
+Sweep selection: **same direction** (from the `_qocv_cha_`/`_qocv_dch_`
+filename token — the branches differ by the qOCV hysteresis) and **nearest in
+time** (the qOCV usually sits in a different `BM_Programm` than the bundle).
+The order-based value is kept as `SOC_pct_ladder` for comparison, and
+`settings.bundles[]` records `soc_source_file` / `soc_source_bm` /
+`soc_dt_hours` / `n_clipped` / `ir_correction`. With no same-direction qOCV in
+the folder the ladder is kept and a warning is logged — a missing qOCV never
+blanks the SOC axis.
+
+**IR correction** — the qOCV is measured *under load* at ~C/20 while the mapped
+values are **rest** voltages, so the branch's overpotential is removed first.
+It is measured from the pair itself, `η(SOC) = [V_cha(SOC) − V_dch(SOC)]/2`,
+and each branch shifted toward the middle (`V_dch + η`, `V_cha − η`). An
+independently measured resistance is **not** usable: on the NFPP cell η implies
+~11.9 mΩ mid-SOC while a 30 s pulse's 2RC fit gives `R0+R1+R2` = 5.6 mΩ (`R0`
+alone 3.8 mΩ) — over a 20 h sweep slow diffusion adds resistance a short pulse
+never sees, so a pulse/EIS-derived R removes only about half the offset.
+Correcting both branches by their own η makes them coincide, so this is
+equivalent to mapping on the cha/dch mean, but expressed per SOC and recorded.
+Verified by branch convergence: a rest voltage mapped on cha vs dch disagreed
+by mean −3.92 / max 14.78 SOC% uncorrected, and mean 0.00 / max 0.05 SOC%
+corrected. Falls back to the scalar `qocv_ir_ohm` (`V ∓ I·R`, `I` read from the
+sweep) when only one branch was exported, and to no correction when neither is
+available.
+
+**Nyquist zoom insets** (`eis_vs_soc.add_hf_inset`) — the full Nyquist view is
+dominated by the low-frequency diffusion tail, collapsing the kinetics into a
+few pixels at the origin. Both Nyquist axes (`plot_nyquist_by_soc` and the
+Nyquist panel of `plot_raw_spectra`) carry two zoom insets along the
+bottom-right: **R0 region** (tight on the real-axis intercept, so each SOC
+curve's crossing of −Z_imag = 0 is readable) and **MF arc** (the whole
+mid-frequency semicircle). Widths come from the fitted ZARC diameters — R0
+from `R1_z` alone, MF from `R1_z + R2_z`, since the visible arc is both. The
+y-window is scaled to the arc, **not** the data minimum: above the arc the cell
+turns inductive and −Z_imag dives to −5.9 mΩ (~14× the arc), which would
+flatten the semicircle to a line. Missing SOC (no qOCV) draws grey instead of
+a colormap artefact.
 
 **UI**: Tab 7 runs the three stages as a checklist. Like Tab 6 it is **outside**
 the "Run all 1→2→3→4→5" chain.
@@ -220,6 +291,7 @@ the "Run all 1→2→3→4→5" chain.
 | `classifier_label_source` | `target` (default) or `llm` — training-target space for `train_classifier` (CLI `--labels` overrides). `llm` trains on the free-form `llm_label` column; inference maps it back via measured C-rate. |
 | `llm_interpret` | When true (or `main.py --interpret`), the HDBSCAN run is a label-only LLM pass: writes `llm_*` into the per-segment CSV and skips GOLD/exports. Default false. |
 | `para_procedure_filter` | **List** of programme-name substrings marking parametrization test files (single-element list is normal). Required by `build_bronze_para.py` and `characterize.main_para`. |
+| `qocv_ir_ohm` | Optional (Ω). Fallback IR correction for the qOCV→SOC mapping when only **one** branch was exported, so the pair-derived `η(SOC)` isn't available: the branch is shifted by `I·R` with `I` read from the sweep. Ignored when both cha and dch exist. Omit for no scalar fallback. |
 
 `hdbscan_para_layer_1["min_cluster_size"]` defaults to `max(2, n_programs − 1)`; an explicit config value wins (merged last). `cluster_selection_epsilon` must be **0.3** (not 3.0) for correct qOCV separation.
 
