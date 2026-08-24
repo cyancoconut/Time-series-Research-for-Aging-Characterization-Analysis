@@ -5,14 +5,18 @@ the EIS spectra produced by ``output/export_eis.py``. A bundled export
 (``25_export_eis/<cell>/<cell>_eis_BM<bm>_<SOH>SOH.parquet``) holds every EIS
 measurement of one check-up (BM_Programm) stacked, each a settled per-frequency
 spectrum tagged by ``eis_number`` / ``Time`` / ``U``. A full-SOC-sweep
-check-up records one EIS per SOC plateau, so — exactly like the pulse sweep —
-SOC is assigned by time order:
+check-up records one EIS per SOC plateau.
 
-    discharge sweep -> SOC = 100 - soc_step_pct * i   (i = 0 at the top)
-    charge sweep    -> SOC =   0 + soc_step_pct * i
+``build_eis_table`` leaves ``SOC_pct`` **NaN**: SOC is measured, not assigned
+by order. The caller fills it via :mod:`analysis.soc_from_qocv`, which
+interpolates each measurement's terminal voltage ``U`` onto the run's own qOCV
+curve — see :func:`characterize.fit_characterization.fit_eis`. The old ladder
+(``100 - step * i``) was removed because it assumes every step moved the same
+charge, which the measured voltages contradict.
 
-reusing the same ``SOC_SWEEP_DIRECTION`` / ``SOC_SWEEP_STEP_PCT`` defaults as
-``fit_2rc_pulse`` so EIS and pulse SOC axes line up.
+**The standalone CLI below does not do that mapping**, so its vs-SOC plots are
+empty and its curves grey. Use ``characterize.fit_characterization``, which is
+also the only producer of the Nyquist figure with SOC colouring.
 
 Per measurement, a small set of scale-free, fit-free readouts is extracted from
 the Nyquist curve (no ECM fit, so nothing to converge):
@@ -36,6 +40,7 @@ Usage:
 import argparse
 import logging
 import os
+import textwrap
 
 import numpy as np
 import pandas as pd
@@ -978,7 +983,10 @@ def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, tit
     ax.grid(alpha=0.3)
     add_hf_inset(ax, df, table, soc, cmap, norm, marker="-")
     fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="SOC (%)")
-    fig.suptitle(f"EIS Nyquist by SOC — {title}", fontsize=11)
+    # Bundle filenames are long and this figure is narrow, so wrap rather than
+    # letting the title run off both edges.
+    fig.suptitle("\n".join(textwrap.wrap(f"EIS Nyquist by SOC — {title}", 62)),
+                 fontsize=9)
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     plt.close(fig)

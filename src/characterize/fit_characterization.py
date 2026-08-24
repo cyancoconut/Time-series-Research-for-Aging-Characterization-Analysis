@@ -612,6 +612,14 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         overlay_png = os.path.join(plots_dir, f"eis_fit_overlay_{stem}_{direction}.png")
         _try_plot("fit_overlay", eis_vs_soc.plot_fit_overlay, overlay_png,
                   raw_df, group, title=title)
+
+        # The Nyquist plane on its own, with the R0-region / MF-arc zoom
+        # insets. Its only other caller is eis_vs_soc's standalone CLI, which
+        # doesn't map SOC from the qOCV curve — so without this the figure has
+        # no working producer.
+        nyq_png = os.path.join(plots_dir, f"eis_nyquist_{stem}_{direction}.png")
+        _try_plot("nyquist_by_soc", eis_vs_soc.plot_nyquist_by_soc, nyq_png,
+                  raw_df, group, title=title)
     if plots:
         block["plots"] = plots
     return block
