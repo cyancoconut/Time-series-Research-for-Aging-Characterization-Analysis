@@ -84,7 +84,14 @@ PULSE_COLS = [
 EIS_COLS = [
     "eis_number", "SOC_pct", "U",
     "sweep_direction", "sweep_direction_source",
-    "R_ohm", "R1_z", "tau1_z", "alpha1_z",
+    # R_ohm is the fit-free Z_imag=0 crossing; R0_z is the fitted series term.
+    # They are not the same number — on an inductive cell the crossing sits at
+    # a finite frequency where the arcs still contribute real part, so R_ohm
+    # runs 0.14-0.30 mOhm above R0_z here, by an SOC-dependent margin. Both are
+    # exported so the gap is visible rather than inferred.
+    "R_ohm", "R0_z", "L_z",
+    "R0_hf", "R0_hf_sigma", "hf_rmse", "hf_n", "r0_pinned",
+    "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
     "zarc_rmse", "zarc_degenerate",
 ]
@@ -449,7 +456,8 @@ def _bundle_direction(df: pd.DataFrame, override: str, source_name: str) -> tupl
 
 
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
-            soc_step_pct: float = None, ir_ohm: float = None) -> dict:
+            soc_step_pct: float = None, ir_ohm: float = None,
+            two_stage_r0: bool = False, hf_f_min: float = None) -> dict:
     """2×ZARC + generalized-Warburg fit of every spectrum in every bundle.
 
     Direction is **detected per bundle** from its own per-measurement terminal
@@ -463,10 +471,16 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     direction and skips detection — ``None`` (default) means "detect".
     ``soc_step_pct`` sets the SOC step (default matches ``build_eis_table``'s
     ``SOC_SWEEP_STEP_PCT``, 5.0).
+
+    ``two_stage_r0`` (config ``eis_two_stage_r0``) measures R0 on the
+    high-frequency window and pins it, instead of fitting it against the
+    correlated mid-frequency arc — see :func:`analysis.eis_vs_soc.fit_hf_r0`.
     """
     override = _normalize_sweep_direction(soc_direction) if soc_direction is not None else None
     step = float(soc_step_pct) if soc_step_pct is not None else eis_vs_soc.SOC_SWEEP_STEP_PCT
     direction_source = "config-override" if override else "detected"
+    two_stage_r0 = bool(two_stage_r0)
+    hf_f_min = float(hf_f_min) if hf_f_min is not None else eis_vs_soc.HF_R0_MIN_FREQ_HZ
 
     files = sorted(glob.glob(os.path.join(data_dir, "*_eis_BM*.parquet")))
     block = {
@@ -478,6 +492,8 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
                                != eis_vs_soc.DIFFUSION_TAU_BOX[1],
             "phi_box": list(eis_vs_soc.DIFFUSION_PHI_BOX),
             "alpha_min": eis_vs_soc.ZARC_ALPHA_MIN,
+            "two_stage_r0": two_stage_r0,
+            "hf_r0_f_min_hz": hf_f_min if two_stage_r0 else None,
             "soc_step_pct": step,
             "soc_direction_source": direction_source,
             "soc_direction_override": override,
@@ -520,7 +536,9 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             if direction is None:
                 logging.warning("%s: no EIS measurements — skipping", name)
                 continue
-            table = eis_vs_soc.build_eis_table(bundle_df, direction=direction, step=step)
+            table = eis_vs_soc.build_eis_table(
+                bundle_df, direction=direction, step=step,
+                two_stage_r0=two_stage_r0, hf_f_min=hf_f_min)
             table["sweep_direction"] = direction
             table["sweep_direction_source"] = diag["sweep_direction_source"]
             table["source"] = name
@@ -715,6 +733,8 @@ def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
             soc_direction=cfg.get("soc_sweep_direction"),
             soc_step_pct=cfg.get("soc_step_pct"),
             ir_ohm=cfg.get("qocv_ir_ohm"),
+            two_stage_r0=cfg.get("eis_two_stage_r0", False),
+            hf_f_min=cfg.get("eis_hf_r0_f_min_hz"),
         )
     if "qocv" in parts:
         payload["qocv"] = summarize_qocv(data_dir, plots_dir, nom_capacity)

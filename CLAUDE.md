@@ -180,6 +180,38 @@ result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — ar
 recorded in `parameters.json`'s `eis.settings`; both were tuned on the NFPP
 sweep and may need retuning for another cell type or frequency range.
 
+**Two-stage R0** (`eis_two_stage_r0`, default **off**) — in the single-stage
+full-band fit R0 and the mid-frequency ZARC are correlated: a **depressed** arc
+(small α) has a broad high-frequency foot that reaches the real axis and can
+absorb part of the series resistance. Harmless while the arc stays round, but
+on the NFPP sweep α1 falls to 0.71 below 20 % SOC as the arc grows ~8×, and R0
+then gives way — it turns over and *falls* 0.06 mΩ toward the empty end while
+the spectrum says it is still rising. With the flag on, `fit_hf_r0` measures R0
+first on `f ≥ eis_hf_r0_f_min_hz` (default 100 Hz) with `R0 + jωL + one ZARC` —
+a window where the slow arc and diffusion are flat, so R0 is well posed (1σ ≈
+0.011–0.013 mΩ, 15 of 48 points) — and `fit_zarc_warburg_eis(pin_r0=…)` then
+fixes it, dropping R0 from the free-parameter vector (not boxing it to zero
+width; `least_squares` needs `lb < ub`). Result on NFPP_01: R0 becomes monotone
+in SOC over the whole sweep, α1 flattens to 0.77–0.90, at a mean RMSE cost of
+0.035 → 0.040 mΩ, most of it on the SOC 2.5 % spectrum (0.144 → 0.216) which
+the model already fitted worst. A failed/NaN HF stage falls back to fitting R0.
+`R0_z`/`L_z` and the HF diagnostics (`R0_hf`, `R0_hf_sigma`, `hf_rmse`, `hf_n`,
+`r0_pinned`) are now in `EIS_COLS`, so the fitted series term is exported —
+previously only the fit-free `R_ohm` was, and it is **not the same number**:
+`R_ohm` is the Z_imag = 0 crossing, which on an inductive cell (L ≈ 158 nH
+here) sits at a finite 255–355 Hz where the arcs still add real part, running
+0.14–0.30 mΩ above R0 by an SOC-dependent margin. The `R0` panel of
+`plot_zarc_vs_soc` overlays the HF estimate ±1σ.
+
+**DRT** (`analysis/eis_drt.py`) — model-free companion, **standalone only**:
+nothing in the pipeline imports it, it has its own CLI
+(`python -m analysis.eis_drt <eis_export.parquet>`) and is not on Tab 7. Use it
+to ask how many relaxation processes a spectrum actually contains before adding
+ECM branches. On NFPP_01 it resolves 2 kinetic peaks at mid/high SOC but only
+**one broad** peak (1.15–1.52 decades) below 20 % SOC — which is why a 3rd ZARC
+does not help there: it has no discrete peak to attach to, α pins to 1.0 on
+19/21 spectra, and branches 2/3 swap roles between adjacent SOC points.
+
 **Sweep direction** — a full-SOC-sweep pulse or EIS run goes one way (start
 full and empty, or start empty and fill), and SOC is assigned by measurement
 *order*, so a wrong guess inverts the whole SOC axis. **One bundle = one
@@ -283,6 +315,8 @@ the "Run all 1→2→3→4→5" chain.
 | `eis_file_marker` | Regex identifying an EIS file by its `=`-field measurement token (default `(?:EIS|INS)\d+`) |
 | `eis_procedure_filter` | Substring marking EIS-labelled segments used as match anchors (default `EIS`) |
 | `eis_match_tolerance_minutes` | Max time gap to match an EIS measurement to a segment (default 120) |
+| `eis_two_stage_r0` | Measure R0 on the HF window and pin it in the 2×ZARC fit, instead of fitting it against the correlated mid-frequency arc (default false). Fixes the spurious low-SOC R0 turnover. |
+| `eis_hf_r0_f_min_hz` | Lower frequency bound of the two-stage R0 window (default 100). Needs ≥10 points above it or the stage is skipped and R0 is fitted as before. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |
 | `ah_gap_threshold_s` | Optional. BRONZE Ah counter: intervals with Δt above this (seconds) are dead time between test files and book no `Ah_throughput`. Omit (default) to auto-derive the cut as `50 × median Δt` (the cell's sampling cadence) — adapts per cell, no tuning. |

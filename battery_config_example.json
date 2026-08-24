@@ -40,6 +40,8 @@
     "eis_file_marker": "(?:EIS|INS)\\d+",
     "eis_procedure_filter": "EIS",
     "eis_match_tolerance_minutes": 120,
+    "eis_two_stage_r0": false,
+    "eis_hf_r0_f_min_hz": 100.0,
     "soc_sweep_direction": null,
     "soc_step_pct": 5.0,
     "running_window_days": 2,
