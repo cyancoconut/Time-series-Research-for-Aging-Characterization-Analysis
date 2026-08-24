@@ -797,13 +797,15 @@ def plot_fit_overlay(df: pd.DataFrame, table: pd.DataFrame, out_png: str,
 R0_INSET_RECT = (0.34, 0.08, 0.29, 0.29)
 MF_INSET_RECT = (0.68, 0.08, 0.29, 0.29)
 
-#: Zoom widths, as multiples of a fitted arc diameter. ``R0`` frames just the
-#: real-axis intercept region (first ZARC only); ``MF`` frames the whole
-#: mid-frequency arc, which is *both* ZARCs — on the NFPP bundle ``R1_z`` alone
-#: is 0.41 mOhm while the arc plainly runs to ~3 mOhm because ``R2_z``
-#: (1.62 mOhm) is the bulk of it.
-R0_INSET_SPAN_ARCS = 2.2
+#: MF zoom width, as a multiple of the fitted arc diameter. The mid-frequency
+#: arc is *both* ZARCs — on the NFPP bundle ``R1_z`` alone is 0.41 mOhm while
+#: the arc plainly runs to ~3 mOhm because ``R2_z`` (1.62 mOhm) is the bulk.
 MF_INSET_SPAN_ARCS = 1.6
+
+#: R0 zoom width, as a multiple of the first ZARC diameter. Much tighter than
+#: MF: this view is only for the region where the spectra meet the real axis,
+#: so the arc itself is allowed to run out of frame.
+R0_INSET_SPAN_ARCS = 1.2
 
 
 def _arc_diameter(table: pd.DataFrame, cols: tuple) -> float:
