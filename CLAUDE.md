@@ -180,7 +180,8 @@ result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — ar
 recorded in `parameters.json`'s `eis.settings`; both were tuned on the NFPP
 sweep and may need retuning for another cell type or frequency range.
 
-**Two-stage R0** (`eis_two_stage_r0`, default **off**) — in the single-stage
+**Two-stage R0** (`eis_two_stage_r0`, default **on** — this is the standard
+path; set false only to reproduce a pre-#70 fit) — in the single-stage
 full-band fit R0 and the mid-frequency ZARC are correlated: a **depressed** arc
 (small α) has a broad high-frequency foot that reaches the real axis and can
 absorb part of the series resistance. Harmless while the arc stays round, but
@@ -194,7 +195,11 @@ fixes it, dropping R0 from the free-parameter vector (not boxing it to zero
 width; `least_squares` needs `lb < ub`). Result on NFPP_01: R0 becomes monotone
 in SOC over the whole sweep, α1 flattens to 0.77–0.90, at a mean RMSE cost of
 0.035 → 0.040 mΩ, most of it on the SOC 2.5 % spectrum (0.144 → 0.216) which
-the model already fitted worst. A failed/NaN HF stage falls back to fitting R0.
+the model already fitted worst. Replicated independently on NFPP_02 (a
+different fixture): R0 monotone, roughness 0.0102 → 0.0056, headroom spread
+4.3× → 1.3×, degenerate fits 3 → 1, RMSE 0.0216 → 0.0233, and the pulse
+cross-check `pulse_R0 / EIS(R0+R1+R2)` preserved at 1.009. A failed/NaN HF
+stage falls back to fitting R0.
 `R0_z`/`L_z` and the HF diagnostics (`R0_hf`, `R0_hf_sigma`, `hf_rmse`, `hf_n`,
 `r0_pinned`) are now in `EIS_COLS`, so the fitted series term is exported —
 previously only the fit-free crossing was. The `R0` panel of
@@ -361,7 +366,7 @@ the "Run all 1→2→3→4→5" chain.
 | `eis_file_marker` | Regex identifying an EIS file by its `=`-field measurement token (default `(?:EIS|INS)\d+`) |
 | `eis_procedure_filter` | Substring marking EIS-labelled segments used as match anchors (default `EIS`) |
 | `eis_match_tolerance_minutes` | Max time gap to match an EIS measurement to a segment (default 120) |
-| `eis_two_stage_r0` | Measure R0 on the HF window and pin it in the 2×ZARC fit, instead of fitting it against the correlated mid-frequency arc (default false). Fixes the spurious low-SOC R0 turnover. |
+| `eis_two_stage_r0` | Measure R0 on the HF window and pin it in the 2×ZARC fit, instead of fitting it against the correlated mid-frequency arc (**default true**). Fixes the spurious low-SOC R0 turnover; set false only to reproduce a pre-#70 fit. |
 | `eis_hf_r0_f_min_hz` | Lower frequency bound of the two-stage R0 window (default 100). Needs ≥10 points above it or the stage is skipped and R0 is fitted as before. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |

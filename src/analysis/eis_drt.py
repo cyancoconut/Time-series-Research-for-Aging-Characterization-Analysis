@@ -244,52 +244,6 @@ def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None,
 # plots
 # --------------------------------------------------------------------------
 
-#: Lower edge of the dispersed ramp, in seconds. Above the charge-transfer
-#: peaks, below the slowest resolvable τ. The upper edge is always
-#: ``1/(2π·f_min)`` — past that the sweep constrains nothing.
-RAMP_TAU_LO = 0.3
-
-
-def ramp_slope(tau, gamma, f_min, lo=RAMP_TAU_LO):
-    """log-log slope of γ(ln τ) over the dispersed ramp.
-
-    For a power-law branch ``Z ∝ (jω)^-φ`` the distribution is
-    ``γ(ln τ) ∝ τ^φ``, so this slope **is** φ — recovered without fitting any
-    circuit. Returns NaN when the ramp holds too few usable points.
-    """
-    hi = 1.0 / (2 * np.pi * f_min)
-    m = (tau >= lo) & (tau <= hi) & (gamma > 1e-6)
-    if m.sum() < 4:
-        return np.nan
-    return float(np.polyfit(np.log10(tau[m]), np.log10(gamma[m]), 1)[0])
-
-
-def calibrate_phi(f, lam, phis=(0.30, 0.35, 0.40, 0.45, 0.50), seed=0):
-    """Map ramp slope -> φ using synthetic spectra on *this* frequency grid.
-
-    The relation depends on the grid, λ and the blocking-capacitance split, so
-    it is regenerated rather than hard-coded. Returns ``(inversion_coeffs,
-    table)``; the inversion is a straight line, which is adequate over
-    φ ≈ 0.35–0.50 but **compresses below ~0.35** — slopes there are nearly
-    degenerate, so treat recovered φ < 0.35 as "≤ 0.35", not as a value.
-    """
-    from analysis.eis_vs_soc import _z_zarc, _z_warburg_generalized
-
-    w = 2 * np.pi * f
-    rng = np.random.default_rng(seed)
-    base = 1.2 + 1j * w * 2e-7 + _z_zarc(0.6, 1e-3, 1.0, w) + _z_zarc(0.9, 3e-2, 1.0, w)
-    tau = tau_grid(f)
-    rows = []
-    for phi in phis:
-        z = (base + _z_warburg_generalized(0.5, 5.0, phi, w))
-        z = z * (1 + 0.002 * rng.standard_normal(len(z)))
-        x, _, _ = solve_drt(f, z, tau, lam)
-        rows.append({"phi_true": phi, "slope": ramp_slope(tau, x[:len(tau)], f.min())})
-    t = pd.DataFrame(rows).dropna()
-    coef = np.polyfit(t["slope"], t["phi_true"], 1)
-    return coef, t
-
-
 def plot_drt(curves, meta, ecm, out_png, n_show=4):
     """γ(τ) at selected SOC, with the ECM time constants marked."""
     import matplotlib

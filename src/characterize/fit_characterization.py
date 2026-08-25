@@ -460,7 +460,7 @@ def _bundle_direction(df: pd.DataFrame, override: str, source_name: str) -> tupl
 
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             soc_step_pct: float = None, ir_ohm: float = None,
-            two_stage_r0: bool = False, hf_f_min: float = None) -> dict:
+            two_stage_r0: bool = True, hf_f_min: float = None) -> dict:
     """2×ZARC + generalized-Warburg fit of every spectrum in every bundle.
 
     Direction is **detected per bundle** from its own per-measurement terminal
@@ -736,7 +736,7 @@ def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
             soc_direction=cfg.get("soc_sweep_direction"),
             soc_step_pct=cfg.get("soc_step_pct"),
             ir_ohm=cfg.get("qocv_ir_ohm"),
-            two_stage_r0=cfg.get("eis_two_stage_r0", False),
+            two_stage_r0=cfg.get("eis_two_stage_r0", True),
             hf_f_min=cfg.get("eis_hf_r0_f_min_hz"),
         )
     if "qocv" in parts:

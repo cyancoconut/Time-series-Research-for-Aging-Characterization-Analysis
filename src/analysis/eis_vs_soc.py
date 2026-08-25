@@ -680,13 +680,14 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
 
 def build_eis_table(df: pd.DataFrame, direction=None, step=None,
                     fit_2rc=True, fit_warburg=True, fit_zarc=True,
-                    two_stage_r0=False, hf_f_min=None) -> pd.DataFrame:
+                    two_stage_r0=True, hf_f_min=None) -> pd.DataFrame:
     """Per-measurement feature table with a time-ordered sweep SOC.
 
     ``two_stage_r0`` measures R0 on the high-frequency window first
     (:func:`fit_hf_r0`) and pins it in the 2×ZARC fit, instead of letting the
-    full-band fit trade R0 against the mid-frequency arc. Off by default so
-    existing fits reproduce. ``hf_f_min`` overrides
+    full-band fit trade R0 against the mid-frequency arc. **On by default** —
+    it is the standard path; pass ``False`` to reproduce a pre-#70 fit.
+    ``hf_f_min`` overrides
     :data:`HF_R0_MIN_FREQ_HZ` for that first stage.
 
     One row per ``eis_number`` (measurement), ordered by ``Time``, with SOC
