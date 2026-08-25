@@ -158,12 +158,14 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
 <working_path>/10_initial_characterization/<cell_stem>/
 ├── <cell>_parameters.json
 ├── <cell>_{pulse,eis,qocv}_fits.csv   # the JSON's fits[] as flat tables
+├── <cell>_eis_drt_peaks.csv          # one row per DRT peak (eis.drt.peaks)
 ├── GOLD.parquet
 ├── with_features_post_labeled.csv
 ├── <cell>_capacity.csv
 ├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
 └── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>.png
-            eis_{2zarc_warburg,raw_spectra,fit_overlay}_<stem>_<direction>.png
+            eis_{2zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>.png
+            eis_drt_{gamma,map}_<stem>_<direction>.png
             qocv.png
 ```
 
@@ -242,10 +244,30 @@ that damages R0 most. **R0 stays monotone in SOC under all three**, so the
 two-stage fix is robust to this; left unmodelled deliberately. Untested idea:
 narrow the HF window's top instead of adding an element.
 
-**DRT** (`analysis/eis_drt.py`) — model-free companion, **standalone only**:
-nothing in the pipeline imports it, it has its own CLI
+**DRT** (`analysis/eis_drt.py`) — model-free companion, **run by default
+alongside every EIS fit** (`eis_drt`, default true). `fit_eis` runs it per
+bundle on the same raw spectra, writing `plots/eis_drt_{gamma,map}_<stem>_<dir>.png`
+and `<cell>_eis_drt_peaks.csv` (one row per peak: `tau_peak`, `gamma_peak`,
+`R_peak`, `width_decades`), plus an `eis.drt` block in `parameters.json`. It
+answers the one question an ECM cannot ask of itself — how many relaxation
+processes are in the spectrum at all — and the γ plot overlays the fitted τ, so
+**an ECM τ landing in a DRT *valley* rather than on a peak** flags one element
+blanketing a region with more structure than it has parameters for (which is
+what `tau1_z` does on NFPP_01; see the bandwidth note). Adds ~0.5 s per bundle.
+
+**λ is fixed** (`eis_drt_lambda`, default `1e-3`), *not* the L-curve corner.
+The corner is better for a one-off investigation but is not reproducible enough
+to bake in: across one NFPP sweep it picked λ from 2.5e-6 to 1.6e-2 with peak
+counts swinging 2–10, so consecutive SOC steps would be smoothed differently
+and the vs-SOC structure would be an artefact of λ. It is also ~11× slower
+(4.7 s vs 0.4 s per bundle). Peak counts are λ-dependent either way — the same
+NFPP_02 data reads "τ1 in a valley" at 4e-3 and "τ1 on a peak" at 1e-3 — so
+treat a peak count as a statement about (data, λ), not about the cell.
+
+It also still has its own CLI
 (`python -m analysis.eis_drt <eis_export.parquet> [--data-dir …]
-[--sweep-direction …]`) and is not on Tab 7. Its SOC comes from
+[--sweep-direction …] [--lam …]`), which defaults to the L-curve corner and is
+not on Tab 7. Its SOC comes from
 `util.soc_from_qocv.assign_soc`, same as the ECM fits, so a DRT panel and an
 `eis_fits.csv` row can never disagree about a spectrum's SOC (`--data-dir`
 defaults to the export's own folder). With no qOCV there it falls back to the
@@ -368,6 +390,8 @@ the "Run all 1→2→3→4→5" chain.
 | `eis_match_tolerance_minutes` | Max time gap to match an EIS measurement to a segment (default 120) |
 | `eis_two_stage_r0` | Measure R0 on the HF window and pin it in the 2×ZARC fit, instead of fitting it against the correlated mid-frequency arc (**default true**). Fixes the spurious low-SOC R0 turnover; set false only to reproduce a pre-#70 fit. |
 | `eis_hf_r0_f_min_hz` | Lower frequency bound of the two-stage R0 window (default 100). Needs ≥10 points above it or the stage is skipped and R0 is fitted as before. |
+| `eis_drt` | Run the model-free DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block. ~0.5 s per bundle. |
+| `eis_drt_lambda` | Fixed DRT regularisation (default `1e-3`). Deliberately not the L-curve corner — see the DRT section. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |
 | `ah_gap_threshold_s` | Optional. BRONZE Ah counter: intervals with Δt above this (seconds) are dead time between test files and book no `Ah_throughput`. Omit (default) to auto-derive the cut as `50 × median Δt` (the cell's sampling cadence) — adapts per cell, no tuning. |

@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from analysis import eis_vs_soc, qocv_curve
+from analysis import eis_drt, eis_vs_soc, qocv_curve
 from util import soc_from_qocv
 from analysis import sweep_direction as sweep_direction_mod
 from characterize import pulse_fit
@@ -58,6 +58,10 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 PULSE_MODEL = "2rc"
 EIS_MODEL = "2zarc_warburg"
+
+#: Fixed DRT regularisation used by the pipeline. See the note in ``fit_eis``
+#: for why this is not the L-curve corner.
+DRT_LAMBDA_DEFAULT = 1e-3
 
 #: The independently fittable blocks, in payload order. A run may do any
 #: subset (``--only``); the untouched blocks are carried over from the
@@ -97,6 +101,15 @@ EIS_COLS = [
     "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
     "zarc_rmse", "zarc_degenerate",
+]
+
+#: Columns of the per-bundle DRT peak table (``<cell>_eis_drt_peaks.csv``).
+#: ``width_decades`` is the discriminator the ECM cannot report: a *broad*
+#: peak is one dispersed process, several *narrow* ones are separate branches
+#: the 2×ZARC model may have no element for.
+DRT_PEAK_COLS = [
+    "eis_number", "SOC_pct", "tau_peak", "gamma_peak", "R_peak",
+    "width_decades", "source",
 ]
 
 
@@ -460,7 +473,8 @@ def _bundle_direction(df: pd.DataFrame, override: str, source_name: str) -> tupl
 
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             soc_step_pct: float = None, ir_ohm: float = None,
-            two_stage_r0: bool = True, hf_f_min: float = None) -> dict:
+            two_stage_r0: bool = True, hf_f_min: float = None,
+            drt: bool = True, drt_lambda: float = None) -> dict:
     """2×ZARC + generalized-Warburg fit of every spectrum in every bundle.
 
     Direction is **detected per bundle** from its own per-measurement terminal
@@ -484,6 +498,14 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     direction_source = "config-override" if override else "detected"
     two_stage_r0 = bool(two_stage_r0)
     hf_f_min = float(hf_f_min) if hf_f_min is not None else eis_vs_soc.HF_R0_MIN_FREQ_HZ
+    # DRT runs at a **fixed** λ, not the L-curve corner. The corner is the
+    # better choice for a one-off investigation but it is not reproducible
+    # enough to bake into the pipeline: across one NFPP sweep it picked λ from
+    # 2.5e-6 to 1.6e-2 and the peak count swung 2–10, so consecutive SOC steps
+    # would be smoothed differently and the vs-SOC structure would be an
+    # artefact of λ. It is also ~11x slower (4.7 s vs 0.4 s per bundle).
+    drt = bool(drt)
+    drt_lambda = float(drt_lambda) if drt_lambda is not None else DRT_LAMBDA_DEFAULT
 
     files = sorted(glob.glob(os.path.join(data_dir, "*_eis_BM*.parquet")))
     block = {
@@ -497,6 +519,8 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             "alpha_min": eis_vs_soc.ZARC_ALPHA_MIN,
             "two_stage_r0": two_stage_r0,
             "hf_r0_f_min_hz": hf_f_min if two_stage_r0 else None,
+            "drt": drt,
+            "drt_lambda": drt_lambda if drt else None,
             "soc_step_pct": step,
             "soc_direction_source": direction_source,
             "soc_direction_override": override,
@@ -599,6 +623,7 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         })
 
     plots = []
+    drt_peaks = []
     for source, group in combined.groupby("source", sort=False):
         stem = os.path.splitext(str(source))[0]
         direction = group["sweep_direction"].iloc[0]
@@ -641,8 +666,41 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         nyq_png = os.path.join(plots_dir, f"eis_nyquist_{stem}_{direction}.png")
         _try_plot("nyquist_by_soc", eis_vs_soc.plot_nyquist_by_soc, nyq_png,
                   raw_df, group, title=title)
+
+        # Model-free DRT of the same bundle. It answers a question the ECM
+        # cannot ask of itself — how many relaxation processes are in the
+        # spectrum at all — so it is worth having beside every fit rather than
+        # only when someone remembers to run the standalone CLI. `data_dir`
+        # gives it the same qOCV SOC the fits use, and `group` supplies the
+        # fitted τ so the two are overlaid on one axis: an ECM τ sitting in a
+        # DRT *valley* (rather than on a peak) is the signature of one element
+        # blanketing a region with more structure than it has parameters for.
+        if not drt:
+            continue
+        try:
+            curves, peaks, meta, _ = eis_drt.run_bundle(
+                raw_df, lam=drt_lambda, data_dir=data_dir, ir_ohm=ir_ohm,
+            )
+        except Exception as exc:
+            logging.warning("DRT failed for %s: %s", source, exc)
+            block.setdefault("errors", []).append(
+                {"source": source, "error": f"DRT {type(exc).__name__}: {exc}"}
+            )
+        else:
+            if not peaks.empty:
+                drt_peaks.append(peaks.assign(source=source))
+            gam_png = os.path.join(plots_dir, f"eis_drt_gamma_{stem}_{direction}.png")
+            _try_plot("drt_gamma", eis_drt.plot_drt, gam_png, curves, meta, group)
+            map_png = os.path.join(plots_dir, f"eis_drt_map_{stem}_{direction}.png")
+            _try_plot("drt_map", eis_drt.plot_drt_map, map_png, curves)
+
     if plots:
         block["plots"] = plots
+    if drt_peaks:
+        block["drt"] = {
+            "lambda": drt_lambda,
+            "peaks": _records(pd.concat(drt_peaks, ignore_index=True), DRT_PEAK_COLS),
+        }
     return block
 
 
@@ -738,6 +796,8 @@ def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
             ir_ohm=cfg.get("qocv_ir_ohm"),
             two_stage_r0=cfg.get("eis_two_stage_r0", True),
             hf_f_min=cfg.get("eis_hf_r0_f_min_hz"),
+            drt=cfg.get("eis_drt", True),
+            drt_lambda=cfg.get("eis_drt_lambda"),
         )
     if "qocv" in parts:
         payload["qocv"] = summarize_qocv(data_dir, plots_dir, nom_capacity)
@@ -770,6 +830,20 @@ def write_fit_csvs(cell_dir: str, stem: str, payload: dict) -> list:
             continue
         logging.info("%s: %s fits -> %s", stem, part, out_csv)
         written.append(out_csv)
+
+    # The DRT peak table rides alongside the EIS fits rather than in FIT_PARTS:
+    # it is not a fit, and it has its own row granularity (one row per peak,
+    # not per spectrum), so it cannot share the `fits` shape above.
+    peaks = ((payload.get("eis") or {}).get("drt") or {}).get("peaks")
+    if peaks:
+        out_csv = os.path.join(cell_dir, f"{stem}_eis_drt_peaks.csv")
+        try:
+            pd.DataFrame(peaks).to_csv(out_csv, index=False)
+        except Exception as exc:
+            logging.warning("%s: DRT peaks CSV failed: %s", stem, exc)
+        else:
+            logging.info("%s: DRT peaks -> %s", stem, out_csv)
+            written.append(out_csv)
     return written
 
 
