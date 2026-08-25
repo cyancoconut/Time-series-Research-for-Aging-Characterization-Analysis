@@ -47,7 +47,7 @@ import numpy as np
 import pandas as pd
 
 from analysis import eis_vs_soc, qocv_curve
-from analysis import soc_from_qocv
+from util import soc_from_qocv
 from analysis import sweep_direction as sweep_direction_mod
 from characterize import pulse_fit
 from main import load_config

@@ -239,7 +239,13 @@ narrow the HF window's top instead of adding an element.
 
 **DRT** (`analysis/eis_drt.py`) — model-free companion, **standalone only**:
 nothing in the pipeline imports it, it has its own CLI
-(`python -m analysis.eis_drt <eis_export.parquet>`) and is not on Tab 7. Use it
+(`python -m analysis.eis_drt <eis_export.parquet> [--data-dir …]
+[--sweep-direction …]`) and is not on Tab 7. Its SOC comes from
+`util.soc_from_qocv.assign_soc`, same as the ECM fits, so a DRT panel and an
+`eis_fits.csv` row can never disagree about a spectrum's SOC (`--data-dir`
+defaults to the export's own folder). With no qOCV there it falls back to the
+order-based ladder and says so in `meta["soc_source"]` — check that column
+before quoting a SOC off a DRT plot. Use it
 to ask how many relaxation processes a spectrum actually contains before adding
 ECM branches. On NFPP_01 it resolves 2 kinetic peaks at mid/high SOC but only
 **one broad** peak (1.15–1.52 decades) below 20 % SOC — which is why a 3rd ZARC
@@ -262,7 +268,13 @@ each fit record (`sweep_direction` + `sweep_direction_source` ∈
 the pulse's own CHA/DCH polarity. A bundle that reverses mid-sweep is **not**
 split: `_bundle_direction` reports the excursion as `reversal_mV` and warns.
 
-**SOC from the qOCV curve** (`analysis/soc_from_qocv.py`) — the **only** source
+**SOC from the qOCV curve** (`util/soc_from_qocv.py` — in `util/`, not
+`analysis/`, so *every* module can reach it without re-deriving SOC; the
+loading/coulomb-count primitives it needs live beside it in `util/io_qocv.py`
+and are re-exported by `analysis/qocv_curve.py`, keeping `util` free of any
+dependency on `analysis`). **Use `assign_soc(table, voltage_col, direction,
+data_dir, …)`** — the one-call form of `find_sweeps` + `map_table` — rather
+than writing an SOC assignment of your own. It is the **only** source
 of SOC. The order-based **ladder** (`100 − 5·i` by measurement index) has been
 **removed** from `eis_vs_soc.build_eis_table` and `pulse_fit.assign_pulse_soc`,
 which now leave `SOC_pct` NaN for this module to fill. It assumed every step

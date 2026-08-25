@@ -159,13 +159,44 @@ def drt_peaks(tau, gamma, rel_height=0.05):
     return pd.DataFrame(rows)
 
 
-def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None):
-    """DRT for every spectrum in a bundle. Returns ``(curves, peaks, meta)``."""
+def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None,
+               data_dir=None, ir_ohm=None):
+    """DRT for every spectrum in a bundle. Returns ``(curves, peaks, meta)``.
+
+    ``SOC_pct`` comes from the run's own qOCV curve via
+    :func:`util.soc_from_qocv.assign_soc` when ``data_dir`` is given — the same
+    single source the ECM fits use, so a DRT panel and an ``eis_fits.csv`` row
+    can never disagree about which SOC a spectrum was measured at.
+
+    Without ``data_dir`` (or with no qOCV export in it) SOC falls back to the
+    order-based ladder ``100 - step * i``, which is **wrong whenever the steps
+    moved unequal charge** — it is kept only so the CLI still labels its panels
+    with something. ``meta["soc_source"]`` records which of the two was used;
+    check it before quoting a SOC off a DRT plot.
+    """
     from analysis.eis_vs_soc import SOC_SWEEP_DIRECTION, SOC_SWEEP_STEP_PCT
+    from util import soc_from_qocv
 
     direction = direction or SOC_SWEEP_DIRECTION
     step = SOC_SWEEP_STEP_PCT if step is None else step
     order = df.groupby("eis_number")["Time"].min().sort_values().index.tolist()
+
+    # One rest voltage per measurement -> qOCV SOC, in bundle time order.
+    soc_by_eid, soc_source = {}, "ladder (100 - step*i) — NOT measured"
+    if data_dir:
+        u = (df.groupby("eis_number")
+               .agg(U=("U", "mean"), Time=("Time", "min"))
+               .reindex(order).reset_index())
+        diag = soc_from_qocv.assign_soc(
+            u, "U", direction, data_dir, t_ref=u["Time"].min(),
+            label="DRT bundle", ir_ohm=ir_ohm,
+        )
+        if "SOC_pct" in u.columns and u["SOC_pct"].notna().any():
+            soc_by_eid = dict(zip(u["eis_number"], u["SOC_pct"]))
+            soc_source = diag.get("soc_source", "qOCV")
+        else:
+            logging.warning("DRT: qOCV SOC unavailable (%s) — falling back to "
+                            "the order-based ladder", diag.get("reason", "?"))
 
     curves, peaks, meta, lcurves = [], [], [], {}
     for i, eid in enumerate(order):
@@ -185,7 +216,11 @@ def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None):
 
         zf = reconstruct(f, tau, x)
         rmse = float(np.sqrt(np.mean(np.abs(zf - zd) ** 2)))
-        soc = (0.0 + step * i) if str(direction).lower().startswith("cha") else (100.0 - step * i)
+        soc = soc_by_eid.get(
+            eid,
+            (0.0 + step * i) if str(direction).lower().startswith("cha")
+            else (100.0 - step * i),
+        )
 
         for t, g in zip(tau, gamma):
             curves.append({"eis_number": eid, "SOC_pct": soc, "tau": t, "gamma": g})
@@ -197,7 +232,7 @@ def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None):
                      "R_inf": r_inf, "L": L,
                      "C_blk": (1.0 / invC) if invC > 0 else np.inf,
                      "R_drt_total": float(np.sum(gamma) * np.mean(np.diff(np.log(tau)))),
-                     "n_peaks": len(pk)})
+                     "n_peaks": len(pk), "soc_source": soc_source})
         logging.info("DRT %s (SOC %3.0f%%): lam=%.3g rmse=%.4f peaks=%d",
                      eid, soc, lam_i, rmse, len(pk))
 
@@ -430,10 +465,18 @@ def main():
                     help="fixed regularisation (default: per-spectrum L-curve corner)")
     ap.add_argument("--ecm", default=None,
                     help="optional eis_params.csv to mark ECM time constants")
+    ap.add_argument("--data-dir", default=None,
+                    help="folder holding the qOCV exports for the qOCV-derived "
+                         "SOC (default: the export's own folder). Without a "
+                         "qOCV there, SOC falls back to the order-based ladder")
+    ap.add_argument("--sweep-direction", default=None,
+                    help="override the sweep direction used to pick the qOCV branch")
     args = ap.parse_args()
 
     df = pd.read_parquet(args.export)
-    curves, peaks, meta, _ = run_bundle(df, lam=args.lam)
+    data_dir = args.data_dir or os.path.dirname(os.path.abspath(args.export))
+    curves, peaks, meta, _ = run_bundle(df, lam=args.lam, data_dir=data_dir,
+                                        direction=args.sweep_direction)
 
     ecm = pd.read_csv(args.ecm) if args.ecm and os.path.exists(args.ecm) else pd.DataFrame()
 

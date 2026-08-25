@@ -8,7 +8,7 @@ spectrum tagged by ``eis_number`` / ``Time`` / ``U``. A full-SOC-sweep
 check-up records one EIS per SOC plateau.
 
 ``build_eis_table`` leaves ``SOC_pct`` **NaN**: SOC is measured, not assigned
-by order. The caller fills it via :mod:`analysis.soc_from_qocv`, which
+by order. The caller fills it via :mod:`util.soc_from_qocv`, which
 interpolates each measurement's terminal voltage ``U`` onto the run's own qOCV
 curve — see :func:`characterize.fit_characterization.fit_eis`. The old ladder
 (``100 - step * i``) was removed because it assumes every step moved the same
@@ -722,7 +722,7 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
         # the same charge, which the measured voltages contradict (the first
         # NFPP step drops 155 mV, the next ones ~15 mV, all labelled "5 %").
         # SOC is measured from the run's own qOCV curve
-        # (`analysis/soc_from_qocv.py`) using each measurement's own U.
+        # (`util/soc_from_qocv.py`) using each measurement's own U.
         feat.update(
             {
                 "eis_number": eid,
