@@ -6,7 +6,7 @@ Working data path is at /home/ann/Documents/Data_Metabatt (data only — do **no
 
 ## Git workflow
 
-Before any code change, branch off: `feat/…` / `fix/…` / `refactor/…` / `config/…`. Push and open a PR into `J8005_BMWK_METABatt` (CodeRabbit auto-reviews). **Never commit directly to `J8005_BMWK_METABatt`.**
+Before any code change, branch off: `feat/…` / `fix/…` / `refactor/…` / `config/…`. Push and open a PR into `main` (CodeRabbit auto-reviews). **Never commit directly to `main`.**
 
 ## Running the pipeline
 
