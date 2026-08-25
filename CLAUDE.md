@@ -197,11 +197,45 @@ in SOC over the whole sweep, α1 flattens to 0.77–0.90, at a mean RMSE cost of
 the model already fitted worst. A failed/NaN HF stage falls back to fitting R0.
 `R0_z`/`L_z` and the HF diagnostics (`R0_hf`, `R0_hf_sigma`, `hf_rmse`, `hf_n`,
 `r0_pinned`) are now in `EIS_COLS`, so the fitted series term is exported —
-previously only the fit-free `R_ohm` was, and it is **not the same number**:
-`R_ohm` is the Z_imag = 0 crossing, which on an inductive cell (L ≈ 158 nH
-here) sits at a finite 255–355 Hz where the arcs still add real part, running
-0.14–0.30 mΩ above R0 by an SOC-dependent margin. The `R0` panel of
+previously only the fit-free crossing was. The `R0` panel of
 `plot_zarc_vs_soc` overlays the HF estimate ±1σ.
+
+**`R_cross` is not the ohmic resistance** (called `R_ohm` until the two-stage
+work; renamed because the old name invited exactly that misreading, and
+`eis_features`' docstring asserted it outright). It is `Z_real` at the
+`Z_imag = 0` crossing — and on an inductive cell that crossing is at a
+*finite* frequency, not the high-frequency limit: it is wherever ωL cancels
+the arcs' reactance, 255–355 Hz on the NFPP sweep (L ≈ 158 nH). The arcs still
+contribute 0.11–0.19 mΩ of real part there, so `R_cross` runs **12–16 %
+(0.135–0.211 mΩ) above the fitted R0**, by an SOC-dependent margin. The
+decomposition closes: `R0 + Re(arcs + diffusion)` at `f_cross` reproduces
+`R_cross` to < 0.007 mΩ. What sets the gap is the *inductance*, not the arc
+size — corr(gap, ωL at crossing) = 0.88 vs corr(gap, R1+R2) = 0.45, because a
+larger arc also has a larger τ and pushes the crossing down in frequency,
+compensating. Practically: `R_cross` tracks R0's SOC trend to ±1.5 pp so it is
+a usable *relative* proxy, but its ~15 % offset is a property of the rig's
+inductance, so never compare it across setups. `f_cross_Hz` is exported beside
+it so this is checkable from the CSV. `R_pol = R_tot − R_cross` inherits the
+same bias with the opposite sign and **understates** polarisation.
+For the series resistance use `R0_z`, or `R0_hf` under `eis_two_stage_r0`.
+
+**Open — SOC-dependent inductive loss.** The pure `jωL` series term is
+incomplete: with R0 and the arcs subtracted, `Re(residual)` at 6 kHz is
+0.059–0.089 mΩ (a pure inductor predicts exactly 0), rising monotonically with
+SOC (corr 0.86) while `Im(residual)` and hence L stay flat at 153 nH ±0.3 %.
+So it is a *loss on a constant inductance*, and it is SOC-dependent — not a
+fixture constant. Fitting `Re_res = c + A·ω^p` gives **p ≈ 1.10–1.11** (stable
+above SOC 45) with offset `c ≈ −0.028 mΩ`, i.e. the two-stage R0 is biased high
+by ~2.3 %, varying 0.030 mΩ across the sweep (14 % of R0's own SOC swing).
+Neither obvious element fixes it: a **parallel `R_L ∥ jωL`** predicts p = 2
+(fitted R_L ≈ 285 mΩ, 3.6σ, and note it only works in the `ωL ≪ R_L` regime —
+at small R_L it collapses to a constant resistance degenerate with R0), and a
+**fractional inductor `L(jω)^γ`** predicts p = γ ≤ 1 (fitted γ ≈ 0.98, best
+HF RMSE of the three at 0.031 vs 0.043 vs 0.049) but shifts R0 by −0.09 mΩ,
+3–4× more than the 0.028 mΩ actually there. Choosing on RMSE picks the element
+that damages R0 most. **R0 stays monotone in SOC under all three**, so the
+two-stage fix is robust to this; left unmodelled deliberately. Untested idea:
+narrow the HF window's top instead of adding an element.
 
 **DRT** (`analysis/eis_drt.py`) — model-free companion, **standalone only**:
 nothing in the pipeline imports it, it has its own CLI

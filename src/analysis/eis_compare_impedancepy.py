@@ -107,7 +107,7 @@ def _nan_canon(**kw) -> dict:
 # --------------------------------------------------------------------------
 
 def ours_A(spec, feat):
-    f = fit_2rc_eis(spec, r_ohm0=feat["R_ohm"], r_tot0=feat["R_tot"])
+    f = fit_2rc_eis(spec, r_ohm0=feat["R_cross"], r_tot0=feat["R_tot"])
     return _nan_canon(R0=f["R0"], L=f["L"], R1=f["R1"], tau1=f["tau1"], alpha1=1.0,
                       R2=f["R2"], tau2=f["tau2"], alpha2=1.0), f
 
@@ -172,7 +172,7 @@ def _tau_cpe(r, q, a):
 
 
 def lib_A(f, zd, feat, weight=True):
-    r0, rp = feat["R_ohm"], max(feat["R_tot"] - feat["R_ohm"], 1e-3)
+    r0, rp = feat["R_cross"], max(feat["R_tot"] - feat["R_cross"], 1e-3)
     guess = [1e-6, max(r0, 1e-3), 0.4 * rp, 0.02 / (0.4 * rp), 0.6 * rp, 2.0 / (0.6 * rp)]
     v, dt = _lib_fit(f, zd, "L0-R0-p(R1,C1)-p(R2,C2)", guess, weight=weight)
     p = _nan_canon(R0=v["R0"], L=v["L0"], R1=v["R1"], tau1=v["R1"] * v["C1"], alpha1=1.0,
@@ -181,7 +181,7 @@ def lib_A(f, zd, feat, weight=True):
 
 
 def lib_B(f, zd, feat, weight=True):
-    r0, rp = feat["R_ohm"], max(feat["R_tot"] - feat["R_ohm"], 1e-3)
+    r0, rp = feat["R_cross"], max(feat["R_tot"] - feat["R_cross"], 1e-3)
     guess = [1e-6, max(r0, 1e-3), 0.3 * rp, 0.02 / (0.3 * rp), 0.4 * rp, 2.0 / (0.4 * rp),
              0.3 * rp, 20.0]
     v, dt = _lib_fit(f, zd, "L0-R0-p(R1,C1)-p(R2,C2)-Ws0", guess, weight=weight)
@@ -192,7 +192,7 @@ def lib_B(f, zd, feat, weight=True):
 
 
 def lib_C(f, zd, feat, weight=True, pin_tau_d=False):
-    r0, rp = feat["R_ohm"], max(feat["R_tot"] - feat["R_ohm"], 1e-3)
+    r0, rp = feat["R_cross"], max(feat["R_tot"] - feat["R_cross"], 1e-3)
     # CPE Q from a target τ: Q = τ^α / R  (α seeded at 0.85)
     a0 = 0.85
     r1, r2, rd = 0.3 * rp, 0.5 * rp, 0.3 * rp

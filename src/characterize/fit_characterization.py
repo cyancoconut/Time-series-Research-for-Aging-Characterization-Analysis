@@ -84,12 +84,15 @@ PULSE_COLS = [
 EIS_COLS = [
     "eis_number", "SOC_pct", "U",
     "sweep_direction", "sweep_direction_source",
-    # R_ohm is the fit-free Z_imag=0 crossing; R0_z is the fitted series term.
-    # They are not the same number — on an inductive cell the crossing sits at
-    # a finite frequency where the arcs still contribute real part, so R_ohm
-    # runs 0.14-0.30 mOhm above R0_z here, by an SOC-dependent margin. Both are
-    # exported so the gap is visible rather than inferred.
-    "R_ohm", "R0_z", "L_z",
+    # R_cross is the fit-free Z_imag=0 crossing; R0_z is the fitted series
+    # term. They are not the same number and R_cross is NOT the ohmic
+    # resistance (it was called R_ohm until #70, which invited exactly that
+    # reading): on an inductive cell the crossing sits at a finite frequency
+    # — f_cross_Hz, 255-355 Hz on the NFPP sweep — where the arcs still
+    # contribute real part, so R_cross runs 12-16 % above R0_z, by an
+    # SOC-dependent margin. f_cross_Hz is exported next to it so that is
+    # visible from the CSV alone rather than having to be inferred.
+    "R_cross", "f_cross_Hz", "R0_z", "L_z",
     "R0_hf", "R0_hf_sigma", "hf_rmse", "hf_n", "r0_pinned",
     "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",

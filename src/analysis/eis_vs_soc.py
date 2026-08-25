@@ -21,10 +21,20 @@ also the only producer of the Nyquist figure with SOC colouring.
 Per measurement, a small set of scale-free, fit-free readouts is extracted from
 the Nyquist curve (no ECM fit, so nothing to converge):
 
-    R_ohm   ohmic/series resistance — Z_real at the high-frequency Z_imag=0
-            crossing (inductive -> capacitive), interpolated.
+    R_cross Z_real at the Z_imag=0 crossing (inductive -> capacitive),
+            interpolated. **Not** the ohmic resistance, despite being widely
+            used as one: the crossing sits where ωL cancels the arcs' negative
+            reactance, which on an inductive cell is a *finite* frequency
+            (255-355 Hz on the NFPP sweep, L ~ 158 nH), and there the arcs
+            still contribute real part. It therefore runs above the true
+            series R by an SOC-dependent margin — 12-16 %, 0.135-0.211 mΩ,
+            on that sweep. For the series resistance use the fitted ``R0_z``,
+            or ``R0_hf`` from the two-stage fit. See :func:`fit_hf_r0`.
+    f_cross_Hz  the frequency at that crossing — records where R_cross was
+            actually measured, since "high-frequency limit" it is not.
     R_tot   Z_real at the lowest frequency (DC-ish total resistance).
-    R_pol   polarisation = R_tot - R_ohm (charge-transfer + diffusion).
+    R_pol   R_tot - R_cross. Inherits R_cross's bias with the opposite sign,
+            so it *understates* true polarisation by the same margin.
     arc_pk  semicircle height = max(-Z_imag) over the capacitive branch.
     f_pk    characteristic frequency at that arc peak (~ 1/2πτ).
 
@@ -56,24 +66,36 @@ def eis_features(spec: pd.DataFrame) -> dict:
     """Fit-free impedance readouts from one settled spectrum.
 
     ``spec`` carries ``frequency, Z_real, Z_imag`` (canonical io_eis columns).
-    Returns ``R_ohm, R_tot, R_pol, arc_pk, f_pk`` (NaN where undefined).
+    Returns ``R_cross, f_cross_Hz, R_tot, R_pol, arc_pk, f_pk`` (NaN where
+    undefined). ``R_cross`` is the Z_imag=0 crossing and is **not** the ohmic
+    resistance — see the module docstring; use ``R0_z``/``R0_hf`` for that.
     """
     s = spec.sort_values("frequency")
     f = s["frequency"].to_numpy(float)
     zr = s["Z_real"].to_numpy(float)
     zi = s["Z_imag"].to_numpy(float)
 
-    # R_ohm: Z_real where Z_imag crosses zero at the high-frequency end (the
-    # inductive branch is positive, the capacitive branch negative). Take the
-    # highest-frequency sign change and interpolate Z_real to Z_imag = 0.
+    # R_cross: Z_real where Z_imag crosses zero (the inductive branch is
+    # positive, the capacitive branch negative). Take the highest-frequency
+    # sign change and interpolate both Z_real and the frequency to Z_imag = 0.
+    # f_cross is reported because the crossing is *not* at the top of the
+    # sweep: it is wherever ωL happens to cancel the arcs' reactance.
     sign = np.sign(zi)
     crossings = np.where(np.diff(sign) != 0)[0]
     if len(crossings):
         k = crossings[-1]
         z0, z1 = zi[k], zi[k + 1]
-        r_ohm = zr[k] if z1 == z0 else zr[k] + (zr[k + 1] - zr[k]) * (0 - z0) / (z1 - z0)
+        if z1 == z0:
+            r_cross, f_cross = zr[k], f[k]
+        else:
+            t = (0 - z0) / (z1 - z0)
+            r_cross = zr[k] + (zr[k + 1] - zr[k]) * t
+            f_cross = f[k] + (f[k + 1] - f[k]) * t
     else:
-        r_ohm = zr[int(np.argmin(np.abs(zi)))]
+        # No sign change in the band — fall back to the point closest to the
+        # real axis, and say so by reporting its actual frequency.
+        j0 = int(np.argmin(np.abs(zi)))
+        r_cross, f_cross = zr[j0], f[j0]
 
     r_tot = zr[int(np.argmin(f))]  # lowest frequency
     cap = zi < 0
@@ -86,9 +108,10 @@ def eis_features(spec: pd.DataFrame) -> dict:
         arc_pk, f_pk = np.nan, np.nan
 
     return {
-        "R_ohm": float(r_ohm),
+        "R_cross": float(r_cross),
+        "f_cross_Hz": float(f_cross),
         "R_tot": float(r_tot),
-        "R_pol": float(r_tot - r_ohm),
+        "R_pol": float(r_tot - r_cross),
         "arc_pk": arc_pk,
         "f_pk": f_pk,
     }
@@ -388,7 +411,7 @@ def fit_hf_r0(spec: pd.DataFrame, f_min: float = None) -> dict:
     Restricted to the HF window the slow branches are flat, the trade-off is
     gone, and R0 is well posed (1σ ≈ 0.01 mΩ across this sweep, no degeneracy).
 
-    Note this is **not** the ``R_ohm`` of :func:`eis_features`. That one is the
+    Note this is **not** the ``R_cross`` of :func:`eis_features`. That one is the
     Z_imag = 0 crossing, which on an inductive cell sits at a *finite*
     frequency (255–355 Hz here, with L ≈ 158 nH) where the arcs still add
     0.11–0.19 mΩ of real part — so it overestimates R0 by an SOC-dependent
@@ -685,7 +708,9 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
             feat.update(hf)
             pin = hf["R0_hf"]
         if fit_2rc:
-            fit = fit_2rc_eis(spec, r_ohm0=feat["R_ohm"], r_tot0=feat["R_tot"])
+            # The crossing is a biased R0, but it is the right order of
+            # magnitude and costs nothing — fine as a starting guess.
+            fit = fit_2rc_eis(spec, r_ohm0=feat["R_cross"], r_tot0=feat["R_tot"])
             feat.update(fit)
             if fit_warburg:
                 wfit = fit_warburg_eis(spec, seed=fit, r_tot0=feat["R_tot"])
@@ -724,8 +749,8 @@ def plot_eis_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     import matplotlib.pyplot as plt
 
     metrics = [
-        ("R_ohm", "R_ohm — series (mΩ)"),
-        ("R_pol", "R_pol — total polarisation (mΩ)"),
+        ("R_cross", "R_cross — Z_imag=0 crossing (mΩ)"),
+        ("R_pol", "R_pol — R_tot − R_cross (mΩ)"),
         ("R_tot", "R_tot — DC (mΩ)"),
         ("arc_pk", "arc height max(-Z_imag) (mΩ)"),
         ("f_pk", "char. frequency at arc (Hz)"),
