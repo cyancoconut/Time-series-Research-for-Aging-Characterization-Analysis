@@ -158,12 +158,14 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
 <working_path>/10_initial_characterization/<cell_stem>/
 ├── <cell>_parameters.json
 ├── <cell>_{pulse,eis,qocv}_fits.csv   # the JSON's fits[] as flat tables
+├── <cell>_eis_drt_peaks.csv          # one row per DRT peak (eis.drt.peaks)
 ├── GOLD.parquet
 ├── with_features_post_labeled.csv
 ├── <cell>_capacity.csv
 ├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
 └── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>.png
-            eis_{2zarc_warburg,raw_spectra,fit_overlay}_<stem>_<direction>.png
+            eis_{2zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>.png
+            eis_drt_{gamma,map}_<stem>_<direction>.png
             qocv.png
 ```
 
@@ -179,6 +181,103 @@ curve plus its throughput capacities). The EIS diffusion element has φ
 result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — are
 recorded in `parameters.json`'s `eis.settings`; both were tuned on the NFPP
 sweep and may need retuning for another cell type or frequency range.
+
+**Two-stage R0** (`eis_two_stage_r0`, default **on** — this is the standard
+path; set false only to reproduce a pre-#70 fit) — in the single-stage
+full-band fit R0 and the mid-frequency ZARC are correlated: a **depressed** arc
+(small α) has a broad high-frequency foot that reaches the real axis and can
+absorb part of the series resistance. Harmless while the arc stays round, but
+on the NFPP sweep α1 falls to 0.71 below 20 % SOC as the arc grows ~8×, and R0
+then gives way — it turns over and *falls* 0.06 mΩ toward the empty end while
+the spectrum says it is still rising. With the flag on, `fit_hf_r0` measures R0
+first on `f ≥ eis_hf_r0_f_min_hz` (default 100 Hz) with `R0 + jωL + one ZARC` —
+a window where the slow arc and diffusion are flat, so R0 is well posed (1σ ≈
+0.011–0.013 mΩ, 15 of 48 points) — and `fit_zarc_warburg_eis(pin_r0=…)` then
+fixes it, dropping R0 from the free-parameter vector (not boxing it to zero
+width; `least_squares` needs `lb < ub`). Result on NFPP_01: R0 becomes monotone
+in SOC over the whole sweep, α1 flattens to 0.77–0.90, at a mean RMSE cost of
+0.035 → 0.040 mΩ, most of it on the SOC 2.5 % spectrum (0.144 → 0.216) which
+the model already fitted worst. Replicated independently on NFPP_02 (a
+different fixture): R0 monotone, roughness 0.0102 → 0.0056, headroom spread
+4.3× → 1.3×, degenerate fits 3 → 1, RMSE 0.0216 → 0.0233, and the pulse
+cross-check `pulse_R0 / EIS(R0+R1+R2)` preserved at 1.009. A failed/NaN HF
+stage falls back to fitting R0.
+`R0_z`/`L_z` and the HF diagnostics (`R0_hf`, `R0_hf_sigma`, `hf_rmse`, `hf_n`,
+`r0_pinned`) are now in `EIS_COLS`, so the fitted series term is exported —
+previously only the fit-free crossing was. The `R0` panel of
+`plot_zarc_vs_soc` overlays the HF estimate ±1σ.
+
+**`R_cross` is not the ohmic resistance** (called `R_ohm` until the two-stage
+work; renamed because the old name invited exactly that misreading, and
+`eis_features`' docstring asserted it outright). It is `Z_real` at the
+`Z_imag = 0` crossing — and on an inductive cell that crossing is at a
+*finite* frequency, not the high-frequency limit: it is wherever ωL cancels
+the arcs' reactance, 255–355 Hz on the NFPP sweep (L ≈ 158 nH). The arcs still
+contribute 0.11–0.19 mΩ of real part there, so `R_cross` runs **12–16 %
+(0.135–0.211 mΩ) above the fitted R0**, by an SOC-dependent margin. The
+decomposition closes: `R0 + Re(arcs + diffusion)` at `f_cross` reproduces
+`R_cross` to < 0.007 mΩ. What sets the gap is the *inductance*, not the arc
+size — corr(gap, ωL at crossing) = 0.88 vs corr(gap, R1+R2) = 0.45, because a
+larger arc also has a larger τ and pushes the crossing down in frequency,
+compensating. Practically: `R_cross` tracks R0's SOC trend to ±1.5 pp so it is
+a usable *relative* proxy, but its ~15 % offset is a property of the rig's
+inductance, so never compare it across setups. `f_cross_Hz` is exported beside
+it so this is checkable from the CSV. `R_pol = R_tot − R_cross` inherits the
+same bias with the opposite sign and **understates** polarisation.
+For the series resistance use `R0_z`, or `R0_hf` under `eis_two_stage_r0`.
+
+**Open — SOC-dependent inductive loss.** The pure `jωL` series term is
+incomplete: with R0 and the arcs subtracted, `Re(residual)` at 6 kHz is
+0.059–0.089 mΩ (a pure inductor predicts exactly 0), rising monotonically with
+SOC (corr 0.86) while `Im(residual)` and hence L stay flat at 153 nH ±0.3 %.
+So it is a *loss on a constant inductance*, and it is SOC-dependent — not a
+fixture constant. Fitting `Re_res = c + A·ω^p` gives **p ≈ 1.10–1.11** (stable
+above SOC 45) with offset `c ≈ −0.028 mΩ`, i.e. the two-stage R0 is biased high
+by ~2.3 %, varying 0.030 mΩ across the sweep (14 % of R0's own SOC swing).
+Neither obvious element fixes it: a **parallel `R_L ∥ jωL`** predicts p = 2
+(fitted R_L ≈ 285 mΩ, 3.6σ, and note it only works in the `ωL ≪ R_L` regime —
+at small R_L it collapses to a constant resistance degenerate with R0), and a
+**fractional inductor `L(jω)^γ`** predicts p = γ ≤ 1 (fitted γ ≈ 0.98, best
+HF RMSE of the three at 0.031 vs 0.043 vs 0.049) but shifts R0 by −0.09 mΩ,
+3–4× more than the 0.028 mΩ actually there. Choosing on RMSE picks the element
+that damages R0 most. **R0 stays monotone in SOC under all three**, so the
+two-stage fix is robust to this; left unmodelled deliberately. Untested idea:
+narrow the HF window's top instead of adding an element.
+
+**DRT** (`analysis/eis_drt.py`) — model-free companion, **run by default
+alongside every EIS fit** (`eis_drt`, default true). `fit_eis` runs it per
+bundle on the same raw spectra, writing `plots/eis_drt_{gamma,map}_<stem>_<dir>.png`
+and `<cell>_eis_drt_peaks.csv` (one row per peak: `tau_peak`, `gamma_peak`,
+`R_peak`, `width_decades`), plus an `eis.drt` block in `parameters.json`. It
+answers the one question an ECM cannot ask of itself — how many relaxation
+processes are in the spectrum at all — and the γ plot overlays the fitted τ, so
+**an ECM τ landing in a DRT *valley* rather than on a peak** flags one element
+blanketing a region with more structure than it has parameters for (which is
+what `tau1_z` does on NFPP_01; see the bandwidth note). Adds ~0.5 s per bundle.
+
+**λ is fixed** (`eis_drt_lambda`, default `1e-3`), *not* the L-curve corner.
+The corner is better for a one-off investigation but is not reproducible enough
+to bake in: across one NFPP sweep it picked λ from 2.5e-6 to 1.6e-2 with peak
+counts swinging 2–10, so consecutive SOC steps would be smoothed differently
+and the vs-SOC structure would be an artefact of λ. It is also ~11× slower
+(4.7 s vs 0.4 s per bundle). Peak counts are λ-dependent either way — the same
+NFPP_02 data reads "τ1 in a valley" at 4e-3 and "τ1 on a peak" at 1e-3 — so
+treat a peak count as a statement about (data, λ), not about the cell.
+
+It also still has its own CLI
+(`python -m analysis.eis_drt <eis_export.parquet> [--data-dir …]
+[--sweep-direction …] [--lam …]`), which defaults to the L-curve corner and is
+not on Tab 7. Its SOC comes from
+`util.soc_from_qocv.assign_soc`, same as the ECM fits, so a DRT panel and an
+`eis_fits.csv` row can never disagree about a spectrum's SOC (`--data-dir`
+defaults to the export's own folder). With no qOCV there it falls back to the
+order-based ladder and says so in `meta["soc_source"]` — check that column
+before quoting a SOC off a DRT plot. Use it
+to ask how many relaxation processes a spectrum actually contains before adding
+ECM branches. On NFPP_01 it resolves 2 kinetic peaks at mid/high SOC but only
+**one broad** peak (1.15–1.52 decades) below 20 % SOC — which is why a 3rd ZARC
+does not help there: it has no discrete peak to attach to, α pins to 1.0 on
+19/21 spectra, and branches 2/3 swap roles between adjacent SOC points.
 
 **Sweep direction** — a full-SOC-sweep pulse or EIS run goes one way (start
 full and empty, or start empty and fill), and SOC is assigned by measurement
@@ -196,7 +295,13 @@ each fit record (`sweep_direction` + `sweep_direction_source` ∈
 the pulse's own CHA/DCH polarity. A bundle that reverses mid-sweep is **not**
 split: `_bundle_direction` reports the excursion as `reversal_mV` and warns.
 
-**SOC from the qOCV curve** (`analysis/soc_from_qocv.py`) — the **only** source
+**SOC from the qOCV curve** (`util/soc_from_qocv.py` — in `util/`, not
+`analysis/`, so *every* module can reach it without re-deriving SOC; the
+loading/coulomb-count primitives it needs live beside it in `util/io_qocv.py`
+and are re-exported by `analysis/qocv_curve.py`, keeping `util` free of any
+dependency on `analysis`). **Use `assign_soc(table, voltage_col, direction,
+data_dir, …)`** — the one-call form of `find_sweeps` + `map_table` — rather
+than writing an SOC assignment of your own. It is the **only** source
 of SOC. The order-based **ladder** (`100 − 5·i` by measurement index) has been
 **removed** from `eis_vs_soc.build_eis_table` and `pulse_fit.assign_pulse_soc`,
 which now leave `SOC_pct` NaN for this module to fill. It assumed every step
@@ -283,6 +388,10 @@ the "Run all 1→2→3→4→5" chain.
 | `eis_file_marker` | Regex identifying an EIS file by its `=`-field measurement token (default `(?:EIS|INS)\d+`) |
 | `eis_procedure_filter` | Substring marking EIS-labelled segments used as match anchors (default `EIS`) |
 | `eis_match_tolerance_minutes` | Max time gap to match an EIS measurement to a segment (default 120) |
+| `eis_two_stage_r0` | Measure R0 on the HF window and pin it in the 2×ZARC fit, instead of fitting it against the correlated mid-frequency arc (**default true**). Fixes the spurious low-SOC R0 turnover; set false only to reproduce a pre-#70 fit. |
+| `eis_hf_r0_f_min_hz` | Lower frequency bound of the two-stage R0 window (default 100). Needs ≥10 points above it or the stage is skipped and R0 is fitted as before. |
+| `eis_drt` | Run the model-free DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block. ~0.5 s per bundle. |
+| `eis_drt_lambda` | Fixed DRT regularisation (default `1e-3`). Deliberately not the L-curve corner — see the DRT section. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |
 | `ah_gap_threshold_s` | Optional. BRONZE Ah counter: intervals with Δt above this (seconds) are dead time between test files and book no `Ah_throughput`. Omit (default) to auto-derive the cut as `50 × median Δt` (the cell's sampling cadence) — adapts per cell, no tuning. |

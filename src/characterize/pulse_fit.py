@@ -541,7 +541,7 @@ def assign_pulse_soc(
     # plateau moved exactly `step` of charge, which is false: the run puts a
     # CHA *and* a DCH pulse on each SOC step, so the index advances twice per
     # real step and the ladder ran to -75 % on the NFPP bundle. SOC is instead
-    # measured from the run's own qOCV curve (`analysis/soc_from_qocv.py`),
+    # measured from the run's own qOCV curve (`util/soc_from_qocv.py`),
     # which reads each pulse's own pre-pulse OCV. Left as NaN here: an absent
     # SOC is honest, a fabricated one is not.
     seg["SOC_pct"] = np.nan

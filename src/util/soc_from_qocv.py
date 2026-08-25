@@ -50,7 +50,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from analysis import qocv_curve
+from util import io_qocv
 
 #: Filename tokens marking a qOCV export's sweep direction.
 DIRECTION_TOKENS = {"_qocv_cha_": "charge", "_qocv_dch_": "discharge"}
@@ -81,8 +81,8 @@ def find_sweeps(data_dir: str) -> list:
             "path": path,
             "file": base,
             "direction": direction,
-            "BM_Programm": qocv_curve._parse_bm(base),
-            "SOH": qocv_curve._parse_soh(base),
+            "BM_Programm": io_qocv._parse_bm(base),
+            "SOH": io_qocv._parse_soh(base),
             "t_start": t_start,
         })
     return sweeps
@@ -120,9 +120,9 @@ def polarization_from_pair(cha_path: str, dch_path: str) -> dict:
     coulomb-counted SOC axes are directly comparable. ``eta`` is returned on a
     fixed SOC grid; a caller interpolates it at whatever SOC it needs.
     """
-    vc, qc = qocv_curve.load_sweep(cha_path, discharge=False)
-    vd, qd = qocv_curve.load_sweep(dch_path, discharge=True)
-    sc, sd = qocv_curve.soc_axis(qc), qocv_curve.soc_axis(qd)
+    vc, qc = io_qocv.load_sweep(cha_path, discharge=False)
+    vd, qd = io_qocv.load_sweep(dch_path, discharge=True)
+    sc, sd = io_qocv.soc_axis(qc), io_qocv.soc_axis(qd)
     v_cha = np.interp(ETA_SOC_GRID, sc, vc)
     v_dch = np.interp(ETA_SOC_GRID, sd, vd)
     eta = (v_cha - v_dch) / 2.0
@@ -161,12 +161,12 @@ def build_lookup(path: str, direction: str, eta: dict = None,
 
     ``load_sweep`` already orients both branches empty->full (voltage
     ascending) and counts capacity from empty, so SOC is just
-    :func:`qocv_curve.soc_axis`. The raw C/20 voltage is quantised and locally
+    :func:`io_qocv.soc_axis`. The raw C/20 voltage is quantised and locally
     non-monotonic, which ``np.interp`` cannot use, so duplicate voltages are
     averaged and the series is reduced to a strictly increasing one.
     """
-    v, q = qocv_curve.load_sweep(path, discharge=(direction == "discharge"))
-    soc = qocv_curve.soc_axis(q)
+    v, q = io_qocv.load_sweep(path, discharge=(direction == "discharge"))
+    soc = io_qocv.soc_axis(q)
 
     # Remove the C/20 overpotential *before* building the lookup: the values
     # mapped onto it are rest voltages, this branch is under load.
@@ -309,3 +309,35 @@ def map_table(table: pd.DataFrame, voltage_col: str, direction: str,
         label, sweep["file"], direction, dt_h,
     )
     return diag
+
+
+def assign_soc(table: pd.DataFrame, voltage_col: str, direction: str,
+               data_dir: str, t_ref=None, label: str = "", ir_ohm: float = None,
+               sweeps: list = None) -> dict:
+    """Find the qOCV sweeps in ``data_dir`` and map ``table`` onto them.
+
+    One-call form of :func:`find_sweeps` + :func:`map_table`, which is the pair
+    every consumer needs. Use this rather than re-deriving SOC: an order-based
+    ladder (``100 - step * index``) looks reasonable and is wrong — see the
+    module docstring.
+
+    ``table`` gains ``SOC_pct`` in place (NaN where no same-direction sweep
+    exists — an absent SOC is honest, a fabricated one is not). Returns the
+    diagnostics dict for ``settings.bundles[]``.
+
+    ``t_ref`` is the measurement time used to pick the nearest sweep; defaults
+    to ``table["Time"].min()`` when the column is present. Pass ``sweeps`` to
+    reuse a listing already built for another bundle in the same folder.
+    """
+    if sweeps is None:
+        sweeps = find_sweeps(data_dir)
+    if not sweeps:
+        logging.warning(
+            "%s: no qOCV export in %s — SOC_pct stays NaN", label, data_dir
+        )
+        return {"soc_source": "none (SOC_pct NaN)", "sweep_direction": direction,
+                "reason": f"no qOCV export in {data_dir}"}
+    if t_ref is None and "Time" in table.columns and len(table):
+        t_ref = table["Time"].min()
+    return map_table(table, voltage_col, direction, sweeps, t_ref, label,
+                     ir_ohm=ir_ohm)

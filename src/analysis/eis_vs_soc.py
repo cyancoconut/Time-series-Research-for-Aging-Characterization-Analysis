@@ -8,7 +8,7 @@ spectrum tagged by ``eis_number`` / ``Time`` / ``U``. A full-SOC-sweep
 check-up records one EIS per SOC plateau.
 
 ``build_eis_table`` leaves ``SOC_pct`` **NaN**: SOC is measured, not assigned
-by order. The caller fills it via :mod:`analysis.soc_from_qocv`, which
+by order. The caller fills it via :mod:`util.soc_from_qocv`, which
 interpolates each measurement's terminal voltage ``U`` onto the run's own qOCV
 curve — see :func:`characterize.fit_characterization.fit_eis`. The old ladder
 (``100 - step * i``) was removed because it assumes every step moved the same
@@ -21,10 +21,20 @@ also the only producer of the Nyquist figure with SOC colouring.
 Per measurement, a small set of scale-free, fit-free readouts is extracted from
 the Nyquist curve (no ECM fit, so nothing to converge):
 
-    R_ohm   ohmic/series resistance — Z_real at the high-frequency Z_imag=0
-            crossing (inductive -> capacitive), interpolated.
+    R_cross Z_real at the Z_imag=0 crossing (inductive -> capacitive),
+            interpolated. **Not** the ohmic resistance, despite being widely
+            used as one: the crossing sits where ωL cancels the arcs' negative
+            reactance, which on an inductive cell is a *finite* frequency
+            (255-355 Hz on the NFPP sweep, L ~ 158 nH), and there the arcs
+            still contribute real part. It therefore runs above the true
+            series R by an SOC-dependent margin — 12-16 %, 0.135-0.211 mΩ,
+            on that sweep. For the series resistance use the fitted ``R0_z``,
+            or ``R0_hf`` from the two-stage fit. See :func:`fit_hf_r0`.
+    f_cross_Hz  the frequency at that crossing — records where R_cross was
+            actually measured, since "high-frequency limit" it is not.
     R_tot   Z_real at the lowest frequency (DC-ish total resistance).
-    R_pol   polarisation = R_tot - R_ohm (charge-transfer + diffusion).
+    R_pol   R_tot - R_cross. Inherits R_cross's bias with the opposite sign,
+            so it *understates* true polarisation by the same margin.
     arc_pk  semicircle height = max(-Z_imag) over the capacitive branch.
     f_pk    characteristic frequency at that arc peak (~ 1/2πτ).
 
@@ -56,24 +66,36 @@ def eis_features(spec: pd.DataFrame) -> dict:
     """Fit-free impedance readouts from one settled spectrum.
 
     ``spec`` carries ``frequency, Z_real, Z_imag`` (canonical io_eis columns).
-    Returns ``R_ohm, R_tot, R_pol, arc_pk, f_pk`` (NaN where undefined).
+    Returns ``R_cross, f_cross_Hz, R_tot, R_pol, arc_pk, f_pk`` (NaN where
+    undefined). ``R_cross`` is the Z_imag=0 crossing and is **not** the ohmic
+    resistance — see the module docstring; use ``R0_z``/``R0_hf`` for that.
     """
     s = spec.sort_values("frequency")
     f = s["frequency"].to_numpy(float)
     zr = s["Z_real"].to_numpy(float)
     zi = s["Z_imag"].to_numpy(float)
 
-    # R_ohm: Z_real where Z_imag crosses zero at the high-frequency end (the
-    # inductive branch is positive, the capacitive branch negative). Take the
-    # highest-frequency sign change and interpolate Z_real to Z_imag = 0.
+    # R_cross: Z_real where Z_imag crosses zero (the inductive branch is
+    # positive, the capacitive branch negative). Take the highest-frequency
+    # sign change and interpolate both Z_real and the frequency to Z_imag = 0.
+    # f_cross is reported because the crossing is *not* at the top of the
+    # sweep: it is wherever ωL happens to cancel the arcs' reactance.
     sign = np.sign(zi)
     crossings = np.where(np.diff(sign) != 0)[0]
     if len(crossings):
         k = crossings[-1]
         z0, z1 = zi[k], zi[k + 1]
-        r_ohm = zr[k] if z1 == z0 else zr[k] + (zr[k + 1] - zr[k]) * (0 - z0) / (z1 - z0)
+        if z1 == z0:
+            r_cross, f_cross = zr[k], f[k]
+        else:
+            t = (0 - z0) / (z1 - z0)
+            r_cross = zr[k] + (zr[k + 1] - zr[k]) * t
+            f_cross = f[k] + (f[k + 1] - f[k]) * t
     else:
-        r_ohm = zr[int(np.argmin(np.abs(zi)))]
+        # No sign change in the band — fall back to the point closest to the
+        # real axis, and say so by reporting its actual frequency.
+        j0 = int(np.argmin(np.abs(zi)))
+        r_cross, f_cross = zr[j0], f[j0]
 
     r_tot = zr[int(np.argmin(f))]  # lowest frequency
     cap = zi < 0
@@ -86,9 +108,10 @@ def eis_features(spec: pd.DataFrame) -> dict:
         arc_pk, f_pk = np.nan, np.nan
 
     return {
-        "R_ohm": float(r_ohm),
+        "R_cross": float(r_cross),
+        "f_cross_Hz": float(f_cross),
         "R_tot": float(r_tot),
-        "R_pol": float(r_tot - r_ohm),
+        "R_pol": float(r_tot - r_cross),
         "arc_pk": arc_pk,
         "f_pk": f_pk,
     }
@@ -361,9 +384,123 @@ DIFFUSION_PHI_BOX = (0.2, 0.9)
 #: * ``"tanh"`` — transmissive finite-length Warburg; plateaus at low frequency.
 ZARC_DIFFUSION_ELEMENT = "generalized"
 
+#: High-frequency window for the two-stage R0 estimate, in Hz. Above this the
+#: spectrum is described by ``R0 + jωL + (the fast arc)`` alone — the slow arc
+#: and the diffusion branch are flat there and cannot trade against R0. 100 Hz
+#: keeps ~1/3 of the NFPP sweep's points (6 kHz top) while staying clear of the
+#: mid-frequency arc's peak (τ ≈ 6 ms → ~26 Hz).
+HF_R0_MIN_FREQ_HZ = 100.0
+
+#: Minimum points in the HF window for the stage-1 fit to be attempted. Five
+#: free parameters need more than five points to be identifiable.
+HF_R0_MIN_POINTS = 10
+
+
+def fit_hf_r0(spec: pd.DataFrame, f_min: float = None) -> dict:
+    """Stage-1 series-resistance fit on the high-frequency window only.
+
+        Z(ω) = R0 + jωL + R1/(1 + (jω τ1)^α1)      for f >= ``f_min``
+
+    Why a separate stage: in the full-band fit R0 and the mid-frequency ZARC
+    are correlated, because a **depressed** arc (small α) has a broad
+    high-frequency foot that reaches back to the real axis and can absorb part
+    of the series resistance. That correlation is harmless while the arc stays
+    round, but on this NFPP sweep α falls to 0.71 below 20 % SOC as the arc
+    grows ~8×, and R0 then gives way — it turns over and *falls* by 0.06 mΩ
+    towards the empty end while the measured spectrum says it is still rising.
+    Restricted to the HF window the slow branches are flat, the trade-off is
+    gone, and R0 is well posed (1σ ≈ 0.01 mΩ across this sweep, no degeneracy).
+
+    Note this is **not** the ``R_cross`` of :func:`eis_features`. That one is the
+    Z_imag = 0 crossing, which on an inductive cell sits at a *finite*
+    frequency (255–355 Hz here, with L ≈ 158 nH) where the arcs still add
+    0.11–0.19 mΩ of real part — so it overestimates R0 by an SOC-dependent
+    bias. This fit removes ωL and the arc foot explicitly.
+
+    Returns ``{R0_hf, R0_hf_sigma, L_hf, R1_hf, tau1_hf, alpha1_hf, hf_rmse,
+    hf_n, hf_f_min}`` (NaN where the window is too thin or the fit fails).
+    """
+    from scipy.optimize import least_squares
+
+    f_min = HF_R0_MIN_FREQ_HZ if f_min is None else float(f_min)
+    keys = ("R0_hf", "R0_hf_sigma", "L_hf", "R1_hf", "tau1_hf", "alpha1_hf",
+            "hf_rmse")
+    fail = {k: np.nan for k in keys}
+    fail.update({"hf_n": 0, "hf_f_min": f_min})
+
+    s = spec[spec["frequency"] >= f_min].sort_values("frequency")
+    if len(s) < HF_R0_MIN_POINTS:
+        logging.warning(
+            "fit_hf_r0: only %d point(s) at f >= %g Hz (need %d) — no HF R0",
+            len(s), f_min, HF_R0_MIN_POINTS,
+        )
+        return fail
+
+    f = s["frequency"].to_numpy(float)
+    zd = s["Z_real"].to_numpy(float) + 1j * s["Z_imag"].to_numpy(float)
+    w = 2 * np.pi * f
+    absz = np.abs(zd)
+
+    # τ1 box: the fast arc must stay inside the window the HF points resolve,
+    # else it flattens into a constant and merges with R0 — the very
+    # degeneracy this stage exists to avoid.
+    t_lo = 1.0 / (2 * np.pi * f.max()) / 10.0
+    t_hi = 1.0 / (2 * np.pi * f_min) * 10.0
+
+    # R0 seed: the real part at the top of the sweep, with its inductive part
+    # removed via the highest-frequency Z_imag (L ≈ Z_imag/ω there).
+    khi = int(np.argmax(w))
+    l0 = zd.imag[khi] / w[khi] if zd.imag[khi] > 0 else 1e-6
+    r0 = max(zd.real[khi] - 0.0, 1e-3)
+    rspan = max(float(zd.real.max() - zd.real.min()), 1e-2)
+
+    def model(x, wv):
+        R0_, L_, R1_, lt1, a1 = x
+        return R0_ + 1j * wv * L_ + _z_zarc(R1_, np.exp(lt1), a1, wv)
+
+    def resid(x):
+        r = (model(x, w) - zd) / absz
+        return np.concatenate([r.real, r.imag])
+
+    lb = [0.0, 0.0, 0.0, np.log(t_lo), ZARC_ALPHA_MIN]
+    ub = [np.inf, np.inf, np.inf, np.log(t_hi), 1.0]
+    best = None
+    for t1s, a1s in ((1e-3, 0.85), (1e-4, 0.9), (5e-3, 0.75)):
+        x0 = np.clip([r0, max(l0, 1e-9), 0.5 * rspan, np.log(t1s), a1s], lb, ub)
+        try:
+            res = least_squares(resid, x0, bounds=(lb, ub), max_nfev=20000)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("fit_hf_r0 start failed: %s", exc)
+            continue
+        err = float(np.sqrt(np.mean(np.abs(model(res.x, w) - zd) ** 2)))
+        if best is None or err < best[0]:
+            best = (err, res)
+    if best is None:
+        return fail
+
+    rmse, res = best
+    R0_, L_, R1_, lt1, a1 = res.x
+    # 1σ on R0 from the Gauss-Newton covariance, scaled by the residual
+    # variance. Reported so a caller can see when the HF window is too thin
+    # to pin R0 any better than the full-band fit does.
+    sigma = np.nan
+    try:
+        dof = max(len(res.fun) - len(res.x), 1)
+        cov = np.linalg.inv(res.jac.T @ res.jac) * (2 * res.cost / dof)
+        sigma = float(np.sqrt(np.diag(cov))[0])
+    except np.linalg.LinAlgError:
+        pass
+
+    return {
+        "R0_hf": float(R0_), "R0_hf_sigma": sigma, "L_hf": float(L_),
+        "R1_hf": float(R1_), "tau1_hf": float(np.exp(lt1)),
+        "alpha1_hf": float(a1), "hf_rmse": rmse,
+        "hf_n": int(len(s)), "hf_f_min": f_min,
+    }
+
 
 def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
-                         element: str = None) -> dict:
+                         element: str = None, pin_r0=None) -> dict:
     """2×ZARC + series-L + finite-length Warburg fit.
 
         Z(ω) = R0 + jωL + R1/(1+(jω τ1)^α1) + R2/(1+(jω τ2)^α2) + Z_diff(ω)
@@ -385,9 +522,16 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
     All three τ are ordered and the fit is multistarted. τ_d normally lands on
     a box edge and carries no information; use ``R_d_z``.
 
+    ``pin_r0`` fixes R0 at a value measured beforehand (see :func:`fit_hf_r0`)
+    instead of fitting it — the second stage of the two-stage R0. R0 leaves the
+    free-parameter vector entirely rather than being boxed to zero width, so
+    the remaining branches are fitted against a *known* series term and cannot
+    borrow from it. ``None`` (default) fits R0 as before.
+
     Returns ``{R0_z, L_z, R1_z, tau1_z, alpha1_z, R2_z, tau2_z, alpha2_z, R_d_z,
-    tau_d_z, phi_d_z, zarc_rmse, zarc_degenerate}`` (NaN/True on failure).
-    ``phi_d_z`` is the fitted φ, or the fixed exponent of the chosen element.
+    tau_d_z, phi_d_z, zarc_rmse, zarc_degenerate, r0_pinned}`` (NaN/True on
+    failure). ``phi_d_z`` is the fitted φ, or the fixed exponent of the chosen
+    element.
     """
     from scipy.optimize import least_squares
 
@@ -395,6 +539,11 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
             "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z", "zarc_rmse")
     fail = {k: np.nan for k in keys}
     fail["zarc_degenerate"] = True
+    fail["r0_pinned"] = pin_r0 is not None and np.isfinite(pin_r0)
+
+    # A non-finite pin (the HF stage failed on this spectrum) falls back to
+    # fitting R0 — better a correlated R0 than none at all.
+    pin_r0 = float(pin_r0) if pin_r0 is not None and np.isfinite(pin_r0) else None
 
     element = element or ZARC_DIFFUSION_ELEMENT
     if element not in ("tanh", "coth", "generalized"):
@@ -424,30 +573,38 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
     tz_hi = min(1.0 / (2 * np.pi * f.min()) * 3.0, td_lo)
 
     r0 = seed.get("R0_w", seed.get("R0", s["Z_real"].to_numpy(float)[int(np.argmax(w))]))
+    if pin_r0 is not None:  # keep rspan consistent with the series term in use
+        r0 = pin_r0
     l0 = seed.get("L_w", seed.get("L", 1e-6))
     rtot = r_tot0 if r_tot0 is not None else s["Z_real"].to_numpy(float)[int(np.argmin(w))]
     rspan = max(rtot - r0, 0.5)
 
-    # Free-parameter layout. Always [R0, L, R1, R2, lt1, lt2, a1, a2, Rd], then
-    # ltd only when DIFFUSION_TAU_BOX has width (equal bounds pin it), then phi
-    # only when it is fitted.
+    # Free-parameter layout. [R0 unless pinned, L, R1, R2, lt1, lt2, a1, a2,
+    # Rd], then ltd only when DIFFUSION_TAU_BOX has width (equal bounds pin
+    # it), then phi only when it is fitted. A pinned R0 is dropped from the
+    # vector rather than boxed to zero width — least_squares needs lb < ub.
     ph_lo, ph_hi = DIFFUSION_PHI_BOX
     fit_tau_d = td_hi > td_lo
-    lb = [0.0, 0.0, 0.0, 0.0, np.log(tz_lo), np.log(tz_lo),
+    fit_r0 = pin_r0 is None
+    lb = [0.0, 0.0, 0.0, np.log(tz_lo), np.log(tz_lo),
           ZARC_ALPHA_MIN, ZARC_ALPHA_MIN, 0.0]
-    ub = [np.inf, np.inf, np.inf, np.inf, np.log(tz_hi), np.log(tz_hi),
+    ub = [np.inf, np.inf, np.inf, np.log(tz_hi), np.log(tz_hi),
           1.0, 1.0, np.inf]
+    if fit_r0:
+        lb, ub = [0.0] + lb, [np.inf] + ub
     if fit_tau_d:
         lb, ub = lb + [np.log(td_lo)], ub + [np.log(td_hi)]
     if free_phi:
         lb, ub = lb + [ph_lo], ub + [ph_hi]
-    i_ltd = 9 if fit_tau_d else None
-    i_phi = (10 if fit_tau_d else 9) if free_phi else None
+    n_core = 9 if fit_r0 else 8
+    i_ltd = n_core if fit_tau_d else None
+    i_phi = (n_core + 1 if fit_tau_d else n_core) if free_phi else None
 
     def _unpack(x):
         ltd = x[i_ltd] if fit_tau_d else np.log(td_lo)
         phi = x[i_phi] if free_phi else 0.5
-        return tuple(x[:9]) + (ltd, phi)
+        core = tuple(x[:n_core]) if fit_r0 else (pin_r0,) + tuple(x[:n_core])
+        return core + (ltd, phi)
 
     def model(x, wv):
         R0_, L_, R1_, R2_, lt1, lt2, a1, a2, Rd_, ltd, phi = _unpack(x)
@@ -470,8 +627,10 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
     ]
     best = None
     for t1s, t2s, tds, phs in starts:
-        x0 = [max(r0, 1e-3), max(l0, 1e-9), 0.3 * rspan, 0.5 * rspan,
+        x0 = [max(l0, 1e-9), 0.3 * rspan, 0.5 * rspan,
               np.log(t1s), np.log(t2s), 0.85, 0.85, 0.3 * rspan]
+        if fit_r0:
+            x0 = [max(r0, 1e-3)] + x0
         if fit_tau_d:
             x0.append(np.log(tds))
         if free_phi:
@@ -515,12 +674,21 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
         "R2_z": float(R2_), "tau2_z": float(tb), "alpha2_z": float(ab),
         "R_d_z": float(Rd_), "tau_d_z": td, "phi_d_z": phi,
         "zarc_rmse": rmse, "zarc_degenerate": degenerate,
+        "r0_pinned": pin_r0 is not None,
     }
 
 
 def build_eis_table(df: pd.DataFrame, direction=None, step=None,
-                    fit_2rc=True, fit_warburg=True, fit_zarc=True) -> pd.DataFrame:
+                    fit_2rc=True, fit_warburg=True, fit_zarc=True,
+                    two_stage_r0=True, hf_f_min=None) -> pd.DataFrame:
     """Per-measurement feature table with a time-ordered sweep SOC.
+
+    ``two_stage_r0`` measures R0 on the high-frequency window first
+    (:func:`fit_hf_r0`) and pins it in the 2×ZARC fit, instead of letting the
+    full-band fit trade R0 against the mid-frequency arc. **On by default** —
+    it is the standard path; pass ``False`` to reproduce a pre-#70 fit.
+    ``hf_f_min`` overrides
+    :data:`HF_R0_MIN_FREQ_HZ` for that first stage.
 
     One row per ``eis_number`` (measurement), ordered by ``Time``, with SOC
     assigned by plateau index — mirroring ``assign_pulse_soc``.
@@ -535,19 +703,27 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
     for i, eid in enumerate(order):
         spec = df[df["eis_number"] == eid]
         feat = eis_features(spec)
+        pin = None
+        if two_stage_r0:
+            hf = fit_hf_r0(spec, f_min=hf_f_min)
+            feat.update(hf)
+            pin = hf["R0_hf"]
         if fit_2rc:
-            fit = fit_2rc_eis(spec, r_ohm0=feat["R_ohm"], r_tot0=feat["R_tot"])
+            # The crossing is a biased R0, but it is the right order of
+            # magnitude and costs nothing — fine as a starting guess.
+            fit = fit_2rc_eis(spec, r_ohm0=feat["R_cross"], r_tot0=feat["R_tot"])
             feat.update(fit)
             if fit_warburg:
                 wfit = fit_warburg_eis(spec, seed=fit, r_tot0=feat["R_tot"])
                 feat.update(wfit)
                 if fit_zarc:
-                    feat.update(fit_zarc_warburg_eis(spec, seed=wfit, r_tot0=feat["R_tot"]))
+                    feat.update(fit_zarc_warburg_eis(
+                        spec, seed=wfit, r_tot0=feat["R_tot"], pin_r0=pin))
         # No order-based SOC ladder: `100 - step * i` assumes every step moved
         # the same charge, which the measured voltages contradict (the first
         # NFPP step drops 155 mV, the next ones ~15 mV, all labelled "5 %").
         # SOC is measured from the run's own qOCV curve
-        # (`analysis/soc_from_qocv.py`) using each measurement's own U.
+        # (`util/soc_from_qocv.py`) using each measurement's own U.
         feat.update(
             {
                 "eis_number": eid,
@@ -574,8 +750,8 @@ def plot_eis_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     import matplotlib.pyplot as plt
 
     metrics = [
-        ("R_ohm", "R_ohm — series (mΩ)"),
-        ("R_pol", "R_pol — total polarisation (mΩ)"),
+        ("R_cross", "R_cross — Z_imag=0 crossing (mΩ)"),
+        ("R_pol", "R_pol — R_tot − R_cross (mΩ)"),
         ("R_tot", "R_tot — DC (mΩ)"),
         ("arc_pk", "arc height max(-Z_imag) (mΩ)"),
         ("f_pk", "char. frequency at arc (Hz)"),
@@ -723,6 +899,18 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
         ax.axis("off")
     for ax, (col, label) in zip(axes.ravel(), metrics):
         ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#16a085")
+        # Overlay the stage-1 HF estimate on the R0 panel: when R0 was pinned
+        # the two coincide by construction, and when it was not, the gap is
+        # exactly the series resistance the full-band fit lost to the arc.
+        if col == "R0_z" and "R0_hf" in t.columns and t["R0_hf"].notna().any():
+            ax.plot(t["SOC_pct"], t["R0_hf"], "--", lw=1.2, color="#c0392b",
+                    label="HF-window R0")
+            if "R0_hf_sigma" in t.columns and t["R0_hf_sigma"].notna().any():
+                ax.fill_between(t["SOC_pct"],
+                                t["R0_hf"] - t["R0_hf_sigma"],
+                                t["R0_hf"] + t["R0_hf_sigma"],
+                                color="#c0392b", alpha=0.15, lw=0)
+            ax.legend(fontsize=7, loc="best")
         ax.set_xlabel("SOC (%)")
         ax.set_ylabel(label)
         ax.grid(alpha=0.3)
