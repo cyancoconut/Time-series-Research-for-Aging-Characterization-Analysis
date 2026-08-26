@@ -11,10 +11,11 @@ The JSON has the same shape as the file ``pipeline_ui.py`` saves:
     ahjo_endpoint, ahjo_key,
     minio_endpoint, access_key, secret_key, bucket_name, minio_prefix,
     export_type, export_path,
-    include_unfinished, update_unfinished
+    include_unfinished, update_unfinished,
+    test_type_filter, test_name_filter
 
-Legacy configs that still use ``target_specimen`` instead of ``target_cell``
-are accepted on load.
+Legacy configs that still use ``target_specimen`` instead of ``target_cell``,
+or ``name_filter`` instead of ``test_type_filter``, are accepted on load.
 """
 
 import argparse
@@ -56,7 +57,11 @@ def run(cfg: dict) -> None:
     update_unfinished = bool(cfg.get("update_unfinished", True))
     redownload = bool(cfg.get("redownload", False))
     temperature_column = cfg.get("temperature_column")
-    name_filter = cfg.get("name_filter", "TS")
+    # test_type_filter matches the measurement token (test.name, "TS…"/"EIS…");
+    # test_name_filter matches the programme (test.parent, e.g. "jri_CU…") and
+    # is optional. "name_filter" is the legacy key for the type filter.
+    test_type_filter = cfg.get("test_type_filter", cfg.get("name_filter", "TS"))
+    test_name_filter = cfg.get("test_name_filter") or None
 
     ahjo = AhjoSource(ahjo_endpoint, ahjo_key)
     ahjo_project = ahjo.get_project(project)
@@ -74,6 +79,8 @@ def run(cfg: dict) -> None:
     print(f"Target cell filter: {target_cell}")
     print(f"Matched {len(target_subset)} / {len(specimens)} specimens")
     print(f"include_unfinished={include_unfinished}, update_unfinished={update_unfinished}")
+    print(f"Test type filter: {test_type_filter}")
+    print(f"Test name (programme) filter: {test_name_filter or 'all programmes'}")
 
     downloader = SpecimenDownloader(
         ahjo,
@@ -101,7 +108,8 @@ def run(cfg: dict) -> None:
                 update_unfinished=update_unfinished,
                 redownload=redownload,
                 temperature_column=temperature_column,
-                name_filter=name_filter,
+                test_type_filter=test_type_filter,
+                test_name_filter=test_name_filter,
             )
         except Exception as e:
             print(f"Download failed for {specimen}: {e}")

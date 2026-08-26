@@ -118,17 +118,35 @@ class SpecimenDownloader:
         update_unfinished,
         redownload=False,
         temperature_column=None,
-        name_filter="TS",
+        test_type_filter="TS",
+        test_name_filter=None,
     ):
         # redownload=True forces a fresh fetch of every test: existing parquets
         # (finished and unfinished) are deleted so they drop out of the
         # existing_test skip-list and are downloaded again. Use it to re-pull
         # data after a downloader fix (e.g. a newly retained column).
         #
-        # name_filter restricts candidates to tests whose name contains one of
-        # the substrings (default "TS"). Accepts a single substring or a list of
-        # substrings (matches when the name contains any entry, via
-        # util.procedure_filter.matches_any); None / empty disables the filter.
+        # Two independent substring filters, both accepting a single substring
+        # or a list of substrings (matches when *any* entry is contained, via
+        # util.procedure_filter.matches_any); None disables a filter. They are
+        # ANDed, and they key on different fields of the Ahjo test:
+        #
+        #   test_type_filter -> test.name, the measurement token ("TS014653 |
+        #       Format01", "EIS00005 | Format01"). Default "TS", i.e. cycler
+        #       tests only; use ["TS", "EIS"] to pull the EIS files too.
+        #   test_name_filter -> test.parent, the *programme* name
+        #       ("jri_Aging_VTC6_Cyc_25grad_70SOC_60DOD_05C", "jri_CU_VTC6").
+        #       Optional (default None = every programme). This is the same
+        #       text that `procedure_filter` matches downstream in
+        #       build_bronze_cu_with_ah._is_cu, so setting it here restricts
+        #       what is downloaded at all rather than only what is later
+        #       treated as a check-up. Note EIS measurements sit under their
+        #       own programme (e.g. "zho_Namey_EIS"), so a filter of "jri_CU"
+        #       also excludes them — list both if you want the EIS files.
+        #
+        # Both fields are in the exported filename
+        # (project=specimen=start=PARENT=NAME=equipment=filesize=status), so a
+        # narrower filter never re-downloads what a wider one already fetched.
         print(f"Processing {specimen.name}")
 
         cfg = {"upload_to": _normalize_export_type(export_type)}
@@ -214,7 +232,9 @@ class SpecimenDownloader:
         for t in all_tests:
             if not (include_unfinished or t.finished):
                 continue
-            if not matches_any(t.name, name_filter):
+            if not matches_any(t.name, test_type_filter):
+                continue
+            if not matches_any(str(t.parent), test_name_filter):
                 continue
             if self.test_format not in t.name.split("|"):
                 continue
