@@ -149,7 +149,14 @@ class SpecimenDownloader:
         # Start time and parent are already in the filename
         # (project=specimen=START=parent=NAME=equipment=filesize=status), so
         # files on disk key themselves — no re-download, no migration.
-        existing_test = set()
+        #
+        # The two destinations are tracked separately. Unioned into one set,
+        # a test present only on MinIO also suppressed the local write under
+        # export_type "both", so the local copy never appeared (and vice
+        # versa). Each test is now fetched when *either* destination is
+        # missing it, and written only to the ones that are.
+        existing_local = set()
+        existing_minio = set()
 
         if writes_local:
             specimen_dir = f"{self.export_path}/{specimen.name}"
@@ -169,7 +176,7 @@ class SpecimenDownloader:
                     except OSError as e:
                         print(f"  could not remove {path}: {e}")
                     continue
-                existing_test.add((segs[2], segs[3], segs[4]))
+                existing_local.add((segs[2], segs[3], segs[4]))
 
         if writes_minio:
             objects = self.minio_client.list_objects(
@@ -196,24 +203,41 @@ class SpecimenDownloader:
                     except S3Error as e:
                         print(f"  remove_object error for {obj.object_name}: {e}")
                     continue
-                existing_test.add((segs[2], segs[3], segs[4]))
+                existing_minio.add((segs[2], segs[3], segs[4]))
 
         print(f"  Listing tests for {specimen.name} ...")
         all_tests = list(self.ahjo.get_tests_from_specimen(specimen.id))
-        candidates = [
-            t
-            for t in all_tests
-            if (self._test_key(t) not in existing_test)
-            and (include_unfinished or t.finished)
-            and matches_any(t.name, name_filter)
-            and (self.test_format in t.name.split("|"))
-        ]
+        # Each entry is (test, needs_local, needs_minio): a test is fetched
+        # when at least one enabled destination is missing it, and written
+        # only to those destinations.
+        candidates = []
+        for t in all_tests:
+            if not (include_unfinished or t.finished):
+                continue
+            if not matches_any(t.name, name_filter):
+                continue
+            if self.test_format not in t.name.split("|"):
+                continue
+            key = self._test_key(t)
+            needs_local = writes_local and key not in existing_local
+            needs_minio = writes_minio and key not in existing_minio
+            if needs_local or needs_minio:
+                candidates.append((t, needs_local, needs_minio))
+
         print(
             f"  {len(all_tests)} tests returned, "
             f"{len(candidates)} new candidates to fetch"
         )
+        if writes_local and writes_minio:
+            local_only = sum(1 for _, nl, nm in candidates if nl and not nm)
+            minio_only = sum(1 for _, nl, nm in candidates if nm and not nl)
+            if local_only or minio_only:
+                print(
+                    f"    of which {local_only} need only the local copy, "
+                    f"{minio_only} only the MinIO copy"
+                )
 
-        for i, test in enumerate(candidates, 1):
+        for i, (test, needs_local, needs_minio) in enumerate(candidates, 1):
             sanitized_test_name = test.name.replace("|", "_")
             print(f"  [{i}/{len(candidates)}] Fetching {test.name} ...")
             file, file_size = self.ahjo.get_test(test, TestFormat.PARQUET)
@@ -319,6 +343,6 @@ class SpecimenDownloader:
                 specimen_name=specimen.name,
                 filename=object_name,
                 prefix=prefix,
-                writes_local=writes_local,
-                writes_minio=writes_minio,
+                writes_local=needs_local,
+                writes_minio=needs_minio,
             )
