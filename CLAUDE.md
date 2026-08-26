@@ -190,7 +190,13 @@ exported without a `Temperature` column still fit — `T_degC` is NaN.
 **Models are fixed defaults**, not config keys: **2RC** for pulse
 (`analysis/fit_2rc_pulse.py`), **2×ZARC + series-L + generalized Warburg** for
 EIS (`analysis/eis_vs_soc.fit_zarc_warburg_eis`), and no fit for qOCV (the
-curve plus its throughput capacities). The EIS diffusion element has φ
+curve plus its throughput capacities). The qOCV plot is two panels: the
+curve, and a **DVA** (`|dV/dQ|` vs SOC for both branches,
+`qocv_curve.differential_voltage` — V interpolated onto a uniform charge grid,
+Savitzky-Golay smoothed, then differentiated). Always drawn, no flag. Its y
+axis is scaled to the SOC 10–95 % interior because dV/dQ diverges into both
+voltage rails and would otherwise flatten the staging structure; the SOC axis
+is normalised against the full sweep so both panels line up. The EIS diffusion element has φ
 **fitted** (`DIFFUSION_PHI_BOX`) but τ_d **pinned** (`DIFFUSION_TAU_BOX`, 5 s):
 `R_d_z` is the amplitude at ω = 1/τ_d and `tau_d_z` a shape constant, not a
 result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — are
