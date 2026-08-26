@@ -16,6 +16,11 @@ from util import io_router  # noqa: E402
 from util.procedure_filter import matches_any  # noqa: E402
 
 
+# Start-time format in the exported filename's third "=" field. Shared by the
+# filename builder and the skip-list key so they cannot drift apart.
+_START_FMT = "%Y-%m-%d_%H%M%S"
+
+
 def _normalize_export_type(value):
     v = (value or "").lower().strip()
     if v == "server":
@@ -90,6 +95,20 @@ class SpecimenDownloader:
             except S3Error as err:
                 print(f"  Upload error for {object_name}: {err}")
 
+    @staticmethod
+    def _test_key(test):
+        """Skip-list key for an Ahjo test: (start time, parent, name).
+
+        Mirrors fields 2/3/4 of the exported filename built in
+        ``download_single_tests``; ``_START_FMT`` is shared by both so the two
+        sides cannot drift apart.
+        """
+        return (
+            datetime.fromtimestamp(test.startDate).strftime(_START_FMT),
+            str(test.parent),
+            test.name.replace("|", "_"),
+        )
+
     def download_single_tests(
         self,
         specimen,
@@ -117,7 +136,20 @@ class SpecimenDownloader:
         writes_minio = io_router.writes_minio(cfg)
         replace_unfinished = update_unfinished and include_unfinished
 
-        existing_test = []
+        # Identity of an already-downloaded test: (start time, parent, name).
+        #
+        # The name alone is not unique. The cycler's EIS counter restarts per
+        # measurement set, so "EIS00001 | Format01" names a different
+        # measurement every time — under name-only matching the first set
+        # downloaded and every later set reusing those names was skipped as
+        # "already downloaded", permanently, with no way back short of
+        # redownload. TS numbers are globally unique, which is why only the
+        # EIS/INS files ever hit this.
+        #
+        # Start time and parent are already in the filename
+        # (project=specimen=START=parent=NAME=equipment=filesize=status), so
+        # files on disk key themselves — no re-download, no migration.
+        existing_test = set()
 
         if writes_local:
             specimen_dir = f"{self.export_path}/{specimen.name}"
@@ -137,7 +169,7 @@ class SpecimenDownloader:
                     except OSError as e:
                         print(f"  could not remove {path}: {e}")
                     continue
-                existing_test.append(segs[4])
+                existing_test.add((segs[2], segs[3], segs[4]))
 
         if writes_minio:
             objects = self.minio_client.list_objects(
@@ -164,14 +196,14 @@ class SpecimenDownloader:
                     except S3Error as e:
                         print(f"  remove_object error for {obj.object_name}: {e}")
                     continue
-                existing_test.append(segs[4])
+                existing_test.add((segs[2], segs[3], segs[4]))
 
         print(f"  Listing tests for {specimen.name} ...")
         all_tests = list(self.ahjo.get_tests_from_specimen(specimen.id))
         candidates = [
             t
             for t in all_tests
-            if (t.name.replace("|", "_") not in existing_test)
+            if (self._test_key(t) not in existing_test)
             and (include_unfinished or t.finished)
             and matches_any(t.name, name_filter)
             and (self.test_format in t.name.split("|"))
@@ -279,7 +311,8 @@ class SpecimenDownloader:
                 df.reset_index(inplace=True, drop=True)
 
             status = "finished" if test.finished else "unfinished"
-            object_name = f"{self.project}={specimen.name}={datetime.fromtimestamp(test.startDate).strftime('%Y-%m-%d_%H%M%S')}={test.parent}={sanitized_test_name}={test.equipment.name}=filesize-{file_size}={status}.parquet"
+            started = datetime.fromtimestamp(test.startDate).strftime(_START_FMT)
+            object_name = f"{self.project}={specimen.name}={started}={test.parent}={sanitized_test_name}={test.equipment.name}=filesize-{file_size}={status}.parquet"
 
             self._export_test(
                 df,
