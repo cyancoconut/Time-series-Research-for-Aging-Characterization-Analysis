@@ -16,6 +16,11 @@ from util import io_router  # noqa: E402
 from util.procedure_filter import matches_any  # noqa: E402
 
 
+# Start-time format in the exported filename's third "=" field. Shared by the
+# filename builder and the skip-list key so they cannot drift apart.
+_START_FMT = "%Y-%m-%d_%H%M%S"
+
+
 def _normalize_export_type(value):
     v = (value or "").lower().strip()
     if v == "server":
@@ -90,6 +95,20 @@ class SpecimenDownloader:
             except S3Error as err:
                 print(f"  Upload error for {object_name}: {err}")
 
+    @staticmethod
+    def _test_key(test):
+        """Skip-list key for an Ahjo test: (start time, parent, name).
+
+        Mirrors fields 2/3/4 of the exported filename built in
+        ``download_single_tests``; ``_START_FMT`` is shared by both so the two
+        sides cannot drift apart.
+        """
+        return (
+            datetime.fromtimestamp(test.startDate).strftime(_START_FMT),
+            str(test.parent),
+            test.name.replace("|", "_"),
+        )
+
     def download_single_tests(
         self,
         specimen,
@@ -117,7 +136,27 @@ class SpecimenDownloader:
         writes_minio = io_router.writes_minio(cfg)
         replace_unfinished = update_unfinished and include_unfinished
 
-        existing_test = []
+        # Identity of an already-downloaded test: (start time, parent, name).
+        #
+        # The name alone is not unique. The cycler's EIS counter restarts per
+        # measurement set, so "EIS00001 | Format01" names a different
+        # measurement every time — under name-only matching the first set
+        # downloaded and every later set reusing those names was skipped as
+        # "already downloaded", permanently, with no way back short of
+        # redownload. TS numbers are globally unique, which is why only the
+        # EIS/INS files ever hit this.
+        #
+        # Start time and parent are already in the filename
+        # (project=specimen=START=parent=NAME=equipment=filesize=status), so
+        # files on disk key themselves — no re-download, no migration.
+        #
+        # The two destinations are tracked separately. Unioned into one set,
+        # a test present only on MinIO also suppressed the local write under
+        # export_type "both", so the local copy never appeared (and vice
+        # versa). Each test is now fetched when *either* destination is
+        # missing it, and written only to the ones that are.
+        existing_local = set()
+        existing_minio = set()
 
         if writes_local:
             specimen_dir = f"{self.export_path}/{specimen.name}"
@@ -137,7 +176,7 @@ class SpecimenDownloader:
                     except OSError as e:
                         print(f"  could not remove {path}: {e}")
                     continue
-                existing_test.append(segs[4])
+                existing_local.add((segs[2], segs[3], segs[4]))
 
         if writes_minio:
             objects = self.minio_client.list_objects(
@@ -164,24 +203,41 @@ class SpecimenDownloader:
                     except S3Error as e:
                         print(f"  remove_object error for {obj.object_name}: {e}")
                     continue
-                existing_test.append(segs[4])
+                existing_minio.add((segs[2], segs[3], segs[4]))
 
         print(f"  Listing tests for {specimen.name} ...")
         all_tests = list(self.ahjo.get_tests_from_specimen(specimen.id))
-        candidates = [
-            t
-            for t in all_tests
-            if (t.name.replace("|", "_") not in existing_test)
-            and (include_unfinished or t.finished)
-            and matches_any(t.name, name_filter)
-            and (self.test_format in t.name.split("|"))
-        ]
+        # Each entry is (test, needs_local, needs_minio): a test is fetched
+        # when at least one enabled destination is missing it, and written
+        # only to those destinations.
+        candidates = []
+        for t in all_tests:
+            if not (include_unfinished or t.finished):
+                continue
+            if not matches_any(t.name, name_filter):
+                continue
+            if self.test_format not in t.name.split("|"):
+                continue
+            key = self._test_key(t)
+            needs_local = writes_local and key not in existing_local
+            needs_minio = writes_minio and key not in existing_minio
+            if needs_local or needs_minio:
+                candidates.append((t, needs_local, needs_minio))
+
         print(
             f"  {len(all_tests)} tests returned, "
             f"{len(candidates)} new candidates to fetch"
         )
+        if writes_local and writes_minio:
+            local_only = sum(1 for _, nl, nm in candidates if nl and not nm)
+            minio_only = sum(1 for _, nl, nm in candidates if nm and not nl)
+            if local_only or minio_only:
+                print(
+                    f"    of which {local_only} need only the local copy, "
+                    f"{minio_only} only the MinIO copy"
+                )
 
-        for i, test in enumerate(candidates, 1):
+        for i, (test, needs_local, needs_minio) in enumerate(candidates, 1):
             sanitized_test_name = test.name.replace("|", "_")
             print(f"  [{i}/{len(candidates)}] Fetching {test.name} ...")
             file, file_size = self.ahjo.get_test(test, TestFormat.PARQUET)
@@ -279,13 +335,14 @@ class SpecimenDownloader:
                 df.reset_index(inplace=True, drop=True)
 
             status = "finished" if test.finished else "unfinished"
-            object_name = f"{self.project}={specimen.name}={datetime.fromtimestamp(test.startDate).strftime('%Y-%m-%d_%H%M%S')}={test.parent}={sanitized_test_name}={test.equipment.name}=filesize-{file_size}={status}.parquet"
+            started = datetime.fromtimestamp(test.startDate).strftime(_START_FMT)
+            object_name = f"{self.project}={specimen.name}={started}={test.parent}={sanitized_test_name}={test.equipment.name}=filesize-{file_size}={status}.parquet"
 
             self._export_test(
                 df,
                 specimen_name=specimen.name,
                 filename=object_name,
                 prefix=prefix,
-                writes_local=writes_local,
-                writes_minio=writes_minio,
+                writes_local=needs_local,
+                writes_minio=needs_minio,
             )
