@@ -120,8 +120,15 @@ def _pick_pair(pairs, soh=None):
 # ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
-def plot_qocv(cha_path, dch_path, out_png, nom_capacity=NOM_CAPACITY_DEFAULT):
-    """qOCV: charge + discharge terminal voltage vs SOC, plus their mean (≈ OCV)."""
+def plot_qocv(cha_path, dch_path, out_png, nom_capacity=NOM_CAPACITY_DEFAULT,
+              temp_degC=None):
+    """qOCV: charge + discharge terminal voltage vs SOC, plus their mean (≈ OCV).
+
+    ``temp_degC`` (optional) is the sweep's measured mean cell temperature; it
+    is appended to the title. Both the curve and the hysteresis between the
+    branches are temperature-dependent, so a plot without it can't be compared
+    against one measured in a different chamber.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -143,8 +150,10 @@ def plot_qocv(cha_path, dch_path, out_png, nom_capacity=NOM_CAPACITY_DEFAULT):
     ax.set_xlabel("SOC (%)  [throughput-normalised]")
     ax.set_ylabel("Voltage (V)")
     soh = _parse_soh(os.path.basename(cha_path))
+    temp_txt = "" if temp_degC is None else f", {float(temp_degC):.1f} °C"
     ax.set_title(f"qOCV — {os.path.basename(os.path.dirname(cha_path))} "
-                 f"@ {soh:.1f}% SOH  (hyst ≈ {hyst:.0f} mV over 20–80%)")
+                 f"@ {soh:.1f}% SOH{temp_txt}  "
+                 f"(hyst ≈ {hyst:.0f} mV over 20–80%)")
     ax.grid(alpha=0.3)
     ax.legend()
     fig.tight_layout()
