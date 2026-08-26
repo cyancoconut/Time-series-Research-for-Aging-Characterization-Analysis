@@ -1308,6 +1308,18 @@ def _proc_id(id_str, delta):
         return None
 
 
+def _window_temperature(window):
+    """Mean cell temperature over one pulse window, or NaN.
+
+    Tolerates a missing/empty/all-NaN ``Temperature`` column so bundles
+    exported before temperature was carried still fit.
+    """
+    if "Temperature" not in window.columns:
+        return np.nan
+    t = pd.to_numeric(window["Temperature"], errors="coerce")
+    return round(float(t.mean()), 2) if t.notna().any() else np.nan
+
+
 def fit_2rc(labeled, seg_ids, nom_capacity):
     """Fit every selected pulse segment; return a results DataFrame (+ fit curves).
 
@@ -1361,6 +1373,12 @@ def fit_2rc(labeled, seg_ids, nom_capacity):
             "I_A": round(i_pulse, 3),
             "C_rate": round(i_pulse / nom_capacity, 3),
             "pulse_dur_s": round(t_p, 2),
+            # Cell temperature over the pulse + its relaxation. A pulse's R is
+            # strongly temperature-dependent, so a fitted R0/R1/R2 is only
+            # comparable against another fit at the same temperature — carry it
+            # with the result rather than leaving it in the bundle parquet.
+            # NaN when the bundle has no Temperature column (older exports).
+            "T_degC": _window_temperature(window),
             **res,
         }
         rows.append(row)

@@ -79,7 +79,7 @@ FIT_PARTS = ("pulse", "eis", "qocv")
 PULSE_COLS = [
     "pulse_segment_id", "ID", "BM_Programm", "SOH", "direction",
     "sweep_direction", "sweep_direction_source",
-    "I_A", "C_rate", "OCV_V", "R0_ohm", "R1_ohm", "tau1_s", "R2_ohm",
+    "I_A", "C_rate", "OCV_V", "T_degC", "R0_ohm", "R1_ohm", "tau1_s", "R2_ohm",
     "tau2_s", "rmse_mV", "SOC_pct",
     "pulse_amplitude_A", "pulse_C_rate",
 ]
@@ -87,6 +87,10 @@ PULSE_COLS = [
 #: Columns lifted from the EIS table into the params file.
 EIS_COLS = [
     "eis_number", "SOC_pct", "U",
+    # Borrowed from the same-BM pulse bundle (see _pulse_temperatures);
+    # temperature_source in settings.bundles[] says whether it is that or the
+    # cell mean.
+    "T_degC",
     "sweep_direction", "sweep_direction_source",
     # R_cross is the fit-free Z_imag=0 crossing; R0_z is the fitted series
     # term. They are not the same number and R_cross is NOT the ohmic
@@ -111,6 +115,59 @@ DRT_PEAK_COLS = [
     "eis_number", "SOC_pct", "tau_peak", "gamma_peak", "R_peak",
     "width_decades", "source",
 ]
+
+
+def _temp_tag(temp) -> str:
+    """Filename tag for a bundle temperature: ``26degreeC`` / ``-10degreeC``
+    / ``NAdegreeC``.
+
+    Rounded to whole °C: this is the *measured* mean, so a 25 °C-setpoint
+    chamber reads e.g. ``26degreeC``. The unrounded value is in the params
+    file — the tag exists to tell two otherwise identically-named plots apart,
+    not to be read as a measurement.
+    """
+    if temp is None or pd.isna(temp):
+        return "NAdegreeC"
+    return f"{float(temp):.0f}degreeC"
+
+
+def _parquet_temperature(path: str):
+    """Mean ``Temperature`` of one bundle parquet, or NaN.
+
+    Reads only that column. Missing column / unreadable file / all-NaN ->
+    NaN, so a bundle exported before temperature was carried still fits.
+    """
+    try:
+        col = pd.read_parquet(path, columns=["Temperature"])["Temperature"]
+    except Exception as exc:
+        logging.info("%s: no temperature (%s)", os.path.basename(path), exc)
+        return np.nan
+    col = pd.to_numeric(col, errors="coerce")
+    return round(float(col.mean()), 2) if col.notna().any() else np.nan
+
+
+def _pulse_temperatures(data_dir: str) -> tuple:
+    """``({BM_Programm: T_degC}, cell_mean)`` from the pulse bundles.
+
+    The EIS spectra carry no temperature of their own — the EIS device file
+    has no thermocouple channel, only the cycler does — so an EIS bundle takes
+    the temperature of the **pulse bundle of the same BM_Programm**, which is
+    the same cell in the same chamber during the same programme. ``cell_mean``
+    is the fallback for an EIS programme with no pulse counterpart; it is
+    recorded as such (``temperature_source``) rather than passed off as a
+    same-programme measurement.
+    """
+    by_bm = {}
+    for path in sorted(glob.glob(os.path.join(data_dir, "*_pulse_BM*.parquet"))):
+        m = re.search(r"_BM(\d+)_", os.path.basename(path))
+        if not m:
+            continue
+        temp = _parquet_temperature(path)
+        if not pd.isna(temp):
+            by_bm[int(m.group(1))] = temp
+    values = list(by_bm.values())
+    cell_mean = round(float(np.mean(values)), 2) if values else np.nan
+    return by_bm, cell_mean
 
 
 def _jsonable(value):
@@ -213,9 +270,12 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
     EIS path (one sweep, one direction/step for both measurements).
 
     One plot per ``BM_Programm`` (mirrors the EIS per-source/leg plots, not a
-    single folder-wide figure) named ``pulse_2rc_{cell_stem}_BM{bm}_{soh}SOH.png``
-    — ``cell_stem`` and ``soh`` read straight off the results table (``File``/
-    ``SOH`` columns), not reformatted, so e.g. ``99.5SOH`` stays ``99.5SOH``.
+    single folder-wide figure) named
+    ``pulse_2rc_{cell_stem}_BM{bm}_{soh}SOH_{direction}_{temp}.png`` —
+    ``cell_stem`` and ``soh`` read straight off the results table (``File``/
+    ``SOH`` columns), not reformatted, so e.g. ``99.5SOH`` stays ``99.5SOH``;
+    ``temp`` is the bundle's mean measured cell temperature (``26degreeC``, or
+    ``NAdegreeC`` if the bundle carries none).
     Every path (or, for a group with no figure, the skip reason) is recorded
     in ``block["plots"]``, one entry per BM.
     """
@@ -288,10 +348,24 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
                and pd.notna(group["sweep_direction"].iloc[0])
             else bundle_diag_by_bm.get(bm_int, {}).get("direction", "unknown")
         )
-        out_png = os.path.join(
-            plots_dir, f"pulse_2rc_{cell_stem}_BM{bm_int}_{soh}SOH_{direction}.png"
+        # Mean cell temperature of the bundle, from the per-pulse T_degC that
+        # fit_2rc measured. In the filename because two runs of the same
+        # programme at different chamber temperatures are different
+        # measurements, and the fitted resistances are not comparable between
+        # them — the name has to say which one a plot is.
+        temp = (
+            float(group["T_degC"].mean())
+            if "T_degC" in group.columns and group["T_degC"].notna().any()
+            else np.nan
         )
-        entry = {"BM_Programm": bm_int, "SOH": soh, "sweep_direction": direction}
+        out_png = os.path.join(
+            plots_dir,
+            f"pulse_2rc_{cell_stem}_BM{bm_int}_{soh}SOH_{direction}_{_temp_tag(temp)}.png",
+        )
+        entry = {
+            "BM_Programm": bm_int, "SOH": soh, "sweep_direction": direction,
+            "temperature_degC": _jsonable(None if pd.isna(temp) else round(temp, 2)),
+        }
 
         has_soc_pct = "SOC_pct" in group.columns and group["SOC_pct"].notna().any()
         if not has_soc_pct:
@@ -302,9 +376,10 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
             continue
 
         try:
-            pulse_fit.plot_vs_soc(
-                group, out_png, title=f"initial characterization — BM{bm_int} {soh}SOH"
-            )
+            title = f"initial characterization — BM{bm_int} {soh}SOH"
+            if not pd.isna(temp):
+                title += f" @ {temp:.1f} °C"
+            pulse_fit.plot_vs_soc(group, out_png, title=title)
         except Exception as exc:
             logging.warning("BM%s: pulse plot failed: %s", bm_int, exc)
             entry["plot_skipped"] = f"{type(exc).__name__}: {exc}"
@@ -471,6 +546,39 @@ def _bundle_direction(df: pd.DataFrame, override: str, source_name: str) -> tupl
     }
 
 
+def _eis_bundle_temperature(name: str, bundle_df: pd.DataFrame,
+                            pulse_temps: dict, cell_temp) -> tuple:
+    """``(T_degC, source)`` for one EIS bundle.
+
+    In order of preference: the bundle's own ``Temperature`` column (nothing
+    writes one today, but an EIS export that gains a thermocouple channel
+    should win); the pulse bundle of the same ``BM_Programm``; the mean over
+    the cell's pulse bundles. ``source`` records which, so a borrowed
+    cell-level number is never mistaken for a same-programme measurement.
+    """
+    if "Temperature" in bundle_df.columns:
+        own = pd.to_numeric(bundle_df["Temperature"], errors="coerce")
+        if own.notna().any():
+            return round(float(own.mean()), 2), "eis-bundle"
+
+    bm = None
+    m = re.search(r"_BM(\d+)_", name)
+    if m:
+        bm = int(m.group(1))
+    elif "BM_Programm" in bundle_df.columns and not bundle_df.empty:
+        bm = int(bundle_df["BM_Programm"].iloc[0])
+
+    if bm is not None and bm in pulse_temps:
+        return pulse_temps[bm], f"pulse-BM{bm}"
+    if not pd.isna(cell_temp):
+        logging.info(
+            "%s: no pulse bundle for BM%s — using the cell mean %.2f °C",
+            name, bm, cell_temp,
+        )
+        return cell_temp, "cell-mean"
+    return np.nan, "unavailable"
+
+
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             soc_step_pct: float = None, ir_ohm: float = None,
             two_stage_r0: bool = True, hf_f_min: float = None,
@@ -553,6 +661,12 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         logging.warning(
             "no qOCV export in %s — EIS SOC_pct stays NaN", data_dir
         )
+    # EIS spectra carry no temperature of their own (the EIS device file has no
+    # thermocouple channel) — borrow it from the pulse bundle of the same
+    # BM_Programm, which is the same cell in the same chamber during the same
+    # programme.
+    pulse_temps, cell_temp = _pulse_temperatures(data_dir)
+
     tables, bundle_diag = [], []
     raw_by_source = {}  # source -> raw measured-spectra df
     for path in files:
@@ -569,6 +683,12 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             table["sweep_direction"] = direction
             table["sweep_direction_source"] = diag["sweep_direction_source"]
             table["source"] = name
+            temp, temp_source = _eis_bundle_temperature(
+                name, bundle_df, pulse_temps, cell_temp
+            )
+            table["T_degC"] = temp
+            diag["temperature_degC"] = _jsonable(temp)
+            diag["temperature_source"] = temp_source
             # Replace the order-based SOC ladder with the measured qOCV curve
             # of the same direction; SOC_pct is NaN until this runs.
             diag.update(soc_from_qocv.map_table(
@@ -619,6 +739,7 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             "kind": kind,
             "source": source,
             "sweep_direction": direction,
+            "temperature_degC": _jsonable(temp),
             "plot": os.path.relpath(out_png, os.path.dirname(plots_dir)),
         })
 
@@ -627,6 +748,15 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     for source, group in combined.groupby("source", sort=False):
         stem = os.path.splitext(str(source))[0]
         direction = group["sweep_direction"].iloc[0]
+        # Temperature goes in every filename beside the direction: impedance is
+        # as temperature-dependent as it is SOC-dependent, so a plot of one
+        # sweep is only readable next to another at the same temperature.
+        temp = (
+            float(group["T_degC"].iloc[0])
+            if "T_degC" in group.columns and pd.notna(group["T_degC"].iloc[0])
+            else np.nan
+        )
+        tag = f"{direction}_{_temp_tag(temp)}"
         # Every vs-SOC plotter sorts on SOC_pct; with no qOCV to map against it
         # is all-NaN and they would draw an empty axis instead of failing.
         if group["SOC_pct"].isna().all():
@@ -635,13 +765,16 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             )
             plots.append({
                 "source": source, "sweep_direction": direction,
+                "temperature_degC": _jsonable(temp),
                 "plot_skipped": "no SOC_pct — no qOCV sweep to map against",
             })
             continue
         title = f"initial characterization — {source} ({direction})"
+        if not pd.isna(temp):
+            title += f" @ {temp:.1f} °C"
         raw_df = raw_by_source.get(source)
 
-        out_png = os.path.join(plots_dir, f"eis_2zarc_warburg_{stem}_{direction}.png")
+        out_png = os.path.join(plots_dir, f"eis_2zarc_warburg_{stem}_{tag}.png")
         _try_plot("zarc_params_vs_soc", eis_vs_soc.plot_zarc_vs_soc, out_png,
                   group, title=title)
 
@@ -651,11 +784,11 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             )
             continue
 
-        raw_png = os.path.join(plots_dir, f"eis_raw_spectra_{stem}_{direction}.png")
+        raw_png = os.path.join(plots_dir, f"eis_raw_spectra_{stem}_{tag}.png")
         _try_plot("raw_spectra", eis_vs_soc.plot_raw_spectra, raw_png,
                   raw_df, group, title=title)
 
-        overlay_png = os.path.join(plots_dir, f"eis_fit_overlay_{stem}_{direction}.png")
+        overlay_png = os.path.join(plots_dir, f"eis_fit_overlay_{stem}_{tag}.png")
         _try_plot("fit_overlay", eis_vs_soc.plot_fit_overlay, overlay_png,
                   raw_df, group, title=title)
 
@@ -663,7 +796,7 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         # insets. Its only other caller is eis_vs_soc's standalone CLI, which
         # doesn't map SOC from the qOCV curve — so without this the figure has
         # no working producer.
-        nyq_png = os.path.join(plots_dir, f"eis_nyquist_{stem}_{direction}.png")
+        nyq_png = os.path.join(plots_dir, f"eis_nyquist_{stem}_{tag}.png")
         _try_plot("nyquist_by_soc", eis_vs_soc.plot_nyquist_by_soc, nyq_png,
                   raw_df, group, title=title)
 
@@ -689,9 +822,9 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         else:
             if not peaks.empty:
                 drt_peaks.append(peaks.assign(source=source))
-            gam_png = os.path.join(plots_dir, f"eis_drt_gamma_{stem}_{direction}.png")
+            gam_png = os.path.join(plots_dir, f"eis_drt_gamma_{stem}_{tag}.png")
             _try_plot("drt_gamma", eis_drt.plot_drt, gam_png, curves, meta, group)
-            map_png = os.path.join(plots_dir, f"eis_drt_map_{stem}_{direction}.png")
+            map_png = os.path.join(plots_dir, f"eis_drt_map_{stem}_{tag}.png")
             _try_plot("drt_map", eis_drt.plot_drt_map, map_png, curves)
 
     if plots:
@@ -714,12 +847,19 @@ def summarize_qocv(data_dir: str, plots_dir: str, nom_capacity: float) -> dict:
 
     bm, pair = qocv_curve._pick_pair(pairs)
     block["sources"] = [os.path.basename(pair["cha"]), os.path.basename(pair["dch"])]
+    # Mean over both branches — the sweep is 20 h long, so the temperature it
+    # was measured at is part of the curve's identity (it sets the hysteresis
+    # the IR correction removes).
+    temps = [_parquet_temperature(pair[k]) for k in ("cha", "dch")]
+    temps = [t for t in temps if not pd.isna(t)]
+    temp = round(float(np.mean(temps)), 2) if temps else np.nan
     try:
         _, qc = qocv_curve.load_sweep(pair["cha"], discharge=False)
         _, qd = qocv_curve.load_sweep(pair["dch"], discharge=True)
         block["fits"] = [{
             "BM_Programm": int(bm),
             "SOH": _jsonable(pair.get("soh")),
+            "T_degC": _jsonable(temp),
             "capacity_cha_ah": round(float(np.nanmax(qc)), 4),
             "capacity_dch_ah": round(float(np.nanmax(qd)), 4),
         }]
@@ -728,9 +868,12 @@ def summarize_qocv(data_dir: str, plots_dir: str, nom_capacity: float) -> dict:
         block["error"] = f"{type(exc).__name__}: {exc}"
         return block
 
-    out_png = os.path.join(plots_dir, "qocv.png")
+    out_png = os.path.join(plots_dir, f"qocv_{_temp_tag(temp)}.png")
     try:
-        qocv_curve.plot_qocv(pair["cha"], pair["dch"], out_png, nom_capacity=nom_capacity)
+        qocv_curve.plot_qocv(
+            pair["cha"], pair["dch"], out_png, nom_capacity=nom_capacity,
+            temp_degC=None if pd.isna(temp) else temp,
+        )
         block["plot"] = os.path.relpath(out_png, os.path.dirname(plots_dir))
     except Exception as exc:
         logging.warning("qOCV plot failed: %s", exc)

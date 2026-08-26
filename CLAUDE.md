@@ -163,14 +163,29 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
 ├── with_features_post_labeled.csv
 ├── <cell>_capacity.csv
 ├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
-└── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>.png
-            eis_{2zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>.png
-            eis_drt_{gamma,map}_<stem>_<direction>.png
-            qocv.png
+└── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>_<T>degreeC.png
+            eis_{2zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>_<T>degreeC.png
+            eis_drt_{gamma,map}_<stem>_<direction>_<T>degreeC.png
+            qocv_<T>degreeC.png
 ```
 
 MinIO mirrors this under `<prefix>/10_initial_characterization/<cell_stem>/`,
 **untagged**. The `--overwrite` skip-check keys on this root's GOLD.
+
+**Temperature** — every fit record carries `T_degC` (the measured mean cell
+temperature, 2 dp) and every plot filename ends in `_<T>degreeC` (the same
+value rounded to whole °C, `NAdegreeC` when unknown). Both R and the qOCV
+hysteresis are strongly temperature-dependent, so two runs of the same
+programme in different chambers are different measurements and must not
+collide on one filename. Sources: **pulse** — mean `Temperature` over the
+pulse + its relaxation window (`pulse_fit._window_temperature`); **qOCV** —
+mean over both branch parquets; **EIS** — the EIS device file has no
+thermocouple channel, so the bundle borrows the temperature of the **pulse
+bundle of the same `BM_Programm`**, falling back to the cell's pulse mean.
+`eis.settings.bundles[].temperature_source` records which
+(`pulse-BM<n>` / `cell-mean` / `eis-bundle` / `unavailable`), so a borrowed
+cell-level number is never mistaken for a same-programme measurement. Bundles
+exported without a `Temperature` column still fit — `T_degC` is NaN.
 
 **Models are fixed defaults**, not config keys: **2RC** for pulse
 (`analysis/fit_2rc_pulse.py`), **2×ZARC + series-L + generalized Warburg** for
