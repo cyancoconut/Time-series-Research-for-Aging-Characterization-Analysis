@@ -31,7 +31,11 @@ def main() -> None:
         description="Build BRONZE_PARA (initial-characterization layer) and Ah sidecar"
     )
     parser.add_argument("config", help="Path to battery config JSON")
-    parser.add_argument("--cells", nargs="*", help="Optional subset of cells")
+    parser.add_argument(
+        "--cells",
+        nargs="*",
+        help="Optional subset of cells, matched as name fragments (e.g. 02)",
+    )
     parser.add_argument(
         "--overwrite", action="store_true", help="Rebuild even if output exists"
     )

@@ -615,12 +615,26 @@ def run(
     needs_minio = download_from == "minio" or upload_minio
     minio_client = io_router.make_minio_client(cfg) if needs_minio else None
 
-    if target_cells:
-        cells = target_cells
-    elif download_from == "minio":
+    if download_from == "minio":
         cells = _list_cells_minio(minio_client, bucket_name, prefix)
     else:
         cells = _list_cells_local(working_path)
+
+    # --cells is a name *fragment*, as in main.py — not a literal cell name.
+    # It used to replace the discovered list outright, so `--cells 02` looked
+    # for a cell called "02" and reported "02 - no parquet files found."
+    # instead of matching …_28Ah_02. A full name still matches, being a
+    # substring of itself.
+    if target_cells:
+        fragments = [t for t in target_cells if t]
+        matched = [c for c in cells if any(t in c for t in fragments)]
+        if not matched:
+            raise SystemExit(
+                f"--cells {fragments} matched none of the {len(cells)} cells "
+                f"found in {'MinIO ' + prefix if download_from == 'minio' else working_path}: "
+                f"{cells}"
+            )
+        cells = matched
 
     for cell in cells:
         print(f"Processing {cell}...")
@@ -641,7 +655,11 @@ def run(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build BRONZE_CU and Ah sidecar from MinIO")
     parser.add_argument("config", help="Path to battery config JSON")
-    parser.add_argument("--cells", nargs="*", help="Optional subset of cells")
+    parser.add_argument(
+        "--cells",
+        nargs="*",
+        help="Optional subset of cells, matched as name fragments (e.g. 02)",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Rebuild even if output exists")
     parser.add_argument(
         "--incremental",
