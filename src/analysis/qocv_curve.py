@@ -4,10 +4,12 @@ Reads the per-check-up qOCV parquets written by ``output/export_qocv.py``
 (``30_export_qocv/<cell>/<cell>_qocv_{cha,dch}_BM<n>_<SOH>SOH.parquet``) — slow
 (~C/20) charge / discharge sweeps — and produces three views:
 
-1. **qOCV curve** (``plot_qocv``) — terminal voltage vs throughput-normalised SOC
-   for one matched charge+discharge pair, plus their mean (≈ the true
-   thermodynamic OCV). The charge branch sits above discharge by the qOCV
-   hysteresis (path dependence + the small residual C/20 overpotential).
+1. **qOCV curve + DVA** (``plot_qocv``) — left: terminal voltage vs
+   throughput-normalised SOC for one matched charge+discharge pair, plus their
+   mean (≈ the true thermodynamic OCV); the charge branch sits above discharge
+   by the qOCV hysteresis (path dependence + the small residual C/20
+   overpotential). Right: ``|dV/dQ|`` of the same branches — plateaus become
+   valleys and the peaks between them sit at the electrode phase boundaries.
 
 2. **Differential capacity** (``plot_dqdv``) — dQ/dV for the same pair. A plateau
    in V-vs-Q (a two-phase electrode transition, where lots of charge is absorbed
@@ -56,6 +58,12 @@ DV = 0.004            # V grid spacing for dQ/dV
 SG_WINDOW = 51        # Savitzky-Golay window (odd)
 SG_POLY = 3
 
+# Differential *voltage* (DVA, dV/dQ) grid: charge is logged smoothly (the
+# integral of a near-constant current), so a uniform Q grid needs no special
+# treatment beyond the same smoothing before differentiating.
+N_Q = 600             # points on the uniform Q grid for dV/dQ
+DVA_TRIM_PCT = 2.0    # drop this much SOC at each end (dV/dQ blows up at the rails)
+
 
 # ---------------------------------------------------------------------------
 # Loading / integration
@@ -87,6 +95,39 @@ def differential_capacity(v, q, dv=DV, window=SG_WINDOW, poly=SG_POLY):
         qg = savgol_filter(qg, win, poly)
     dqdv = np.gradient(qg, dv)
     return grid, dqdv, soc_axis(qg)
+
+
+def differential_voltage(v, q, n=N_Q, window=SG_WINDOW, poly=SG_POLY,
+                         trim_pct=DVA_TRIM_PCT):
+    """dV/dQ (DVA) on a uniform charge grid. Returns ``(q_grid, dvdq, soc_grid)``.
+
+    The reciprocal view of :func:`differential_capacity`: a two-phase plateau in
+    V-vs-Q is a **valley** here, and the peaks between the valleys sit at the
+    phase boundaries of the individual electrodes — which is what makes DVA the
+    usual way to split capacity fade into LLI (peaks move together) vs LAM
+    (the spacing between peaks changes).
+
+    ``trim_pct`` drops that much SOC from each end, where the sweep runs into
+    the voltage rails and dV/dQ diverges and would flatten everything else.
+    """
+    o = np.argsort(q)
+    q, v = np.asarray(q)[o], np.asarray(v)[o]
+    q, idx = np.unique(q, return_index=True)      # strictly increasing for interp
+    v = v[idx]
+    span = q[-1] - q[0]
+    if span <= 0 or len(q) < 10:
+        raise ValueError("charge span too small for a dV/dQ grid")
+    lo = q[0] + span * trim_pct / 100.0
+    hi = q[-1] - span * trim_pct / 100.0
+    grid = np.linspace(lo, hi, n)
+    vg = np.interp(grid, q, v)
+    win = min(window, len(vg) - (1 - len(vg) % 2))   # keep odd & <= len
+    if win >= 5:
+        vg = savgol_filter(vg, win, poly)
+    dvdq = np.gradient(vg, grid[1] - grid[0])
+    # Normalised against the *full* sweep, not the trimmed grid, so this SOC
+    # axis lines up with the qOCV panel's.
+    return grid, dvdq, (grid - q[0]) / span * 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +165,10 @@ def plot_qocv(cha_path, dch_path, out_png, nom_capacity=NOM_CAPACITY_DEFAULT,
               temp_degC=None):
     """qOCV: charge + discharge terminal voltage vs SOC, plus their mean (≈ OCV).
 
+    Second panel: the DVA (dV/dQ vs SOC) of the same two branches — the
+    plateaus of the left panel read as valleys, and the peaks between them mark
+    the electrode phase boundaries.
+
     ``temp_degC`` (optional) is the sweep's measured mean cell temperature; it
     is appended to the title. Both the curve and the hysteresis between the
     branches are temperature-dependent, so a plot without it can't be compared
@@ -143,19 +188,40 @@ def plot_qocv(cha_path, dch_path, out_png, nom_capacity=NOM_CAPACITY_DEFAULT,
     vd_i = np.interp(grid, soc_d, vd)
     hyst = float(np.mean((vc_i - vd_i)[(grid >= 20) & (grid <= 80)]) * 1000)
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, (ax, axd) = plt.subplots(1, 2, figsize=(15, 6))
     ax.plot(soc_c, vc, color="C3", lw=1.6, label=f"charge  ({qc.max():.2f} Ah)")
     ax.plot(soc_d, vd, color="C0", lw=1.6, label=f"discharge  ({qd.max():.2f} Ah)")
     ax.plot(grid, (vc_i + vd_i) / 2, color="0.35", lw=1.0, ls="--", label="mean")
     ax.set_xlabel("SOC (%)  [throughput-normalised]")
     ax.set_ylabel("Voltage (V)")
+    ax.set_title("qOCV curve")
+
+    inner = []
+    for v, q, color, lbl in ((vc, qc, "C3", "charge"), (vd, qd, "C0", "discharge")):
+        try:
+            _, dvdq, soc = differential_voltage(v, q)
+        except ValueError as exc:
+            logging.warning("DVA (%s) skipped: %s", lbl, exc)
+            continue
+        dvdq = np.abs(dvdq)
+        axd.plot(soc, dvdq, color=color, lw=1.4, label=lbl)
+        inner.append(dvdq[(soc >= 10) & (soc <= 95)])
+    if inner:
+        # dV/dQ diverges into both rails; scale to the interior or the staging
+        # structure in between collapses onto the axis.
+        axd.set_ylim(0, 1.3 * float(np.max(np.concatenate(inner))))
+    axd.set_xlabel("SOC (%)  [throughput-normalised]")
+    axd.set_ylabel("|dV/dQ| (V/Ah)")
+    axd.set_title("DVA (valleys = plateaus, peaks = phase boundaries)")
+
     soh = _parse_soh(os.path.basename(cha_path))
     temp_txt = "" if temp_degC is None else f", {float(temp_degC):.1f} °C"
-    ax.set_title(f"qOCV — {os.path.basename(os.path.dirname(cha_path))} "
+    fig.suptitle(f"qOCV — {os.path.basename(os.path.dirname(cha_path))} "
                  f"@ {soh:.1f}% SOH{temp_txt}  "
                  f"(hyst ≈ {hyst:.0f} mV over 20–80%)")
-    ax.grid(alpha=0.3)
-    ax.legend()
+    for a in (ax, axd):
+        a.grid(alpha=0.3)
+        a.legend()
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
     logging.info("qOCV plot -> %s", out_png)
