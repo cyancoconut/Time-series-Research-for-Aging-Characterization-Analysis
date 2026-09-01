@@ -54,7 +54,11 @@ from minio import Minio
 from minio.error import S3Error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from util.add_ah_throughput import add_ah_throughput
+from util.add_ah_throughput import ah_contributions
+
+#: Above this (A) a recording counts as "carrying current" for the
+#: overlap warning — a passive logger sits at 0, a cycler does not.
+_LIVE_CURRENT_A = 0.01
 from util import io_router
 from util.procedure_filter import as_filter_list
 
@@ -176,6 +180,11 @@ def _read_tests(
     CU files contribute full rows to `tests` (and Zeit/Strom to `ah_frames`);
     non-CU files contribute a first+last-row stub to `tests` and their full
     Zeit/Strom timeline to `ah_frames`.
+
+    **One frame per file, kept separate.** `_compute_ah` integrates each on its
+    own, because files can be *concurrent* recordings of the same cell (a
+    cycler test and a parallel EIS logger) and merging them into one timeline
+    corrupts the integral — see that function.
     """
     tests = []
     ah_frames = []
@@ -240,6 +249,31 @@ def _read_tests(
     return tests, ah_frames
 
 
+def _frame_contributions(frame: pd.DataFrame, gap_threshold_s=None) -> pd.DataFrame:
+    """One test file's own Ah contributions as ``(Zeit, Current, contrib)``.
+
+    Normalizes ``Zeit`` to tz-aware UTC (a partial export may store it as
+    object/strings, and files mix tz-aware and tz-naive), sorts, and drops
+    duplicate timestamps **within this file** — a repeat sample of the same
+    instant carries no new charge, but the same instant in a *different* file
+    is a separate recording and must survive.
+    """
+    df = frame.rename(columns={"Strom": "Current"})[["Zeit", "Current"]].copy()
+    df["Zeit"] = pd.to_datetime(df["Zeit"], utc=True, errors="coerce")
+    df = (df.dropna(subset=["Zeit"])
+            .drop_duplicates("Zeit")
+            .sort_values("Zeit")
+            .reset_index(drop=True))
+    if df.empty:
+        return df.assign(contrib=[])
+    df["Current"] = df["Current"].astype(np.float32)
+    df["contrib"] = ah_contributions(
+        df["Zeit"].to_numpy(), df["Current"].to_numpy(),
+        gap_threshold_s=gap_threshold_s,
+    )
+    return df
+
+
 def _compute_ah(
     ah_frames: list,
     offset: float = 0.0,
@@ -248,7 +282,26 @@ def _compute_ah(
     gap_threshold_s=None,
 ) -> pd.DataFrame:
     """Cumulative Ah throughput over `ah_frames`, returning a df with Zeit +
-    Ah_throughput (+ Current/Time_UTC).
+    Ah_throughput (+ Current).
+
+    **Each file is integrated on its own**, and only the resulting per-sample
+    contributions are merged onto one time axis and accumulated. This is not a
+    refactor — integrating the *union* of the rows is wrong whenever two files
+    overlap in wall-clock time, which they routinely do: a parametrization run
+    records the cycler test and a parallel EIS logger simultaneously, and the
+    logger's rows carry zero current. The trapezoid interpolates current
+    between consecutive samples, so interleaving a zero-current recording makes
+    it dip to zero and back between every real pair. At equal cadence that
+    halves the integral exactly — measured on ``J8049_Namey_NFPP_28Ah_02``,
+    where a 1 s cycler segment booked 0.6932 Ah against a true 1.3857 Ah
+    (ratio 1.999), 0.100 s pulse segments were off by 1.05, and the cell total
+    read 274.30 Ah against 390.92 Ah. The cadence dependence is the fingerprint:
+    dilution scales with how many foreign rows fall between two real ones.
+
+    Summing per-file integrals is also the physically right answer for genuinely
+    concurrent recordings — each instrument's charge is booked once, at the
+    timestamps where it actually flowed, and a zero-current logger contributes
+    nothing instead of corrupting its neighbours.
 
     For the incremental path, a synthetic seed row `(seed_zeit, seed_strom)` is
     prepended so the trapezoid integral bridges the gap from the last
@@ -256,39 +309,70 @@ def _compute_ah(
     added. The seed row is dropped before returning. For the full path,
     `offset=0` and `seed_zeit=None`.
 
-    `gap_threshold_s` is forwarded to `add_ah_throughput` to zero out the
-    phantom throughput integrated across the dead time between test files (see
-    that function). It applies identically on the seed→first-new-row bridge, so
-    a real parking gap there contributes nothing while `offset` still carries
-    the prior cumulative total forward.
+    `gap_threshold_s` zeroes out the phantom throughput integrated across dead
+    time (see `util.add_ah_throughput`). It applies within each file and on the
+    seed→first-new-row bridge, so a real parking gap there contributes nothing
+    while `offset` still carries the prior cumulative total forward.
     """
-    df_all = pd.concat(ah_frames, ignore_index=True)
+    parts = [_frame_contributions(f, gap_threshold_s) for f in ah_frames]
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame(columns=["Zeit", "Current", "Ah_throughput"])
+
+    _warn_on_concurrent_current(parts)
+
     if seed_zeit is not None:
-        seed = pd.DataFrame({"Zeit": [pd.Timestamp(seed_zeit)], "Strom": [seed_strom]})
-        df_all = pd.concat([seed, df_all], ignore_index=True)
-    # Frames can arrive with a heterogeneous Zeit dtype — a partial export may
-    # store it as object/strings, or mix tz-aware and tz-naive across files (and
-    # with the seed). That makes the concatenated column object dtype, which
-    # breaks the .dt access below. Normalize to tz-aware UTC so dedup/sort and
-    # the Time_UTC handling all operate on a real datetime column.
-    df_all["Zeit"] = pd.to_datetime(df_all["Zeit"], utc=True)
-    df_all = df_all.drop_duplicates("Zeit").sort_values("Zeit").reset_index(drop=True)
-    df_all[df_all.select_dtypes(np.float64).columns] = (
-        df_all.select_dtypes(np.float64).astype(np.float32)
+        # The bridge is between files, so it is its own two-row "recording":
+        # the seed sample and the earliest new one.
+        first = min(p["Zeit"].iloc[0] for p in parts)
+        first_current = next(
+            p["Current"].iloc[0] for p in parts if p["Zeit"].iloc[0] == first
+        )
+        bridge = _frame_contributions(
+            pd.DataFrame({"Zeit": [pd.Timestamp(seed_zeit), first],
+                          "Strom": [seed_strom, first_current]}),
+            gap_threshold_s,
+        )
+        # Only the bridge contribution is wanted; the endpoint rows themselves
+        # are already carried by the seed's own build and by `parts`.
+        parts.append(bridge.iloc[1:])
+
+    allc = pd.concat(parts, ignore_index=True).sort_values("Zeit")
+    # Two files sharing a timestamp each booked their own charge there; keep the
+    # sum, and one representative current for the watermark.
+    df_ah = allc.groupby("Zeit", as_index=False).agg(
+        Current=("Current", "last"), contrib=("contrib", "sum")
     )
-    # add_ah_throughput needs Time_UTC + Current; keep original Zeit for merge key
-    df_ah = df_all.rename(columns={"Strom": "Current"})
-    df_ah["Time_UTC"] = df_ah["Zeit"]
-    if df_ah["Time_UTC"].dt.tz is None:
-        df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_localize("UTC")
-    else:
-        df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_convert("UTC")
-    df_ah = add_ah_throughput(df_ah, gap_threshold_s=gap_threshold_s)
-    if offset:
-        df_ah["Ah_throughput"] = df_ah["Ah_throughput"] + offset
+    df_ah["Ah_throughput"] = df_ah["contrib"].cumsum() + (offset or 0.0)
+    df_ah = df_ah.drop(columns="contrib")
     if seed_zeit is not None:
-        df_ah = df_ah[df_ah["Zeit"] != pd.Timestamp(seed_zeit)].reset_index(drop=True)
+        seed_ts = pd.to_datetime(seed_zeit, utc=True)
+        df_ah = df_ah[df_ah["Zeit"] != seed_ts].reset_index(drop=True)
     return df_ah
+
+
+def _warn_on_concurrent_current(parts: list) -> None:
+    """Warn when two overlapping files both carry current.
+
+    Summing per-file integrals is right for a cycler plus a passive logger, but
+    two *live* recordings of the same cell over the same window would be
+    double-counted. That should not happen — a cell sits on one channel — so it
+    is worth saying out loud rather than silently doubling a cell's throughput.
+    """
+    spans = sorted(
+        ((p["Zeit"].iloc[0], p["Zeit"].iloc[-1], float(np.abs(p["Current"]).max()))
+         for p in parts if len(p) > 1),
+        key=lambda s: s[0],
+    )
+    live = [s for s in spans if s[2] > _LIVE_CURRENT_A]
+    for (a0, a1, _), (b0, b1, _) in zip(live, live[1:]):
+        if b0 < a1:
+            print(
+                f"  WARNING: two current-carrying recordings overlap "
+                f"({a0} .. {a1}) and ({b0} .. {b1}) — their Ah throughput is "
+                f"summed, which double-counts if they are the same channel."
+            )
+            return
 
 
 def _ah_watermark(df_ah: pd.DataFrame) -> tuple:
@@ -300,13 +384,28 @@ def _ah_watermark(df_ah: pd.DataFrame) -> tuple:
     )
 
 
+def _merge_ah(bronze: pd.DataFrame, df_ah: pd.DataFrame) -> pd.DataFrame:
+    """Attach ``Ah_throughput`` to the output rows, on ``Zeit``.
+
+    ``_compute_ah`` normalizes ``Zeit`` to tz-aware UTC while the test frames
+    keep whatever the export carried, and pandas refuses to merge a tz-aware
+    key against a naive one. Real exports are tz-aware so this never fired, but
+    a naive one would have failed the whole build on the merge rather than on
+    anything meaningful.
+    """
+    if bronze["Zeit"].dt.tz is None:
+        bronze = bronze.copy()
+        bronze["Zeit"] = bronze["Zeit"].dt.tz_localize("UTC")
+    return bronze.merge(df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left")
+
+
 def _build_full(
     tests: list, ah_frames: list, cell: str, gap_threshold_s=None
 ) -> tuple:
     bronze = _normalize_tests(tests)
     if ah_frames:
         df_ah = _compute_ah(ah_frames, gap_threshold_s=gap_threshold_s)
-        bronze = bronze.merge(df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left")
+        bronze = _merge_ah(bronze, df_ah)
         ah_total, last_zeit, last_strom = _ah_watermark(df_ah)
     else:
         print(f"{cell} - no Zeit/Strom data for Ah throughput; column omitted.")
@@ -331,9 +430,7 @@ def _build_incremental(
             ah_frames, offset, seed_zeit, seed_strom,
             gap_threshold_s=gap_threshold_s,
         )
-        new_rows = new_rows.merge(
-            df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left"
-        )
+        new_rows = _merge_ah(new_rows, df_ah)
         ah_total, last_zeit, last_strom = _ah_watermark(df_ah)
     else:
         ah_total, last_zeit, last_strom = (
