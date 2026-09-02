@@ -913,6 +913,10 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
 
     plots = []
     drt_peaks = []
+    # `_bundle_direction` keys each bundle's diagnostics by its file name, which
+    # is what `combined` groups on — so the DRT can be told which SOC source the
+    # fits used rather than guessing.
+    diag_by_source = {d.get("source"): d for d in bundle_diag}
     for source, group in combined.groupby("source", sort=False):
         stem = os.path.splitext(str(source))[0]
         direction = group["sweep_direction"].iloc[0]
@@ -929,7 +933,8 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         # is all-NaN and they would draw an empty axis instead of failing.
         if group["SOC_pct"].isna().all():
             logging.warning(
-                "%s: no SOC (no qOCV mapping) — skipping the vs-SOC plots", source
+                "%s: no SOC (neither the step charge nor a qOCV mapping "
+                "resolved one) — skipping the vs-SOC plots", source
             )
             plots.append({
                 "source": source, "sweep_direction": direction,
@@ -971,16 +976,22 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         # Model-free DRT of the same bundle. It answers a question the ECM
         # cannot ask of itself — how many relaxation processes are in the
         # spectrum at all — so it is worth having beside every fit rather than
-        # only when someone remembers to run the standalone CLI. `data_dir`
-        # gives it the same qOCV SOC the fits use, and `group` supplies the
-        # fitted τ so the two are overlaid on one axis: an ECM τ sitting in a
-        # DRT *valley* (rather than on a peak) is the signature of one element
-        # blanketing a region with more structure than it has parameters for.
+        # only when someone remembers to run the standalone CLI. It is handed
+        # the SOC this bundle's fits are already using — whether that came from
+        # the step charge or the qOCV curve — because a DRT panel and the
+        # eis_fits.csv row beside it must never disagree about which SOC a
+        # spectrum was measured at; letting it re-derive its own is exactly how
+        # they would. `group` supplies the fitted τ so the two are overlaid on
+        # one axis: an ECM τ sitting in a DRT *valley* (rather than on a peak)
+        # is the signature of one element blanketing a region with more
+        # structure than it has parameters for.
         if not drt:
             continue
         try:
             curves, peaks, meta, _ = eis_drt.run_bundle(
                 raw_df, lam=drt_lambda, data_dir=data_dir, ir_ohm=ir_ohm,
+                soc_by_eid=dict(zip(group["eis_number"], group["SOC_pct"])),
+                soc_source=diag_by_source.get(source, {}).get("soc_source"),
             )
         except Exception as exc:
             logging.warning("DRT failed for %s: %s", source, exc)
