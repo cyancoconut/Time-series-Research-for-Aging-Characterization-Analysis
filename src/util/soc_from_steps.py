@@ -65,6 +65,14 @@ REST_CURRENT_A = 1e-3
 #: Target marking a segment as part of an EIS measurement block.
 EIS_TARGET = "EIS"
 
+#: Target of the pause stubs the walk back steps over. The protocol puts a 4 h
+#: pause between the SOC-adjust step and the EIS measurement, so the segment
+#: literally before a block is normally that pause, not the step. Only ``PAU``
+#: is skipped: a long pause is kept as its own numbered 2-row stub by
+#: ``dismember`` (short ones go to the procedure-0 discard bucket), so it is a
+#: first-class segment sitting between the two things being related.
+PAUSE_TARGET = "PAU"
+
 #: How far outside 0–100 % the accumulated ladder may land before warning.
 SOC_RAIL_TOLERANCE_PCT = 5.0
 
@@ -89,7 +97,7 @@ def segment_steps(gold: pd.DataFrame) -> pd.DataFrame:
     charge magnitude and the direction has to come from the segment's own mean
     current. A rest segment (mean |I| below :data:`REST_CURRENT_A`) moves no
     charge regardless of its span. ``target`` is carried because the ladder is
-    anchored on the ``EIS`` segments.
+    anchored on the ``EIS`` segments and steps back over the ``PAU`` stubs.
 
     Returns an empty frame when GOLD lacks ``ID`` or ``Ah_throughput``.
     """
@@ -138,10 +146,13 @@ def eis_blocks(steps: pd.DataFrame, bm: int) -> pd.DataFrame:
     A block is a run of consecutive ``EIS`` segments (consecutive in the
     program's ordered segment list, not necessarily in procedure number — the
     numbering has holes where dismember dropped short segments). Each block gets
-    ``step_ah``: the signed charge of the segment immediately before it, which
-    is the step that moved the cell to the SOC the block measured.
+    ``step_ah``: the signed charge of the step that moved the cell to the SOC
+    the block measured — the nearest earlier segment that is not a
+    :data:`PAUSE_TARGET` stub, since the protocol rests the cell ~4 h between
+    moving it and measuring it.
 
-    Columns: ``block, first_proc, last_proc, ids, step_id, step_ah``.
+    Columns: ``block, first_proc, last_proc, ids, step_id, step_ah,
+    n_pauses_skipped``.
     """
     prog = steps[steps["BM_Programm"] == bm].reset_index(drop=True)
     if prog.empty:
@@ -156,7 +167,15 @@ def eis_blocks(steps: pd.DataFrame, bm: int) -> pd.DataFrame:
         j = i
         while j + 1 < n and is_eis.iloc[j + 1]:
             j += 1
-        prev = prog.iloc[i - 1] if i > 0 else None
+        # Walk back over the pause stubs to the step itself. The protocol rests
+        # the cell ~4 h between moving it and measuring it, so the segment
+        # immediately before a block is normally that pause; taking it would
+        # book a 0 Ah step and flatten the whole ladder onto the anchor.
+        k, n_paused = i - 1, 0
+        while k >= 0 and prog["target"].iloc[k] == PAUSE_TARGET:
+            k -= 1
+            n_paused += 1
+        prev = prog.iloc[k] if k >= 0 else None
         blocks.append({
             "block": len(blocks),
             "first_proc": int(prog["proc_num"].iloc[i]),
@@ -164,6 +183,7 @@ def eis_blocks(steps: pd.DataFrame, bm: int) -> pd.DataFrame:
             "ids": prog["ID"].iloc[i:j + 1].tolist(),
             "step_id": None if prev is None else prev["ID"],
             "step_ah": np.nan if prev is None else float(prev["signed_ah"]),
+            "n_pauses_skipped": n_paused,
         })
         i = j + 1
     return pd.DataFrame(blocks)
