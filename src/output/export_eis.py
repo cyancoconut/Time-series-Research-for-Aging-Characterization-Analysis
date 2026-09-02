@@ -65,20 +65,29 @@ def _discover_and_load(cell_stem, cfg, minio_client, marker):
 
 
 def _eis_anchors(df_gold, proc_filter):
-    """EIS-labelled segments as ``(BM_Programm, Time)`` anchors for matching.
+    """EIS-labelled segments as ``(BM_Programm, Time, ID)`` anchors for matching.
 
     Uses the ``EIS`` target rows and, as a fallback/complement, any segment
     whose ``Prozedur`` contains the EIS procedure filter (some cells carry the
     EIS marker only in the procedure name, not as an ``EIS`` target).
+
+    ``ID`` rides along so the bundle can record *which* segment each spectrum
+    was measured in: ``util.soc_from_steps`` reads the segment one procedure
+    number earlier to get the SOC step that preceded the measurement. Absent
+    from GOLD (older exports), the column is simply not carried and the SOC
+    falls back to the qOCV mapping.
     """
+    cols = ["BM_Programm", "Time"]
     if df_gold is None or df_gold.empty:
-        return pd.DataFrame(columns=["BM_Programm", "Time"])
+        return pd.DataFrame(columns=cols)
     mask = df_gold["target"].astype(str) == "EIS"
     if "Prozedur" in df_gold.columns and proc_filter:
         mask = mask | df_gold["Prozedur"].astype(str).str.contains(
             proc_filter, na=False
         )
-    return df_gold.loc[mask, ["BM_Programm", "Time"]]
+    if "ID" in df_gold.columns:
+        cols.append("ID")
+    return df_gold.loc[mask, cols]
 
 
 def export_eis(df_gold, soh, cell, cfg, paths, minio_client, run_ctx: RunContext = CU):
@@ -93,12 +102,12 @@ def export_eis(df_gold, soh, cell, cfg, paths, minio_client, run_ctx: RunContext
         return
 
     anchors = _eis_anchors(df_gold, proc_filter)
-    bms = io_eis.match_spectra_to_programs(metas, anchors, tol)
+    matched = io_eis.match_spectra_to_anchors(metas, anchors, tol)
 
     n_unmatched = 0
     keep = []
-    for spec, meta, bm in zip(specs, metas, bms):
-        if bm is None:
+    for spec, meta, anchor in zip(specs, metas, matched):
+        if anchor is None or anchor.get("BM_Programm") is None:
             n_unmatched += 1
             logging.warning(
                 f"{cell}: EIS {meta.get('eis_number')} at {meta.get('meas_time')} "
@@ -106,7 +115,11 @@ def export_eis(df_gold, soh, cell, cfg, paths, minio_client, run_ctx: RunContext
             )
             continue
         spec = spec.copy()
-        spec["BM_Programm"] = int(bm)
+        spec["BM_Programm"] = int(anchor["BM_Programm"])
+        if anchor.get("ID") is not None:
+            # The segment this spectrum was measured in — the anchor for the
+            # step-counted SOC (util.soc_from_steps).
+            spec["segment_ID"] = str(anchor["ID"])
         keep.append(spec)
 
     if not keep:

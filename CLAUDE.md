@@ -316,14 +316,51 @@ each fit record (`sweep_direction` + `sweep_direction_source` ∈
 the pulse's own CHA/DCH polarity. A bundle that reverses mid-sweep is **not**
 split: `_bundle_direction` reports the excursion as `reversal_mV` and warns.
 
+**SOC from the step charge** (`util/soc_from_steps.py`) — the **primary** SOC
+source, with the qOCV mapping below as fallback. A sweep moves the cell one
+step, then measures it, and the measurement is an **EIS block** (one or more
+consecutive `EIS` segments) sitting *directly* behind the step that set the SOC.
+So the ladder is built on the EIS blocks — each block's step is the segment
+immediately before it — and **every pulse holds the SOC of the last block at or
+before its procedure number**, until the next block starts. Anchoring on the
+blocks is what makes it robust: the segment literally one before a *pulse* is a
+`PAU`, and the nearest charge-moving segment before one can be that plateau's
+own earlier test pulse (NFPP BM22 splits `22_33`/`22_39` across six procedure
+numbers), which would book a pulse's charge as a SOC step. Each block keeps its
+**own measured** step — freezing one scalar would reinstate the equal-step
+assumption this exists to remove. A coulomb count gives *differences* only, so
+the ladder is anchored at a rail (discharge → 100 %, charge → 0 %); the first
+block's own predecessor is the setup charge and is ignored. Needs GOLD (read
+from the characterization export root by `fit_characterization.load_step_table`,
+for `ID` + `Ah_throughput` + `target`) and **≥ 2 EIS blocks** — one block
+measures no step, and would pin a whole program to a flat 100 %, so those
+programs (the capacity/qOCV ones carrying a single EIS marker, e.g. NFPP BM19)
+fall back. `export_eis` carries the matched anchor's `ID` into the bundle as
+`segment_ID`; **bundles exported before that column fall back to qOCV**, so
+re-export to use this. `settings.bundles[]` records `soc_source`,
+`n_eis_blocks`, `step_pct_{mean,min,max}`, `soc_span_pct`, `capacity_ref_ah`
+(the bundle's measured capacity, from its `<SOH>SOH` filename token).
+Verified on `J8049_Namey_NFPP_28Ah_02` BM22: 21 blocks, all 21 EIS measurements
+and all 40 pulses resolved. **The step is only as good as `Ah_throughput`** — on
+a BRONZE built before the per-file throughput fix the steps read **2.504 %**
+where the protocol says 5 %, and the sweep spans 50.08 % instead of 100 %. The
+qOCV mapping cross-checks this independently: depth ratio 1.96–2.00 over the
+sweep, i.e. exactly the ×1.999 dilution (it drifts to 2.6 on the top three
+points, where the flat qOCV curve makes the *voltage* lookup imprecise). Rebuild
+BRONZE rather than rescaling here.
+
 **SOC from the qOCV curve** (`util/soc_from_qocv.py` — in `util/`, not
 `analysis/`, so *every* module can reach it without re-deriving SOC; the
 loading/coulomb-count primitives it needs live beside it in `util/io_qocv.py`
 and are re-exported by `analysis/qocv_curve.py`, keeping `util` free of any
 dependency on `analysis`). **Use `assign_soc(table, voltage_col, direction,
 data_dir, …)`** — the one-call form of `find_sweeps` + `map_table` — rather
-than writing an SOC assignment of your own. It is the **only** source
-of SOC. The order-based **ladder** (`100 − 5·i` by measurement index) has been
+than writing an SOC assignment of your own. It is the **fallback** source of
+SOC, used where the step count above cannot run (no GOLD, no `segment_ID`,
+< 2 EIS blocks); between them these two are the only sources, and
+`soc_source` in `settings.bundles[]` always says which one ran, so a fallback is
+never mistaken for a step measurement. The order-based **ladder** (`100 − 5·i`
+by measurement index) has been
 **removed** from `eis_vs_soc.build_eis_table` and `pulse_fit.assign_pulse_soc`,
 which now leave `SOC_pct` NaN for this module to fill. It assumed every step
 moved the same charge, and was wrong twice over: the measured voltages

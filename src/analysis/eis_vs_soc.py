@@ -722,8 +722,10 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
         # No order-based SOC ladder: `100 - step * i` assumes every step moved
         # the same charge, which the measured voltages contradict (the first
         # NFPP step drops 155 mV, the next ones ~15 mV, all labelled "5 %").
-        # SOC is measured from the run's own qOCV curve
-        # (`util/soc_from_qocv.py`) using each measurement's own U.
+        # SOC is measured downstream — by counting the charge of the SOC-adjust
+        # step in front of each measurement (`util/soc_from_steps.py`), falling
+        # back to the run's own qOCV curve (`util/soc_from_qocv.py`) and this
+        # measurement's own U.
         feat.update(
             {
                 "eis_number": eid,
@@ -732,11 +734,16 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
                 "Time": spec["Time"].min(),
             }
         )
+        if "segment_ID" in spec.columns:
+            # The GOLD segment this spectrum was measured in, written by
+            # `output.export_eis`. `util.soc_from_steps` reads the segment one
+            # procedure number earlier to get the step that set this SOC.
+            feat["segment_ID"] = str(spec["segment_ID"].iloc[0])
         rows.append(feat)
     out = pd.DataFrame(rows)
     logging.info(
         "eis_vs_soc: %d measurements (%s sweep) — SOC_pct left NaN, filled "
-        "from the qOCV curve",
+        "from the step charge (or the qOCV curve)",
         len(out), direction,
     )
     return out

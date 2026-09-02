@@ -228,16 +228,20 @@ def fetch_eis_bytes(client, cfg: dict, object_name: str) -> bytes:
         response.release_conn()
 
 
-def match_spectra_to_programs(metas, anchors, tol_minutes: float):
-    """Map each measurement to a ``BM_Programm`` by nearest anchor time.
+def match_spectra_to_anchors(metas, anchors, tol_minutes: float):
+    """Map each measurement to its nearest EIS-labelled segment in time.
 
     ``metas`` is a list of per-measurement dicts (from :func:`load_eis_spectrum`)
-    carrying ``meas_time``. ``anchors`` is a DataFrame with ``BM_Programm`` and a
-    ``Time`` column describing the cell's EIS-labeled segments. Each measurement
-    is assigned the ``BM_Programm`` of the nearest anchor within
-    ``tol_minutes``; unmatched measurements map to ``None``.
+    carrying ``meas_time``. ``anchors`` is a DataFrame describing the cell's
+    EIS-labeled segments, with a ``Time`` column and whatever else the caller
+    wants back (``BM_Programm``, ``ID``, …). Each measurement takes the nearest
+    anchor within ``tol_minutes``.
 
-    Returns a list of ``BM_Programm`` (or ``None``) aligned with ``metas``.
+    Returns a list aligned with ``metas`` of the matched anchor **row** as a
+    dict, or ``None`` where nothing matched. The caller reads ``BM_Programm``
+    off it to bundle the spectrum, and the segment ``ID`` to record where the
+    measurement sat in the timeline — which is what ``util.soc_from_steps``
+    needs to find the SOC-adjust step in front of it.
     """
     if anchors is None or anchors.empty:
         return [None] * len(metas)
@@ -256,5 +260,5 @@ def match_spectra_to_programs(metas, anchors, tol_minutes: float):
             continue
         delta = (a["Time"] - t).abs()
         i = int(delta.values.argmin())
-        out.append(a.iloc[i]["BM_Programm"] if delta.iloc[i] <= tol else None)
+        out.append(a.iloc[i].to_dict() if delta.iloc[i] <= tol else None)
     return out

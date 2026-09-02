@@ -47,11 +47,11 @@ import numpy as np
 import pandas as pd
 
 from analysis import eis_drt, eis_vs_soc, qocv_curve
-from util import soc_from_qocv
+from util import soc_from_qocv, soc_from_steps
 from analysis import sweep_direction as sweep_direction_mod
 from characterize import pulse_fit
 from main import load_config
-from util import io_router
+from util import io_qocv, io_router
 from util.run_context import CHARACTERIZATION
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -254,7 +254,8 @@ def _pulse_cell_stem(file_name: str) -> str:
     return m.group(1) if m else stem
 
 
-def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = None) -> dict:
+def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float,
+              cfg: dict = None, steps: pd.DataFrame = None) -> dict:
     """2RC fit of every pulse bundle in ``data_dir``.
 
     Uses ``characterize.pulse_fit``'s full-SOC-sweep schema
@@ -311,13 +312,21 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
         return block
 
     bundle_diags = assignment.get("bundles", [])
+    # Step charge first (a direct measurement of what moved between plateaus),
+    # the qOCV curve for whatever it could not resolve.
+    results, stepped_bms = _map_pulse_soc_from_steps(
+        results, steps, bundle_diags, files, nom_capacity
+    )
     results = _map_pulse_soc_from_qocv(
-        results, data_dir, files, bundle_diags, ir_ohm=cfg.get("qocv_ir_ohm")
+        results, data_dir, files, bundle_diags, ir_ohm=cfg.get("qocv_ir_ohm"),
+        skip_bms=stepped_bms,
     )
 
     block["settings"] = {
-        "mode": "full-SOC-sweep — SOC_pct mapped on the same-direction qOCV "
-                "curve (the order-based ladder was removed); not the "
+        "mode": "full-SOC-sweep — SOC_pct counted from the charge of the "
+                "SOC-adjust step before each EIS block and held over the "
+                "pulses that follow it, falling back to the same-direction "
+                "qOCV curve (the order-based ladder was removed); not the "
                 "90/50/10 aging-checkup schema",
         "soc_step_pct": step,
         "soc_direction_override": override,
@@ -400,6 +409,55 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float, cfg: dict = No
     return block
 
 
+def load_step_table(cell_dir: str) -> pd.DataFrame:
+    """Per-segment step charge from the run's ``GOLD.parquet``, or empty.
+
+    GOLD sits one level above ``data/`` in the characterization export root, so
+    the fit stage can read the segment IDs and ``Ah_throughput`` it needs for
+    the step-counted SOC without re-running the pipeline. An absent or unusable
+    GOLD is not an error — the SOC falls back to the qOCV mapping, which works
+    from the bundle parquets alone.
+    """
+    path = os.path.join(cell_dir, "GOLD.parquet")
+    if not os.path.exists(path):
+        logging.info(
+            "no GOLD.parquet in %s — SOC falls back to the qOCV mapping", cell_dir
+        )
+        return pd.DataFrame()
+    try:
+        cols = ["ID", "Current", "Ah_throughput", "target"]
+        gold = pd.read_parquet(path, columns=cols)
+    except Exception as exc:
+        logging.warning(
+            "GOLD.parquet in %s unreadable (%s) — SOC falls back to the qOCV "
+            "mapping", cell_dir, exc,
+        )
+        return pd.DataFrame()
+    return soc_from_steps.segment_steps(gold)
+
+
+def _bundle_capacity(name: str, nom_capacity: float) -> float:
+    """The bundle's own measured capacity, from the ``<SOH>SOH`` filename token.
+
+    The step count needs the capacity the SOC percentages are *of*, which is the
+    measured capacity at that check-up, not the nominal one. It is already in
+    the filename (``export_pulse``/``export_eis`` write
+    ``SOH = Capacity_py / nom * 100``), so no extra file has to be read back.
+    SOH is stored to 1 dp, which on a 28 Ah cell is 0.028 Ah — a 0.1 % SOC
+    rounding, well below the step sizes this resolves. Falls back to nominal
+    when the token is NA.
+    """
+    # _parse_soh returns the token as a string ("99.0", or "NA" when the export
+    # found no CAP segment for that program).
+    soh = pd.to_numeric(
+        pulse_fit._parse_soh(os.path.splitext(os.path.basename(name))[0]),
+        errors="coerce",
+    )
+    if pd.isna(soh) or soh <= 0:
+        return nom_capacity
+    return nom_capacity * float(soh) / 100.0
+
+
 def _bundle_start_times(files: list) -> dict:
     """``BM_Programm -> earliest Time`` for each pulse bundle file.
 
@@ -421,22 +479,96 @@ def _bundle_start_times(files: list) -> dict:
     return times
 
 
+#: What ``soc_source`` reads when the step count supplied the SOC.
+STEP_SOC_SOURCE = "coulomb count of the SOC-adjust step before each EIS block"
+
+
+def _bundle_step_soc(steps, bm: int, direction: str, capacity: float,
+                     label: str):
+    """The program's EIS blocks with a SOC on each, plus diagnostics."""
+    blocks = soc_from_steps.eis_blocks(steps, bm)
+    return soc_from_steps.block_soc(blocks, direction, capacity, label=label)
+
+
+def _map_pulse_soc_from_steps(results, steps, bundle_diags: list,
+                              files: list, nom_capacity: float):
+    """Per BM_Programm, hold each EIS block's step-counted SOC over its pulses.
+
+    The pulses between one EIS block and the next were all measured at the SOC
+    that block sits at — the steps happen in front of the blocks, not between
+    the pulses. So the SOC comes from the block ladder and each pulse simply
+    takes the last block at or before its own procedure number. Pulses ahead of
+    the first block are on the setup ramp, not the sweep, and stay NaN.
+
+    Returns ``(results, filled_bms)`` — the BM_Programms whose SOC was set, so
+    the caller can send only the rest to the qOCV mapping.
+    """
+    filled = set()
+    if steps is None or steps.empty or "ID" not in results.columns:
+        return results, filled
+
+    capacity_by_bm = {
+        io_qocv._parse_bm(os.path.basename(f)): _bundle_capacity(f, nom_capacity)
+        for f in files
+        if io_qocv._parse_bm(os.path.basename(f)) is not None
+    }
+    diag_by_bm = {d.get("BM_Programm"): d for d in bundle_diags}
+
+    out = []
+    for bm, group in results.groupby("BM_Programm", sort=False):
+        group = group.copy()
+        direction = str(group["sweep_direction"].iloc[0])
+        label = f"pulse BM{int(bm)}"
+        blocks, info = _bundle_step_soc(
+            steps, int(bm), direction,
+            capacity_by_bm.get(int(bm), nom_capacity), label,
+        )
+        n = soc_from_steps.assign_pulse_soc(group, blocks)
+        if n:
+            info["soc_source"] = STEP_SOC_SOURCE
+            info["sweep_direction"] = direction
+            info["n_pulses_from_steps"] = n
+            diag_by_bm.get(int(bm), {}).update(info)
+            filled.add(int(bm))
+            logging.info(
+                "%s: SOC held from %d EIS block(s) over %d of %d pulses "
+                "(mean step %.3f %%)",
+                label, info.get("n_eis_blocks", 0), n, len(group),
+                info.get("step_pct_mean") or float("nan"),
+            )
+        else:
+            logging.info(
+                "%s: no step-counted SOC (%s) — falling back to the qOCV curve",
+                label, info.get("reason", "no EIS block matched a pulse"),
+            )
+        out.append(group)
+    return (pd.concat(out, ignore_index=True) if out else results), filled
+
+
 def _map_pulse_soc_from_qocv(results, data_dir: str, files: list,
-                             bundle_diags: list, ir_ohm: float = None):
+                             bundle_diags: list, ir_ohm: float = None,
+                             skip_bms: set = None):
     """Per BM_Programm, remap ``SOC_pct`` onto the same-direction qOCV curve.
 
     Each bundle's own detected ``sweep_direction`` picks the branch, and its
     start time picks the nearest qOCV sweep. Diagnostics are merged into the
     matching entry of ``bundle_diags`` so ``parameters.json`` records which
     qOCV file every SOC came from.
+
+    ``skip_bms`` are the programs whose SOC the step count already measured;
+    they are left alone so a fallback never overwrites a measurement.
     """
+    skip_bms = skip_bms or set()
+    if "sweep_direction" not in results.columns:
+        return results
+    if all(int(bm) in skip_bms for bm in results["BM_Programm"].dropna().unique()):
+        return results
+
     sweeps = soc_from_qocv.find_sweeps(data_dir)
     if not sweeps:
         logging.warning(
             "no qOCV export in %s — pulse SOC_pct stays NaN", data_dir
         )
-        return results
-    if "sweep_direction" not in results.columns:
         return results
 
     start_times = _bundle_start_times(files)
@@ -445,6 +577,9 @@ def _map_pulse_soc_from_qocv(results, data_dir: str, files: list,
     out = []
     for bm, group in results.groupby("BM_Programm", sort=False):
         group = group.copy()
+        if int(bm) in skip_bms:
+            out.append(group)
+            continue
         direction = str(group["sweep_direction"].iloc[0])
         diag = soc_from_qocv.map_table(
             group, "OCV_V", direction, sweeps,
@@ -582,7 +717,8 @@ def _eis_bundle_temperature(name: str, bundle_df: pd.DataFrame,
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             soc_step_pct: float = None, ir_ohm: float = None,
             two_stage_r0: bool = True, hf_f_min: float = None,
-            drt: bool = True, drt_lambda: float = None) -> dict:
+            drt: bool = True, drt_lambda: float = None,
+            steps: pd.DataFrame = None, nom_capacity: float = None) -> dict:
     """2×ZARC + generalized-Warburg fit of every spectrum in every bundle.
 
     Direction is **detected per bundle** from its own per-measurement terminal
@@ -600,6 +736,10 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     ``two_stage_r0`` (config ``eis_two_stage_r0``) measures R0 on the
     high-frequency window and pins it, instead of fitting it against the
     correlated mid-frequency arc — see :func:`analysis.eis_vs_soc.fit_hf_r0`.
+
+    ``steps`` is the GOLD step table from :func:`load_step_table`; with it, SOC
+    is counted from the charge each SOC-adjust step moved, and the qOCV mapping
+    is the fallback. Pass ``None`` to use the qOCV mapping alone.
     """
     override = _normalize_sweep_direction(soc_direction) if soc_direction is not None else None
     step = float(soc_step_pct) if soc_step_pct is not None else eis_vs_soc.SOC_SWEEP_STEP_PCT
@@ -689,13 +829,41 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             table["T_degC"] = temp
             diag["temperature_degC"] = _jsonable(temp)
             diag["temperature_source"] = temp_source
-            # Replace the order-based SOC ladder with the measured qOCV curve
-            # of the same direction; SOC_pct is NaN until this runs.
-            diag.update(soc_from_qocv.map_table(
-                table, "U", direction, qocv_sweeps,
-                t_ref=table["Time"].min() if "Time" in table.columns else None,
-                label=f"EIS {name}", ir_ohm=ir_ohm,
-            ))
+            # SOC_pct is NaN until one of these fills it. Count the charge of
+            # the SOC-adjust step in front of each measurement first — a direct
+            # measurement of what moved — and fall back to interpolating the
+            # rest voltage onto the same-direction qOCV curve when the step
+            # chain is unavailable (no GOLD, no segment_ID, a broken chain).
+            bm = io_qocv._parse_bm(name)
+            n_stepped = 0
+            if steps is not None and not steps.empty and bm is not None:
+                blocks, sinfo = _bundle_step_soc(
+                    steps, bm, direction,
+                    _bundle_capacity(name, nom_capacity), f"EIS {name}",
+                )
+                n_stepped = soc_from_steps.assign_eis_soc(table, blocks)
+                if n_stepped:
+                    sinfo["soc_source"] = STEP_SOC_SOURCE
+                    sinfo["n_measurements_from_steps"] = n_stepped
+                    diag.update(sinfo)
+                    logging.info(
+                        "EIS %s: SOC from step charge — %d of %d measurements, "
+                        "%.1f–%.1f%% (mean step %.3f %%)",
+                        name, n_stepped, len(table),
+                        float(table["SOC_pct"].min()), float(table["SOC_pct"].max()),
+                        sinfo.get("step_pct_mean") or float("nan"),
+                    )
+                else:
+                    logging.info(
+                        "EIS %s: no step-counted SOC (%s) — falling back to the "
+                        "qOCV curve", name, sinfo.get("reason", "no block matched"),
+                    )
+            if not n_stepped:
+                diag.update(soc_from_qocv.map_table(
+                    table, "U", direction, qocv_sweeps,
+                    t_ref=table["Time"].min() if "Time" in table.columns else None,
+                    label=f"EIS {name}", ir_ohm=ir_ohm,
+                ))
             raw_by_source[name] = bundle_df
             tables.append(table)
             bundle_diag.append(diag)
@@ -745,6 +913,10 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
 
     plots = []
     drt_peaks = []
+    # `_bundle_direction` keys each bundle's diagnostics by its file name, which
+    # is what `combined` groups on — so the DRT can be told which SOC source the
+    # fits used rather than guessing.
+    diag_by_source = {d.get("source"): d for d in bundle_diag}
     for source, group in combined.groupby("source", sort=False):
         stem = os.path.splitext(str(source))[0]
         direction = group["sweep_direction"].iloc[0]
@@ -761,7 +933,8 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         # is all-NaN and they would draw an empty axis instead of failing.
         if group["SOC_pct"].isna().all():
             logging.warning(
-                "%s: no SOC (no qOCV mapping) — skipping the vs-SOC plots", source
+                "%s: no SOC (neither the step charge nor a qOCV mapping "
+                "resolved one) — skipping the vs-SOC plots", source
             )
             plots.append({
                 "source": source, "sweep_direction": direction,
@@ -803,16 +976,22 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         # Model-free DRT of the same bundle. It answers a question the ECM
         # cannot ask of itself — how many relaxation processes are in the
         # spectrum at all — so it is worth having beside every fit rather than
-        # only when someone remembers to run the standalone CLI. `data_dir`
-        # gives it the same qOCV SOC the fits use, and `group` supplies the
-        # fitted τ so the two are overlaid on one axis: an ECM τ sitting in a
-        # DRT *valley* (rather than on a peak) is the signature of one element
-        # blanketing a region with more structure than it has parameters for.
+        # only when someone remembers to run the standalone CLI. It is handed
+        # the SOC this bundle's fits are already using — whether that came from
+        # the step charge or the qOCV curve — because a DRT panel and the
+        # eis_fits.csv row beside it must never disagree about which SOC a
+        # spectrum was measured at; letting it re-derive its own is exactly how
+        # they would. `group` supplies the fitted τ so the two are overlaid on
+        # one axis: an ECM τ sitting in a DRT *valley* (rather than on a peak)
+        # is the signature of one element blanketing a region with more
+        # structure than it has parameters for.
         if not drt:
             continue
         try:
             curves, peaks, meta, _ = eis_drt.run_bundle(
                 raw_df, lam=drt_lambda, data_dir=data_dir, ir_ohm=ir_ohm,
+                soc_by_eid=dict(zip(group["eis_number"], group["SOC_pct"])),
+                soc_source=diag_by_source.get(source, {}).get("soc_source"),
             )
         except Exception as exc:
             logging.warning("DRT failed for %s: %s", source, exc)
@@ -929,8 +1108,14 @@ def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "nom_capacity": nom_capacity,
     }
+    # Segment step charges, read once from GOLD and shared by both blocks —
+    # pulse and EIS measure the same sweep and must agree about its SOC axis.
+    steps = load_step_table(cell_dir)
+
     if "pulse" in parts:
-        payload["pulse"] = fit_pulse(data_dir, plots_dir, nom_capacity, cfg=cfg)
+        payload["pulse"] = fit_pulse(
+            data_dir, plots_dir, nom_capacity, cfg=cfg, steps=steps
+        )
     if "eis" in parts:
         payload["eis"] = fit_eis(
             data_dir, plots_dir,
@@ -941,6 +1126,7 @@ def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
             hf_f_min=cfg.get("eis_hf_r0_f_min_hz"),
             drt=cfg.get("eis_drt", True),
             drt_lambda=cfg.get("eis_drt_lambda"),
+            steps=steps, nom_capacity=nom_capacity,
         )
     if "qocv" in parts:
         payload["qocv"] = summarize_qocv(data_dir, plots_dir, nom_capacity)

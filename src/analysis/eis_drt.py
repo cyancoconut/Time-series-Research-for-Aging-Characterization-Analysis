@@ -160,19 +160,25 @@ def drt_peaks(tau, gamma, rel_height=0.05):
 
 
 def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None,
-               data_dir=None, ir_ohm=None):
+               data_dir=None, ir_ohm=None, soc_by_eid=None, soc_source=None):
     """DRT for every spectrum in a bundle. Returns ``(curves, peaks, meta)``.
 
-    ``SOC_pct`` comes from the run's own qOCV curve via
-    :func:`util.soc_from_qocv.assign_soc` when ``data_dir`` is given — the same
-    single source the ECM fits use, so a DRT panel and an ``eis_fits.csv`` row
-    can never disagree about which SOC a spectrum was measured at.
+    ``soc_by_eid`` is the SOC the caller **already** assigned, keyed by
+    ``eis_number``. Pass it whenever one exists: a DRT panel and the
+    ``eis_fits.csv`` row beside it must never disagree about which SOC a
+    spectrum was measured at, and re-deriving SOC here is how they come to
+    disagree — ``fit_eis`` now measures it from the step charge
+    (:mod:`util.soc_from_steps`) while this function only knows how to ask the
+    qOCV curve.
 
-    Without ``data_dir`` (or with no qOCV export in it) SOC falls back to the
-    order-based ladder ``100 - step * i``, which is **wrong whenever the steps
-    moved unequal charge** — it is kept only so the CLI still labels its panels
-    with something. ``meta["soc_source"]`` records which of the two was used;
-    check it before quoting a SOC off a DRT plot.
+    Failing that, and when ``data_dir`` is given, SOC is mapped onto the run's
+    own qOCV curve via :func:`util.soc_from_qocv.assign_soc`.
+
+    Failing both, SOC falls back to the order-based ladder ``100 - step * i``,
+    which is **wrong whenever the steps moved unequal charge** — it is kept only
+    so the CLI still labels its panels with something. ``meta["soc_source"]``
+    records which of the three was used; check it before quoting a SOC off a DRT
+    plot.
     """
     from analysis.eis_vs_soc import SOC_SWEEP_DIRECTION, SOC_SWEEP_STEP_PCT
     from util import soc_from_qocv
@@ -181,9 +187,14 @@ def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None,
     step = SOC_SWEEP_STEP_PCT if step is None else step
     order = df.groupby("eis_number")["Time"].min().sort_values().index.tolist()
 
-    # One rest voltage per measurement -> qOCV SOC, in bundle time order.
-    soc_by_eid, soc_source = {}, "ladder (100 - step*i) — NOT measured"
-    if data_dir:
+    if soc_by_eid:
+        soc_by_eid = {k: v for k, v in soc_by_eid.items() if pd.notna(v)}
+    if soc_by_eid:
+        soc_source = soc_source or "supplied by caller"
+    else:
+        # One rest voltage per measurement -> qOCV SOC, in bundle time order.
+        soc_by_eid, soc_source = {}, "ladder (100 - step*i) — NOT measured"
+    if not soc_by_eid and data_dir:
         u = (df.groupby("eis_number")
                .agg(U=("U", "mean"), Time=("Time", "min"))
                .reindex(order).reset_index())
