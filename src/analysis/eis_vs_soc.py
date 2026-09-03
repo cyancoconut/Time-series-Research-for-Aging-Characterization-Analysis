@@ -385,6 +385,35 @@ DIFFUSION_TAU_BOX = (5.0, 5.0)
 #: wide enough to be informative without letting φ absorb arbitrary residual.
 DIFFUSION_PHI_BOX = (0.2, 0.9)
 
+#: Clearance, in decades, between the slowest a ZARC branch may be and the
+#: pinned diffusion τ. The ZARC and diffusion τ boxes are supposed to be
+#: **disjoint** so the two elements cannot trade roles — but capping the ZARC
+#: box at ``DIFFUSION_TAU_BOX[0]`` exactly makes them *touch*, which is not the
+#: same thing. A slow branch then walks to the top of its box and sits on τ_d
+#: absorbing the Warburg: on an NFPP sweep that showed up as ``tau2_z`` = 5.000
+#: s with ``alpha2_z`` pinned to 1.0 (an ideal RC, i.e. no arc at all) on every
+#: two-branch spectrum, all flagged degenerate. 0.7 decades (factor ~5, so
+#: τ_d = 5 s → a 1 s ceiling) separates them properly.
+#:
+#: The same margin governs which DRT peaks count as arcs
+#: (:func:`analysis.eis_drt.select_model_order` via :func:`zarc_tau_box`), so a
+#: peak is never counted as a branch the fit has no box to put it in.
+ZARC_DIFFUSION_MARGIN_DECADES = 0.7
+
+
+def zarc_tau_box(f_min: float, f_max: float) -> tuple:
+    """``(lo, hi)`` bounds for a ZARC τ: the resolvable band, clear of τ_d.
+
+    ``lo``/``hi`` extend half a decade past the measured band — outside it the
+    data constrains nothing — and ``hi`` is additionally held
+    :data:`ZARC_DIFFUSION_MARGIN_DECADES` below the pinned diffusion τ so a
+    kinetic branch cannot merge with the Warburg.
+    """
+    lo = 1.0 / (2 * np.pi * float(f_max)) / 3.0
+    hi = min(1.0 / (2 * np.pi * float(f_min)) * 3.0,
+             DIFFUSION_TAU_BOX[0] / 10 ** ZARC_DIFFUSION_MARGIN_DECADES)
+    return lo, hi
+
 #: Diffusion element for the 2×ZARC fit. Read by both the fit and the overlay
 #: plot so the drawn curve always matches the fitted one.
 #:
@@ -623,8 +652,7 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     # Capped at the diffusion box floor so the two boxes stay **disjoint** —
     # overlap is what lets the slow ZARC and the diffusion branch trade roles.
     td_lo, td_hi = DIFFUSION_TAU_BOX
-    tz_lo = 1.0 / (2 * np.pi * f.max()) / 3.0
-    tz_hi = min(1.0 / (2 * np.pi * f.min()) * 3.0, td_lo)
+    tz_lo, tz_hi = zarc_tau_box(f.min(), f.max())
 
     # Seeds. ``seed`` is only populated when a caller still runs the old 2RC /
     # 2RC+W ladder (the impedance.py comparison script); the pipeline no longer
@@ -764,6 +792,63 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
                                  element=element, pin_r0=pin_r0)
 
 
+#: How much worse (fractionally) a one-branch-simpler fit's RMSE may be and
+#: still be preferred, when the richer fit came back **degenerate**. A
+#: degenerate branch is by definition one the data does not constrain — it has
+#: pinned α to a bound, run its τ to the edge of the box, or split one arc into
+#: two near-identical ones — so a small RMSE gain bought that way is fitting
+#: noise, not structure. 25 % is loose enough that a branch which genuinely
+#: helps still survives.
+ZARC_PARSIMONY_RMSE_TOLERANCE = 0.25
+
+
+def fit_zarc_with_parsimony(spec: pd.DataFrame, n_zarc: int = 2,
+                            tau_seeds=None, **kw) -> dict:
+    """:func:`fit_nzarc_warburg_eis`, dropping a branch that earns nothing.
+
+    The DRT peak count is a good proposal but not a proof: a dispersive
+    Warburg (φ < 0.5) deposits γ mass *inside* the ZARC τ box, and that mass
+    can be both large (41 % of the in-band peak area on a synthetic
+    single-arc + big-diffusion spectrum) and **narrower** than the real arc, so
+    neither an area threshold nor a width test separates it from a genuine
+    second process. What does separate them is what the ECM makes of it: fitted
+    a branch it doesn't need, the model comes back **degenerate** — α pinned to
+    a bound, τ on the edge of its box, or one arc split into two near-identical
+    ones.
+
+    So: fit at ``n_zarc``; if that is degenerate and ``n_zarc > 1``, fit again
+    one branch simpler and keep the simpler result unless the richer one is
+    both non-degenerate *or* materially better
+    (:data:`ZARC_PARSIMONY_RMSE_TOLERANCE`). Adds one solve only on the
+    spectra that actually hit the degenerate path.
+
+    ``n_zarc_requested`` records what was asked for, ``n_zarc`` what was kept.
+    """
+    out = fit_nzarc_warburg_eis(spec, n_zarc=n_zarc, tau_seeds=tau_seeds, **kw)
+    out["n_zarc_requested"] = int(n_zarc)
+    if n_zarc <= 1 or not out.get("zarc_degenerate"):
+        return out
+
+    simpler = fit_nzarc_warburg_eis(spec, n_zarc=n_zarc - 1,
+                                    tau_seeds=(tau_seeds or [])[: n_zarc - 1],
+                                    **kw)
+    simpler["n_zarc_requested"] = int(n_zarc)
+    r_full, r_simple = out.get("zarc_rmse"), simpler.get("zarc_rmse")
+    if not np.isfinite(r_simple):
+        return out
+    # Keep the richer fit only if the extra branch bought a real improvement;
+    # it is degenerate either way, so it has to earn its place on residual.
+    if np.isfinite(r_full) and r_full < r_simple / (1 + ZARC_PARSIMONY_RMSE_TOLERANCE):
+        return out
+    logging.info(
+        "ZARC fit: %d branches came back degenerate (rmse %.4g) — keeping %d "
+        "(rmse %.4g, degenerate=%s)",
+        n_zarc, r_full if np.isfinite(r_full) else float("nan"),
+        n_zarc - 1, r_simple, simpler.get("zarc_degenerate"),
+    )
+    return simpler
+
+
 def build_eis_table(df: pd.DataFrame, direction=None, step=None,
                     fit_zarc=True, two_stage_r0=True, hf_f_min=None,
                     n_zarc=2, tau_seeds_by_eid=None) -> pd.DataFrame:
@@ -818,7 +903,7 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
         if fit_zarc:
             n_i = (n_zarc.get(eid, ZARC_COLUMN_SLOTS)
                    if isinstance(n_zarc, dict) else n_zarc)
-            feat.update(fit_nzarc_warburg_eis(
+            feat.update(fit_zarc_with_parsimony(
                 spec, n_zarc=n_i, tau_seeds=tau_seeds_by_eid.get(eid),
                 r_tot0=feat["R_tot"], pin_r0=pin))
         # No order-based SOC ladder: `100 - step * i` assumes every step moved

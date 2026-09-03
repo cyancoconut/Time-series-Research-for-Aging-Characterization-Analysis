@@ -215,6 +215,28 @@ spectrum falls back to 2. Column slots are fixed at `ZARC_COLUMN_SLOTS`=2
 whatever N is, so a one-arc spectrum leaves `R2_z`/`tau2_z`/`alpha2_z` NaN
 rather than changing the CSV schema.
 
+**The ZARC and diffusion τ boxes must not touch.** `tz_hi` used to be
+`min(3/(2πf_min), DIFFUSION_TAU_BOX[0])`, i.e. capped at τ_d **exactly** — so
+the two boxes touched rather than being disjoint, despite both the docstring
+and this file claiming otherwise. A slow branch then walked to the top of its
+box and sat on τ_d absorbing the Warburg: on an NFPP sweep that read
+`tau2_z` = 5.000 s with `alpha2_z` pinned to 1.0 (an ideal RC — no arc at all)
+on *every* two-branch spectrum, all flagged degenerate. `zarc_tau_box()` now
+holds the ceiling `ZARC_DIFFUSION_MARGIN_DECADES` (0.7 dec, factor ~5 → a 1 s
+ceiling) below τ_d, and is the single source of truth for both the fit's box
+and the DRT's arc band — so a peak is never counted as a branch the ECM has
+nowhere to put.
+
+**Parsimony guard** (`fit_zarc_with_parsimony`, `ZARC_PARSIMONY_RMSE_TOLERANCE`
+0.25) — the DRT peak count is a proposal, not a proof. A dispersive Warburg
+deposits γ mass *inside* the ZARC box that is both large (41 % of the in-band
+peak area on a synthetic single-arc + big-diffusion spectrum) and **narrower**
+than the real arc, so neither an area threshold nor a width test separates it
+from a real process. What does is what the ECM makes of it: an unneeded branch
+comes back **degenerate**. So a degenerate N-branch fit is refitted at N−1 and
+the simpler result kept unless the richer one is materially better on RMSE.
+Costs one extra solve only on spectra that hit that path.
+
 **The diffusion margin is not cosmetic.** A generalized Warburg with φ < 0.5 is
 dispersive, not purely blocking, so it deposits real γ mass *below* its own τ_d
 rather than only in the blocking tail the DRT's series `C_blk` absorbs. Cutting
@@ -308,6 +330,23 @@ inductance, so never compare it across setups. `f_cross_Hz` is exported beside
 it so this is checkable from the CSV. `R_pol = R_tot − R_cross` inherits the
 same bias with the opposite sign and **understates** polarisation.
 For the series resistance use `R0_z`, or `R0_hf` under `eis_two_stage_r0`.
+
+**Open — `fit_hf_r0` omits the diffusion branch.** The HF stage models the
+window as `R0 + jωL + one ZARC` only, but a generalized Warburg falls off as
+ω^−φ with φ ≈ 0.37, so it still contributes real part at the top of the sweep —
+**0.093 mΩ at 6 kHz** on a synthetic NFPP-shaped spectrum. R0 absorbs it and
+comes out biased by **−0.098 mΩ** (matching that number almost exactly). The
+ZARC branches must then make up the missing 0.098 mΩ: one branch cannot without
+wrecking the arc (rmse 0.0135), so two split into a fake near-identical pair
+(τ 2.2e-4 / 3.4e-4 s) and score 4× better (0.0034) — RMSE genuinely *prefers*
+the degenerate fit, which is why the parsimony guard cannot override it. With
+R0 unpinned the same spectrum fits perfectly at either N and is not degenerate.
+**Prototyped fix**: carry the diffusion branch in the HF stage (τ_d pinned,
+`R_d`/φ free) — R0 recovers to 1.0000 exactly, HF rmse → 0, degeneracy gone.
+Not applied: it shifts the validated #70 two-stage R0 on real data, and note
+this bias is *low* whereas the inductive-loss note below measures a ~2.3 %
+*high* bias on real spectra, so the two partly cancel and the net effect must
+be measured on a real sweep before changing it.
 
 **Open — SOC-dependent inductive loss.** The pure `jωL` series term is
 incomplete: with R0 and the arcs subtracted, `Re(residual)` at 6 kHz is

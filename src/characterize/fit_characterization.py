@@ -769,9 +769,12 @@ def _bundle_model_order(bundle_df: pd.DataFrame, name: str, drt: bool = True,
 
     seeds, n_by_eid = {}, {}
     for sol in solved:
+        # Ceiling = the fit's own ZARC τ box, so the DRT never asks for a
+        # branch the ECM has no room to place (which is how a slow branch ends
+        # up sitting on τ_d absorbing the Warburg).
         n_i, tau_i, _ = eis_drt.select_model_order(
             sol["peaks"], sol["f_min"], sol["f_max"],
-            tau_diffusion_floor=eis_vs_soc.DIFFUSION_TAU_BOX[0],
+            tau_max=eis_vs_soc.zarc_tau_box(sol["f_min"], sol["f_max"])[1],
         )
         seeds[sol["eis_number"]] = tau_i
         n_by_eid[sol["eis_number"]] = n_i
@@ -783,6 +786,7 @@ def _bundle_model_order(bundle_df: pd.DataFrame, name: str, drt: bool = True,
         "n_zarc_counts": {str(k): counts.count(k) for k in sorted(set(counts))},
         "drt_arc_min_r_fraction": eis_drt.ARC_MIN_R_FRACTION,
         "drt_tau_diffusion_floor_s": eis_vs_soc.DIFFUSION_TAU_BOX[0],
+        "zarc_tau_margin_decades": eis_vs_soc.ZARC_DIFFUSION_MARGIN_DECADES,
     }
     if len(set(counts)) > 1:
         logging.info(

@@ -172,21 +172,8 @@ ARC_MIN_R_FRACTION = 0.05
 #: 2/3 swap roles between adjacent SOC points).
 MAX_ZARC_BRANCHES = 2
 
-#: Decades of clearance a kinetic peak must keep below the pinned diffusion τ.
-#: **Not cosmetic.** A generalized Warburg with φ < 0.5 is dispersive, not
-#: purely blocking, so it deposits real γ mass well *below* its own τ_d rather
-#: than only at the blocking tail the DRT's series ``C_blk`` absorbs. Cutting
-#: the band at τ_d exactly counts that mass twice over: once as a spurious
-#: kinetic arc (the fit then parks the extra branch on the ZARC τ box edge,
-#: degenerate), and once in the denominator of the area test below, where it
-#: dilutes genuine small *fast* arcs under the threshold. 0.7 decades (a factor
-#: of ~5, so τ_d = 5 s → a 1 s ceiling) clears it on both the NFPP spectra and
-#: a synthetic single-ZARC + Warburg check.
-ARC_TAU_DIFFUSION_MARGIN_DECADES = 0.7
-
-
 def select_model_order(peaks: pd.DataFrame, f_min: float, f_max: float,
-                       tau_diffusion_floor: float = None,
+                       tau_max: float = None,
                        min_r_fraction: float = ARC_MIN_R_FRACTION,
                        max_branches: int = MAX_ZARC_BRANCHES) -> tuple:
     """How many ZARC branches this spectrum's DRT actually supports.
@@ -204,11 +191,15 @@ def select_model_order(peaks: pd.DataFrame, f_min: float, f_max: float,
       grid is padded half a decade past the sweep on both sides (see
       :data:`TAU_PAD_DECADES`) and the solver parks unidentifiable mass out
       there, so a peak in the pad is a property of the grid, not the cell;
-    * **faster than the diffusion floor, with margin** — anything within
-      :data:`ARC_TAU_DIFFUSION_MARGIN_DECADES` of ``tau_diffusion_floor`` (the
-      ECM's pinned τ_d) belongs to the Warburg branch, which is already in the
-      model, so counting it would buy a second element for one process — and
-      would also inflate the area denominator below, hiding real fast arcs;
+    * **inside the box the ECM could actually put a branch in** — ``tau_max``
+      defaults to :func:`analysis.eis_vs_soc.zarc_tau_box`'s ceiling, which is
+      held clear of the pinned diffusion τ. Slower mass belongs to the Warburg
+      branch, already in the model, so counting it would buy a second element
+      for one process — and would also inflate the area denominator below,
+      hiding real fast arcs. A generalized Warburg with φ < 0.5 is dispersive
+      rather than purely blocking, so it deposits real γ mass *below* its own
+      τ_d, not only in the tail the series ``C_blk`` absorbs — which is why the
+      ceiling needs the margin and not just ``τ_d`` itself;
     * **not a runt** — ``R_peak`` at least ``min_r_fraction`` of the total
       in-band peak area.
 
@@ -219,9 +210,14 @@ def select_model_order(peaks: pd.DataFrame, f_min: float, f_max: float,
     """
     tau_lo = 1.0 / (2 * np.pi * float(f_max))
     tau_hi = 1.0 / (2 * np.pi * float(f_min))
-    if tau_diffusion_floor is not None and np.isfinite(tau_diffusion_floor):
-        tau_hi = min(tau_hi, float(tau_diffusion_floor)
-                     / 10 ** ARC_TAU_DIFFUSION_MARGIN_DECADES)
+    if tau_max is None:
+        # Same box the fit will use, so a peak is never counted as a branch the
+        # ECM has nowhere to put. Imported lazily: eis_vs_soc does not depend
+        # on this module and must not be made to.
+        from analysis.eis_vs_soc import zarc_tau_box
+        tau_max = zarc_tau_box(f_min, f_max)[1]
+    if tau_max is not None and np.isfinite(tau_max):
+        tau_hi = min(tau_hi, float(tau_max))
 
     diag = {
         "tau_band_s": [float(tau_lo), float(tau_hi)],
