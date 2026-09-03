@@ -164,7 +164,7 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
 ├── <cell>_capacity.csv
 ├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
 └── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>_<T>degreeC.png
-            eis_{2zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>_<T>degreeC.png
+            eis_{zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>_<T>degreeC.png
             eis_drt_{gamma,map}_<stem>_<direction>_<T>degreeC.png
             qocv_<T>degreeC.png
 ```
@@ -188,15 +188,97 @@ cell-level number is never mistaken for a same-programme measurement. Bundles
 exported without a `Temperature` column still fit — `T_degC` is NaN.
 
 **Models are fixed defaults**, not config keys: **2RC** for pulse
-(`analysis/fit_2rc_pulse.py`), **2×ZARC + series-L + generalized Warburg** for
-EIS (`analysis/eis_vs_soc.fit_zarc_warburg_eis`), and no fit for qOCV (the
+(`analysis/fit_2rc_pulse.py`), **N×ZARC + series-L + generalized Warburg** for
+EIS (`analysis/eis_vs_soc.fit_nzarc_warburg_eis`), and no fit for qOCV (the
 curve plus its throughput capacities). The qOCV plot is two panels: the
 curve, and a **DVA** (`|dV/dQ|` vs SOC for both branches,
 `qocv_curve.differential_voltage` — V interpolated onto a uniform charge grid,
 Savitzky-Golay smoothed, then differentiated). Always drawn, no flag. Its y
 axis is scaled to the SOC 10–95 % interior because dV/dQ diverges into both
 voltage rails and would otherwise flatten the staging structure; the SOC axis
-is normalised against the full sweep so both panels line up. The EIS diffusion element has φ
+is normalised against the full sweep so both panels line up.
+
+**EIS branch count is decided by the fit, per spectrum** — `N` in `N×ZARC` is
+not fixed. Every spectrum starts at `ZARC_COLUMN_SLOTS` (2) and
+`fit_zarc_with_parsimony` refits at N−1 whenever the richer fit comes back
+**degenerate**, keeping the simpler result unless the richer one is better on
+RMSE by more than `ZARC_PARSIMONY_RMSE_TOLERANCE` (25 %). So one sweep can hold
+both 1- and 2-arc fits, and a second branch is never fitted against structure
+that isn't there (which is how α pins to a bound and two branches swap roles
+between adjacent SOC points). `n_zarc` is what was kept, `n_zarc_requested`
+what it started from. Column slots are fixed at 2 whatever N is, so a one-arc
+spectrum leaves `R2_z`/`tau2_z`/`alpha2_z` NaN rather than changing the CSV
+schema.
+
+Measured on two chemistries: **LFP** (A123 APR18650M1B, one merged arc) lands
+on N=1 on all 21 spectra with 0 degenerate; **NFPP** keeps N=2 on all 21 with 1
+degenerate, reproducing the pre-change committed fit to ~1e-5 relative on every
+parameter.
+
+**Counting DRT peaks was tried for this and dropped** (it was the first design).
+It cannot do the job: a dispersive Warburg deposits γ mass *inside* the ZARC τ
+box that is both large (41 % of the in-band peak area on a synthetic
+single-arc spectrum; 13–36 % on the LFP sweep) and **narrower** than the real
+arc — 0.10–0.42 decades against the true arc's 1.07–1.36 — so neither an area
+threshold nor a width test separates it from a genuine second process. Measured
+head-to-head against the parsimony guard on real data it added nothing on LFP
+(identical fit) and made NFPP **worse**, wrongly dropping one spectrum to a
+single branch (mean rmse 0.0233 → 0.0320). The DRT's τ as fit seeds likewise
+changed nothing (identical rmse on both cells). The degeneracy test is also a
+property of the fit rather than of a regularisation parameter, so unlike a peak
+count it carries no λ dependence. The DRT remains a companion diagnostic (γ/map
+plots, peak CSV) — its original purpose.
+
+**The ZARC and diffusion τ boxes must not touch.** `tz_hi` used to be
+`min(3/(2πf_min), DIFFUSION_TAU_BOX[0])`, i.e. capped at τ_d **exactly** — so
+the two boxes touched rather than being disjoint, despite both the docstring
+and this file claiming otherwise. A slow branch then walked to the top of its
+box and sat on τ_d absorbing the Warburg: on an NFPP sweep that read
+`tau2_z` = 5.000 s with `alpha2_z` pinned to 1.0 (an ideal RC — no arc at all)
+on *every* two-branch spectrum, all flagged degenerate. `zarc_tau_box()` now
+holds the ceiling `ZARC_DIFFUSION_MARGIN_DECADES` (0.7 dec, factor ~5 → a 1 s
+ceiling) below τ_d, and is the single source of truth for both the fit's box
+and the DRT's arc band — so a peak is never counted as a branch the ECM has
+nowhere to put.
+
+**Synthetic validation.** The selector is checked against spectra built from
+known circuits (ZARC + generalized Warburg + series L), where there is a ground
+truth to recover: 1-ZARC at α=0.8 and α=1.0 → N=1; 2-ZARC → N=2, including a
+small fast arc beside a 20× larger slow one; each recovering its true τ to the
+third digit.
+
+**Reading a mixed-N sweep.** Branch slots are ordered τ-ascending, so on a
+2-arc spectrum slot 1 is the *fast* arc while a 1-arc spectrum's single
+(dominant, slow) branch also lands in slot 1 — `tau1_z` genuinely jumps by
+decades at the transition. `R1_z`/`tau1_z`/`alpha1_z` are therefore **not one
+continuous trend** across such a sweep and must be read with `n_zarc`.
+`plot_zarc_vs_soc` marks the 1-arc points with open squares, tints those three
+panels, and says so in the title.
+
+**The 2RC and 2RC+Warburg EIS fits are retired** (commented out of
+`build_eis_table`'s chain, functions kept for
+`analysis/eis_compare_impedancepy.py`). They only ever existed to seed the ZARC
+fit, which now seeds itself from the DRT peaks and the spectrum's own
+high-frequency point, and their outputs were never read downstream — so they
+cost two extra least-squares solves per spectrum for nothing. Verified on
+`J8049_Namey_NFPP_28Ah_02` BM22: the 21 ZARC fits reproduce the pre-change
+values to 4 significant figures on every parameter, including `zarc_rmse` and
+the single degenerate flag. The `R0`/`R1`/`tau1`/`R0_w`/`R_d`/`tau_d` column
+families are gone from the table and from `plot_fit_overlay`, which now gates
+on `R_d_z`; `plot_2rc_vs_soc` / `plot_warburg_vs_soc` are commented out.
+
+**Plot axis limits** are set explicitly from the data rather than left to
+autoscale, on both Nyquist axes, every `plot_fit_overlay` panel, the Bode
+magnitude/phase panels and the vs-SOC grids (`_padded_limits` / `_autoscale` /
+`_frame_nyquist`, 5 % padding). Full measured extent is kept — nothing is
+clipped. The Nyquist equal-aspect is `adjustable="box"`, **not** the previous
+`"datalim"`: with `datalim` matplotlib holds the axes box fixed and expands the
+data limits to equalise the scales, which silently overrides any limit set and
+stretches the plotted range. The α panels' hard-coded `ylim (0.25, 1.05)` is
+replaced by a data-driven range floored at `ZARC_ALPHA_MIN`, with the bound
+drawn as a dotted line so a fit sitting on it is visible.
+
+The EIS diffusion element has φ
 **fitted** (`DIFFUSION_PHI_BOX`) but τ_d **pinned** (`DIFFUSION_TAU_BOX`, 5 s):
 `R_d_z` is the amplitude at ω = 1/τ_d and `tau_d_z` a shape constant, not a
 result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — are
@@ -247,6 +329,23 @@ it so this is checkable from the CSV. `R_pol = R_tot − R_cross` inherits the
 same bias with the opposite sign and **understates** polarisation.
 For the series resistance use `R0_z`, or `R0_hf` under `eis_two_stage_r0`.
 
+**Open — `fit_hf_r0` omits the diffusion branch.** The HF stage models the
+window as `R0 + jωL + one ZARC` only, but a generalized Warburg falls off as
+ω^−φ with φ ≈ 0.37, so it still contributes real part at the top of the sweep —
+**0.093 mΩ at 6 kHz** on a synthetic NFPP-shaped spectrum. R0 absorbs it and
+comes out biased by **−0.098 mΩ** (matching that number almost exactly). The
+ZARC branches must then make up the missing 0.098 mΩ: one branch cannot without
+wrecking the arc (rmse 0.0135), so two split into a fake near-identical pair
+(τ 2.2e-4 / 3.4e-4 s) and score 4× better (0.0034) — RMSE genuinely *prefers*
+the degenerate fit, which is why the parsimony guard cannot override it. With
+R0 unpinned the same spectrum fits perfectly at either N and is not degenerate.
+**Prototyped fix**: carry the diffusion branch in the HF stage (τ_d pinned,
+`R_d`/φ free) — R0 recovers to 1.0000 exactly, HF rmse → 0, degeneracy gone.
+Not applied: it shifts the validated #70 two-stage R0 on real data, and note
+this bias is *low* whereas the inductive-loss note below measures a ~2.3 %
+*high* bias on real spectra, so the two partly cancel and the net effect must
+be measured on a real sweep before changing it.
+
 **Open — SOC-dependent inductive loss.** The pure `jωL` series term is
 incomplete: with R0 and the arcs subtracted, `Re(residual)` at 6 kHz is
 0.059–0.089 mΩ (a pure inductor predicts exactly 0), rising monotonically with
@@ -265,8 +364,10 @@ that damages R0 most. **R0 stays monotone in SOC under all three**, so the
 two-stage fix is robust to this; left unmodelled deliberately. Untested idea:
 narrow the HF window's top instead of adding an element.
 
-**DRT** (`analysis/eis_drt.py`) — model-free companion, **run by default
-alongside every EIS fit** (`eis_drt`, default true). `fit_eis` runs it per
+**DRT** (`analysis/eis_drt.py`) — model-free companion diagnostic, run by
+default alongside every EIS fit (`eis_drt`, default true). It does **not**
+choose the ECM branch count — that was tried and dropped, see the branch-count
+note above. `fit_eis` runs it per
 bundle on the same raw spectra, writing `plots/eis_drt_{gamma,map}_<stem>_<dir>.png`
 and `<cell>_eis_drt_peaks.csv` (one row per peak: `tau_peak`, `gamma_peak`,
 `R_peak`, `width_decades`), plus an `eis.drt` block in `parameters.json`. It
@@ -275,6 +376,11 @@ processes are in the spectrum at all — and the γ plot overlays the fitted τ,
 **an ECM τ landing in a DRT *valley* rather than on a peak** flags one element
 blanketing a region with more structure than it has parameters for (which is
 what `tau1_z` does on NFPP_01; see the bandwidth note). Adds ~0.5 s per bundle.
+The solve is **split from the SOC labelling** (`solve_bundle` → `label_bundle`,
+with `run_bundle` a wrapper over both, which is what `fit_eis` calls) because
+γ(τ) does not depend on SOC — SOC is only a label on the result. A caller that
+needs the peaks before it has an SOC to attach can therefore solve first and
+label later without paying for a second solve.
 
 **λ is fixed** (`eis_drt_lambda`, default `1e-3`), *not* the L-curve corner.
 The corner is better for a one-off investigation but is not reproducible enough
@@ -446,9 +552,9 @@ the "Run all 1→2→3→4→5" chain.
 | `eis_file_marker` | Regex identifying an EIS file by its `=`-field measurement token (default `(?:EIS|INS)\d+`) |
 | `eis_procedure_filter` | Substring marking EIS-labelled segments used as match anchors (default `EIS`) |
 | `eis_match_tolerance_minutes` | Max time gap to match an EIS measurement to a segment (default 120) |
-| `eis_two_stage_r0` | Measure R0 on the HF window and pin it in the 2×ZARC fit, instead of fitting it against the correlated mid-frequency arc (**default true**). Fixes the spurious low-SOC R0 turnover; set false only to reproduce a pre-#70 fit. |
+| `eis_two_stage_r0` | Measure R0 on the HF window and pin it in the N×ZARC fit, instead of fitting it against the correlated mid-frequency arc (**default true**). Fixes the spurious low-SOC R0 turnover; set false only to reproduce a pre-#70 fit. |
 | `eis_hf_r0_f_min_hz` | Lower frequency bound of the two-stage R0 window (default 100). Needs ≥10 points above it or the stage is skipped and R0 is fitted as before. |
-| `eis_drt` | Run the model-free DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block. ~0.5 s per bundle. |
+| `eis_drt` | Run the DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block. Diagnostic only — it does not set the ZARC branch count. ~0.5 s per bundle. |
 | `eis_drt_lambda` | Fixed DRT regularisation (default `1e-3`). Deliberately not the L-curve corner — see the DRT section. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |

@@ -159,6 +159,99 @@ def drt_peaks(tau, gamma, rel_height=0.05):
     return pd.DataFrame(rows)
 
 
+def solve_bundle(df: pd.DataFrame, lam=None):
+    """DRT solve for every spectrum in a bundle — **no SOC**.
+
+    Split from the SOC labelling (:func:`label_bundle`, with
+    :func:`run_bundle` a wrapper over both) because γ(τ) does not depend on SOC
+    — SOC is only a label on the result — so a caller that wants the peaks
+    before it has an SOC to attach can solve here and label later, without
+    paying for a second solve and without the DRT panel and the
+    ``eis_fits.csv`` row beside it ever disagreeing about which SOC a spectrum
+    was measured at.
+
+    Returns ``(solved, lcurves)`` where ``solved`` is a list of per-measurement
+    dicts in bundle time order, each carrying ``eis_number``, the ``tau``/
+    ``gamma`` arrays, the ``peaks`` frame, the frequency band and the fit
+    diagnostics. Pass it to :func:`label_bundle` to get the plot-ready frames.
+    """
+    order = df.groupby("eis_number")["Time"].min().sort_values().index.tolist()
+    solved, lcurves = [], {}
+    for eid in order:
+        s = df[df["eis_number"] == eid].sort_values("frequency")
+        f = s["frequency"].to_numpy(float)
+        zd = s["Z_real"].to_numpy(float) + 1j * s["Z_imag"].to_numpy(float)
+        tau = tau_grid(f)
+        M = len(tau)
+
+        if lam is None:
+            lam_i, lc = lcurve_lambda(f, zd, tau)
+            lcurves[eid] = lc
+        else:
+            lam_i = lam
+        x, _, _ = solve_drt(f, zd, tau, lam_i)
+        gamma, r_inf, L, invC = x[:M], x[M], x[M + 1], x[M + 2]
+
+        zf = reconstruct(f, tau, x)
+        rmse = float(np.sqrt(np.mean(np.abs(zf - zd) ** 2)))
+        solved.append({
+            "eis_number": eid,
+            "tau": tau,
+            "gamma": gamma,
+            "peaks": drt_peaks(tau, gamma),
+            "f_min": float(f.min()),
+            "f_max": float(f.max()),
+            "lam": lam_i,
+            "rmse": rmse,
+            "R_inf": r_inf,
+            "L": L,
+            "C_blk": (1.0 / invC) if invC > 0 else np.inf,
+            "R_drt_total": float(np.sum(gamma) * np.mean(np.diff(np.log(tau)))),
+        })
+    return solved, lcurves
+
+
+def label_bundle(solved, soc_by_eid=None, soc_source="unknown", direction=None,
+                 step=None):
+    """Attach SOC to a :func:`solve_bundle` result → ``(curves, peaks, meta)``.
+
+    ``soc_by_eid`` is the SOC the caller already assigned. Measurements it
+    does not cover fall back to the order-based ladder ``100 - step * i``,
+    which is **wrong whenever the steps moved unequal charge** — it exists only
+    so a CLI run still labels its panels with something. ``meta["soc_source"]``
+    records which was used; check it before quoting a SOC off a DRT plot.
+    """
+    from analysis.eis_vs_soc import SOC_SWEEP_DIRECTION, SOC_SWEEP_STEP_PCT
+
+    direction = direction or SOC_SWEEP_DIRECTION
+    step = SOC_SWEEP_STEP_PCT if step is None else step
+    soc_by_eid = soc_by_eid or {}
+    charging = str(direction).lower().startswith("cha")
+
+    curves, peaks, meta = [], [], []
+    for i, sol in enumerate(solved):
+        eid = sol["eis_number"]
+        ladder = (0.0 + step * i) if charging else (100.0 - step * i)
+        soc = soc_by_eid.get(eid, ladder)
+        tau, gamma = sol["tau"], sol["gamma"]
+
+        for t, g in zip(tau, gamma):
+            curves.append({"eis_number": eid, "SOC_pct": soc, "tau": t, "gamma": g})
+        pk = sol["peaks"].copy()
+        pk.insert(0, "SOC_pct", soc)
+        pk.insert(0, "eis_number", eid)
+        peaks.append(pk)
+        meta.append({"eis_number": eid, "SOC_pct": soc, "lam": sol["lam"],
+                     "rmse": sol["rmse"], "R_inf": sol["R_inf"], "L": sol["L"],
+                     "C_blk": sol["C_blk"], "R_drt_total": sol["R_drt_total"],
+                     "n_peaks": len(pk), "soc_source": soc_source})
+        logging.info("DRT %s (SOC %3.0f%%): lam=%.3g rmse=%.4f peaks=%d",
+                     eid, soc, sol["lam"], sol["rmse"], len(pk))
+
+    return (pd.DataFrame(curves), pd.concat(peaks, ignore_index=True),
+            pd.DataFrame(meta))
+
+
 def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None,
                data_dir=None, ir_ohm=None, soc_by_eid=None, soc_source=None):
     """DRT for every spectrum in a bundle. Returns ``(curves, peaks, meta)``.
@@ -209,46 +302,12 @@ def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None,
             logging.warning("DRT: qOCV SOC unavailable (%s) — falling back to "
                             "the order-based ladder", diag.get("reason", "?"))
 
-    curves, peaks, meta, lcurves = [], [], [], {}
-    for i, eid in enumerate(order):
-        s = df[df["eis_number"] == eid].sort_values("frequency")
-        f = s["frequency"].to_numpy(float)
-        zd = s["Z_real"].to_numpy(float) + 1j * s["Z_imag"].to_numpy(float)
-        tau = tau_grid(f)
-        M = len(tau)
-
-        if lam is None:
-            lam_i, lc = lcurve_lambda(f, zd, tau)
-            lcurves[eid] = lc
-        else:
-            lam_i = lam
-        x, _, _ = solve_drt(f, zd, tau, lam_i)
-        gamma, r_inf, L, invC = x[:M], x[M], x[M + 1], x[M + 2]
-
-        zf = reconstruct(f, tau, x)
-        rmse = float(np.sqrt(np.mean(np.abs(zf - zd) ** 2)))
-        soc = soc_by_eid.get(
-            eid,
-            (0.0 + step * i) if str(direction).lower().startswith("cha")
-            else (100.0 - step * i),
-        )
-
-        for t, g in zip(tau, gamma):
-            curves.append({"eis_number": eid, "SOC_pct": soc, "tau": t, "gamma": g})
-        pk = drt_peaks(tau, gamma)
-        pk.insert(0, "SOC_pct", soc)
-        pk.insert(0, "eis_number", eid)
-        peaks.append(pk)
-        meta.append({"eis_number": eid, "SOC_pct": soc, "lam": lam_i, "rmse": rmse,
-                     "R_inf": r_inf, "L": L,
-                     "C_blk": (1.0 / invC) if invC > 0 else np.inf,
-                     "R_drt_total": float(np.sum(gamma) * np.mean(np.diff(np.log(tau)))),
-                     "n_peaks": len(pk), "soc_source": soc_source})
-        logging.info("DRT %s (SOC %3.0f%%): lam=%.3g rmse=%.4f peaks=%d",
-                     eid, soc, lam_i, rmse, len(pk))
-
-    return (pd.DataFrame(curves), pd.concat(peaks, ignore_index=True),
-            pd.DataFrame(meta), lcurves)
+    solved, lcurves = solve_bundle(df, lam=lam)
+    curves, peaks, meta = label_bundle(
+        solved, soc_by_eid=soc_by_eid, soc_source=soc_source,
+        direction=direction, step=step,
+    )
+    return curves, peaks, meta, lcurves
 
 
 # --------------------------------------------------------------------------

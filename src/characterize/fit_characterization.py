@@ -11,8 +11,14 @@ Models are fixed defaults:
   :mod:`analysis.fit_2rc_pulse` kept separate so characterization-only fixes
   — notably SOC-plateau detection — don't touch the shared paper-analysis
   module; see the fork notice at the top of ``characterize/pulse_fit.py``).
-* **EIS** — 2×ZARC + series-L + generalized Warburg
-  (:func:`analysis.eis_vs_soc.fit_zarc_warburg_eis`). φ is fitted; τ_d is
+* **EIS** — N×ZARC + series-L + generalized Warburg
+  (:func:`analysis.eis_vs_soc.fit_nzarc_warburg_eis`). **N is not fixed**:
+  every spectrum starts at two branches and
+  :func:`analysis.eis_vs_soc.fit_zarc_with_parsimony` drops one that comes
+  back degenerate, so a cell whose spectrum is a single merged arc (LFP) lands
+  on one branch and one with two resolved processes (NFPP) keeps two — without
+  a second branch ever being fitted against structure that isn't there.
+  φ is fitted; τ_d is
   **pinned** by ``DIFFUSION_TAU_BOX``, so ``R_d_z`` is the amplitude at
   ω = 1/τ_d and ``tau_d_z`` is a shape constant, not a result. Those settings
   are recorded in the params file so the numbers stay interpretable. Each
@@ -57,7 +63,12 @@ from util.run_context import CHARACTERIZATION
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 PULSE_MODEL = "2rc"
-EIS_MODEL = "2zarc_warburg"
+#: The EIS branch count is no longer part of the model name: it is decided per
+#: spectrum by :func:`analysis.eis_vs_soc.fit_zarc_with_parsimony`, so a fixed
+#: "2zarc_warburg" would be a claim the run may not honour. The number actually
+#: used is the ``n_zarc`` column of every fit row (``n_zarc_requested`` is what
+#: it started from).
+EIS_MODEL = "nzarc_warburg"
 
 #: Fixed DRT regularisation used by the pipeline. See the note in ``fit_eis``
 #: for why this is not the L-curve corner.
@@ -102,6 +113,12 @@ EIS_COLS = [
     # visible from the CSV alone rather than having to be inferred.
     "R_cross", "f_cross_Hz", "R0_z", "L_z",
     "R0_hf", "R0_hf_sigma", "hf_rmse", "hf_n", "r0_pinned",
+    # Branch slots are fixed (eis_vs_soc.ZARC_COLUMN_SLOTS) whatever N a given
+    # spectrum kept, so a one-branch cell and a two-branch cell still share a
+    # CSV schema (the unused slot is NaN). `n_zarc` is what was kept,
+    # `n_zarc_requested` what the fit started from — they differ exactly where
+    # the parsimony guard dropped a degenerate branch.
+    "n_zarc", "n_zarc_requested",
     "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
     "zarc_rmse", "zarc_degenerate",
@@ -769,6 +786,15 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             "hf_r0_f_min_hz": hf_f_min if two_stage_r0 else None,
             "drt": drt,
             "drt_lambda": drt_lambda if drt else None,
+            # Branch count: every spectrum starts here and keeps this many or
+            # fewer — `fit_zarc_with_parsimony` drops a branch that comes back
+            # degenerate. The DRT is a companion diagnostic only; it does not
+            # choose the model order (counting its peaks was tried and dropped:
+            # it added nothing on LFP and made NFPP worse).
+            "zarc_branches_start": eis_vs_soc.ZARC_COLUMN_SLOTS,
+            "zarc_parsimony_rmse_tolerance": eis_vs_soc.ZARC_PARSIMONY_RMSE_TOLERANCE,
+            "zarc_tau_margin_decades": eis_vs_soc.ZARC_DIFFUSION_MARGIN_DECADES,
+            "zarc_column_slots": eis_vs_soc.ZARC_COLUMN_SLOTS,
             "soc_step_pct": step,
             "soc_direction_source": direction_source,
             "soc_direction_override": override,
@@ -808,7 +834,7 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     pulse_temps, cell_temp = _pulse_temperatures(data_dir)
 
     tables, bundle_diag = [], []
-    raw_by_source = {}  # source -> raw measured-spectra df
+    raw_by_source = {}   # source -> raw measured-spectra df
     for path in files:
         name = os.path.basename(path)
         try:
@@ -817,6 +843,9 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             if direction is None:
                 logging.warning("%s: no EIS measurements — skipping", name)
                 continue
+            # Branch count is decided inside the fit, per spectrum: start at
+            # two and let `fit_zarc_with_parsimony` drop one that comes back
+            # degenerate. Nothing is passed in here.
             table = eis_vs_soc.build_eis_table(
                 bundle_df, direction=direction, step=step,
                 two_stage_r0=two_stage_r0, hf_f_min=hf_f_min)
@@ -947,7 +976,9 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             title += f" @ {temp:.1f} °C"
         raw_df = raw_by_source.get(source)
 
-        out_png = os.path.join(plots_dir, f"eis_2zarc_warburg_{stem}_{tag}.png")
+        # Stem dropped the "2": the branch count is per bundle now, so baking a
+        # 2 into every filename would mislabel a one-arc fit.
+        out_png = os.path.join(plots_dir, f"eis_zarc_warburg_{stem}_{tag}.png")
         _try_plot("zarc_params_vs_soc", eis_vs_soc.plot_zarc_vs_soc, out_png,
                   group, title=title)
 

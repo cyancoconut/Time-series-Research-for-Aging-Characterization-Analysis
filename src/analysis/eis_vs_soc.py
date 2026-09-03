@@ -41,6 +41,17 @@ the Nyquist curve (no ECM fit, so nothing to converge):
 Impedance values are in the raw unit of the export (for these cells that is
 mΩ — a ~28 Ah cell has ohmic R of order 1 mΩ, which is what the data shows).
 
+**The fitted model is N×ZARC + series-L + generalized Warburg**
+(:func:`fit_nzarc_warburg_eis`). N is chosen per bundle from that bundle's DRT
+by :func:`analysis.eis_drt.select_model_order` — see
+:func:`characterize.fit_characterization._bundle_model_order`. The plain 2RC
+and 2RC+Warburg fits that used to run ahead of it as seeds are **retired**: see
+the comment in :func:`build_eis_table`. Their functions (:func:`fit_2rc_eis`,
+:func:`fit_warburg_eis`) are still defined for
+:mod:`analysis.eis_compare_impedancepy`, but nothing in the pipeline calls
+them, and the ``R0``/``R1``/``R0_w``/``R_d`` column families they produced are
+gone from the table. Use the ``*_z`` columns.
+
 Usage:
     cd src
     python -m analysis.eis_vs_soc <eis_export.parquet> [-o out_stem]
@@ -374,6 +385,32 @@ DIFFUSION_TAU_BOX = (5.0, 5.0)
 #: wide enough to be informative without letting φ absorb arbitrary residual.
 DIFFUSION_PHI_BOX = (0.2, 0.9)
 
+#: Clearance, in decades, between the slowest a ZARC branch may be and the
+#: pinned diffusion τ. The ZARC and diffusion τ boxes are supposed to be
+#: **disjoint** so the two elements cannot trade roles — but capping the ZARC
+#: box at ``DIFFUSION_TAU_BOX[0]`` exactly makes them *touch*, which is not the
+#: same thing. A slow branch then walks to the top of its box and sits on τ_d
+#: absorbing the Warburg: on an NFPP sweep that showed up as ``tau2_z`` = 5.000
+#: s with ``alpha2_z`` pinned to 1.0 (an ideal RC, i.e. no arc at all) on every
+#: two-branch spectrum, all flagged degenerate. 0.7 decades (factor ~5, so
+#: τ_d = 5 s → a 1 s ceiling) separates them properly.
+#:
+ZARC_DIFFUSION_MARGIN_DECADES = 0.7
+
+
+def zarc_tau_box(f_min: float, f_max: float) -> tuple:
+    """``(lo, hi)`` bounds for a ZARC τ: the resolvable band, clear of τ_d.
+
+    ``lo``/``hi`` extend half a decade past the measured band — outside it the
+    data constrains nothing — and ``hi`` is additionally held
+    :data:`ZARC_DIFFUSION_MARGIN_DECADES` below the pinned diffusion τ so a
+    kinetic branch cannot merge with the Warburg.
+    """
+    lo = 1.0 / (2 * np.pi * float(f_max)) / 3.0
+    hi = min(1.0 / (2 * np.pi * float(f_min)) * 3.0,
+             DIFFUSION_TAU_BOX[0] / 10 ** ZARC_DIFFUSION_MARGIN_DECADES)
+    return lo, hi
+
 #: Diffusion element for the 2×ZARC fit. Read by both the fit and the overlay
 #: plot so the drawn curve always matches the fitted one.
 #:
@@ -499,16 +536,56 @@ def fit_hf_r0(spec: pd.DataFrame, f_min: float = None) -> dict:
     }
 
 
-def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
-                         element: str = None, pin_r0=None) -> dict:
-    """2×ZARC + series-L + finite-length Warburg fit.
+#: Branch slots the ``*_z`` column set always carries, whatever ``n_zarc`` the
+#: DRT asked for. A 1-ZARC fit leaves slot 2 NaN rather than dropping the
+#: columns, so one cell fitted with one arc and another fitted with two still
+#: concatenate into one table and one CSV schema.
+ZARC_COLUMN_SLOTS = 2
 
-        Z(ω) = R0 + jωL + R1/(1+(jω τ1)^α1) + R2/(1+(jω τ2)^α2) + Z_diff(ω)
 
-    Replaces the two ideal RC branches of :func:`fit_warburg_eis` with **ZARC**
-    (depressed-arc) branches — each gains a CPE exponent ``α ∈ (0,1]`` so a real,
-    flattened Nyquist semicircle is captured without inflating R/τ. Seeded from
-    the 2RC+L+Warburg fit (``seed``). Params namespaced ``*_z``.
+def _tau_starts(n: int, tau_seeds, lo: float, hi: float) -> list:
+    """Multistart τ vectors for ``n`` ZARC branches, clipped into ``[lo, hi]``.
+
+    The first start is the DRT's own peak τ when it supplied any — the whole
+    point of asking the DRT for the model order is that it also knows *where*
+    the processes are, so the fit should not then start from a generic spread.
+    The remaining starts are fixed log-spaced spreads across the resolvable
+    band: a single start lands in a different local minimum from spectrum to
+    spectrum, which is half of why the vs-SOC curves used to jump.
+    """
+    starts = []
+    if tau_seeds:
+        s = sorted(float(t) for t in tau_seeds if np.isfinite(t) and t > 0)
+        if s:
+            while len(s) < n:      # fewer peaks than branches: spread off the slowest
+                s.append(s[-1] * 3.0)
+            starts.append(s[:n])
+    span = np.log10(hi / lo)
+    for f_lo, f_hi in ((0.05, 0.45), (0.02, 0.70), (0.15, 0.30)):
+        starts.append(list(np.logspace(np.log10(lo) + f_lo * span,
+                                       np.log10(lo) + f_hi * span, n)))
+    return [list(np.clip(s, lo, hi)) for s in starts]
+
+
+def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
+                          tau_seeds=None, seed: dict = None, r_tot0=None,
+                          element: str = None, pin_r0=None) -> dict:
+    """``n_zarc`` × ZARC + series-L + finite-length Warburg fit.
+
+        Z(ω) = R0 + jωL + Σᵢ Rᵢ/(1+(jω τᵢ)^αᵢ) + Z_diff(ω)
+
+    Each branch is a **ZARC** (depressed arc): a CPE exponent ``α ∈ (0,1]`` lets
+    a real, flattened Nyquist semicircle be captured without inflating R/τ.
+
+    ``n_zarc`` is not fixed by the caller in normal use: :func:`build_eis_table`
+    starts every spectrum at :data:`ZARC_COLUMN_SLOTS` and
+    :func:`fit_zarc_with_parsimony` drops a branch that comes back degenerate,
+    so a cell whose spectrum is a single merged arc (LFP) lands on one branch
+    and one with two resolved processes (NFPP) keeps two.
+
+    ``tau_seeds`` optionally supplies the first multistart's τ. Measured to make
+    no difference on either chemistry — the fixed spreads find the same minima —
+    so nothing in the pipeline passes it; it is kept for one-off experiments.
 
     ``element`` picks the diffusion branch — see :data:`ZARC_DIFFUSION_ELEMENT`
     for the three forms; ``None`` takes that module default. Only
@@ -516,11 +593,11 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
     can each reproduce one low-frequency slope and misfit every other one.
 
     **Identifiability.** The ZARC τ are boxed into the measured band and the
-    diffusion τ into :data:`DIFFUSION_TAU_BOX`, disjoint from it, so the slow
+    diffusion τ into :data:`DIFFUSION_TAU_BOX`, disjoint from it, so the slowest
     ZARC and the diffusion branch cannot trade roles — without this the two
     swap between spectra and the vs-SOC curves jump decades at the swap points.
-    All three τ are ordered and the fit is multistarted. τ_d normally lands on
-    a box edge and carries no information; use ``R_d_z``.
+    Branches are returned ordered ``τ1 < τ2 < …`` and the fit is multistarted.
+    τ_d normally lands on a box edge and carries no information; use ``R_d_z``.
 
     ``pin_r0`` fixes R0 at a value measured beforehand (see :func:`fit_hf_r0`)
     instead of fitting it — the second stage of the two-stage R0. R0 leaves the
@@ -529,16 +606,20 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
     borrow from it. ``None`` (default) fits R0 as before.
 
     Returns ``{R0_z, L_z, R1_z, tau1_z, alpha1_z, R2_z, tau2_z, alpha2_z, R_d_z,
-    tau_d_z, phi_d_z, zarc_rmse, zarc_degenerate, r0_pinned}`` (NaN/True on
-    failure). ``phi_d_z`` is the fitted φ, or the fixed exponent of the chosen
-    element.
+    tau_d_z, phi_d_z, n_zarc, zarc_rmse, zarc_degenerate, r0_pinned}`` (NaN/True
+    on failure). Slots past ``n_zarc`` are NaN — see :data:`ZARC_COLUMN_SLOTS`.
+    ``phi_d_z`` is the fitted φ, or the fixed exponent of the chosen element.
     """
     from scipy.optimize import least_squares
 
-    keys = ("R0_z", "L_z", "R1_z", "tau1_z", "alpha1_z", "R2_z", "tau2_z",
-            "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z", "zarc_rmse")
+    n_zarc = max(1, int(n_zarc))
+    n_slots = max(n_zarc, ZARC_COLUMN_SLOTS)
+    keys = ["R0_z", "L_z", "R_d_z", "tau_d_z", "phi_d_z", "zarc_rmse"]
+    for i in range(1, n_slots + 1):
+        keys += [f"R{i}_z", f"tau{i}_z", f"alpha{i}_z"]
     fail = {k: np.nan for k in keys}
     fail["zarc_degenerate"] = True
+    fail["n_zarc"] = n_zarc
     fail["r0_pinned"] = pin_r0 is not None and np.isfinite(pin_r0)
 
     # A non-finite pin (the HF stage failed on this spectrum) falls back to
@@ -569,77 +650,91 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
     # Capped at the diffusion box floor so the two boxes stay **disjoint** —
     # overlap is what lets the slow ZARC and the diffusion branch trade roles.
     td_lo, td_hi = DIFFUSION_TAU_BOX
-    tz_lo = 1.0 / (2 * np.pi * f.max()) / 3.0
-    tz_hi = min(1.0 / (2 * np.pi * f.min()) * 3.0, td_lo)
+    tz_lo, tz_hi = zarc_tau_box(f.min(), f.max())
 
-    r0 = seed.get("R0_w", seed.get("R0", s["Z_real"].to_numpy(float)[int(np.argmax(w))]))
+    # Seeds. ``seed`` is only populated when a caller still runs the old 2RC /
+    # 2RC+W ladder (the impedance.py comparison script); the pipeline no longer
+    # does, so both fall back to reading the spectrum itself rather than to a
+    # constant. L especially: a fixed 1e-6 mΩ·s is ~100x below the ~1.6e-4
+    # mΩ·s (158 nH) these fixtures actually show, and the inductive tail is
+    # steep enough that starting there wastes the first decade of the solve.
+    khi = int(np.argmax(w))
+    r0 = seed.get("R0_w", seed.get("R0", zd.real[khi]))
     if pin_r0 is not None:  # keep rspan consistent with the series term in use
         r0 = pin_r0
-    l0 = seed.get("L_w", seed.get("L", 1e-6))
+    l0 = seed.get("L_w", seed.get("L"))
+    if l0 is None or not np.isfinite(l0) or l0 <= 0:
+        l0 = zd.imag[khi] / w[khi] if zd.imag[khi] > 0 else 1e-6
     rtot = r_tot0 if r_tot0 is not None else s["Z_real"].to_numpy(float)[int(np.argmin(w))]
     rspan = max(rtot - r0, 0.5)
 
-    # Free-parameter layout. [R0 unless pinned, L, R1, R2, lt1, lt2, a1, a2,
-    # Rd], then ltd only when DIFFUSION_TAU_BOX has width (equal bounds pin
-    # it), then phi only when it is fitted. A pinned R0 is dropped from the
-    # vector rather than boxed to zero width — least_squares needs lb < ub.
+    # Free-parameter layout, in order:
+    #   [R0 unless pinned], L, R_1..R_n, lt_1..lt_n, a_1..a_n, Rd,
+    #   [ltd only when DIFFUSION_TAU_BOX has width — equal bounds pin it],
+    #   [phi only when it is fitted].
+    # A pinned R0 is dropped from the vector rather than boxed to zero width —
+    # least_squares needs lb < ub.
+    n = n_zarc
     ph_lo, ph_hi = DIFFUSION_PHI_BOX
     fit_tau_d = td_hi > td_lo
     fit_r0 = pin_r0 is None
-    lb = [0.0, 0.0, 0.0, np.log(tz_lo), np.log(tz_lo),
-          ZARC_ALPHA_MIN, ZARC_ALPHA_MIN, 0.0]
-    ub = [np.inf, np.inf, np.inf, np.log(tz_hi), np.log(tz_hi),
-          1.0, 1.0, np.inf]
+    lb = [0.0] + [0.0] * n + [np.log(tz_lo)] * n + [ZARC_ALPHA_MIN] * n + [0.0]
+    ub = [np.inf] + [np.inf] * n + [np.log(tz_hi)] * n + [1.0] * n + [np.inf]
     if fit_r0:
         lb, ub = [0.0] + lb, [np.inf] + ub
     if fit_tau_d:
         lb, ub = lb + [np.log(td_lo)], ub + [np.log(td_hi)]
     if free_phi:
         lb, ub = lb + [ph_lo], ub + [ph_hi]
-    n_core = 9 if fit_r0 else 8
+    # core = [R0?] L, R*n, lt*n, a*n, Rd
+    n_core = (1 if fit_r0 else 0) + 2 + 3 * n
     i_ltd = n_core if fit_tau_d else None
     i_phi = (n_core + 1 if fit_tau_d else n_core) if free_phi else None
+    # Offsets into the core block, after R0 has been put back for a pinned fit.
+    o_r, o_lt, o_a, o_rd = 2, 2 + n, 2 + 2 * n, 2 + 3 * n
 
     def _unpack(x):
+        """``(R0, L, [R], [lnτ], [α], Rd, lnτ_d, φ)`` from the free vector."""
         ltd = x[i_ltd] if fit_tau_d else np.log(td_lo)
         phi = x[i_phi] if free_phi else 0.5
-        core = tuple(x[:n_core]) if fit_r0 else (pin_r0,) + tuple(x[:n_core])
-        return core + (ltd, phi)
+        core = list(x[:n_core]) if fit_r0 else [pin_r0] + list(x[:n_core])
+        return (core[0], core[1], core[o_r:o_lt], core[o_lt:o_a],
+                core[o_a:o_rd], core[o_rd], ltd, phi)
 
     def model(x, wv):
-        R0_, L_, R1_, R2_, lt1, lt2, a1, a2, Rd_, ltd, phi = _unpack(x)
-        return (R0_ + 1j * wv * L_
-                + _z_zarc(R1_, np.exp(lt1), a1, wv)
-                + _z_zarc(R2_, np.exp(lt2), a2, wv)
-                + z_diff(Rd_, np.exp(ltd), phi, wv))
+        R0_, L_, rs, lts, als, Rd_, ltd, phi = _unpack(x)
+        z = R0_ + 1j * wv * L_ + z_diff(Rd_, np.exp(ltd), phi, wv)
+        for r_i, lt_i, a_i in zip(rs, lts, als):
+            z = z + _z_zarc(r_i, np.exp(lt_i), a_i, wv)
+        return z
 
     def resid(x):
         r = (model(x, w) - zd) / absz
         return np.concatenate([r.real, r.imag])
 
-    # Multistart: one seeded from the 2RC+W fit plus two fixed spreads. A single
-    # start lands in a different local minimum from spectrum to spectrum, which
-    # is the other half of why the vs-SOC curves used to jump.
-    starts = [
-        (seed.get("tau1_w", 1e-3), seed.get("tau2_w", 1e-2), seed.get("tau_d", 30.0), 0.5),
-        (3e-4, 8e-3, 3.0, 0.4),
-        (2e-3, 3e-2, 100.0, 0.3),
-    ]
+    # Multistart: the DRT's own peak τ first (when it supplied them), then
+    # fixed spreads across the band. τ_d and φ are spread alongside.
+    tau_starts = _tau_starts(n, tau_seeds, tz_lo, tz_hi)
+    td_starts = [seed.get("tau_d", 30.0), 3.0, 100.0, 30.0]
+    phi_starts = [0.5, 0.4, 0.3, 0.45]
     best = None
-    for t1s, t2s, tds, phs in starts:
-        x0 = [max(l0, 1e-9), 0.3 * rspan, 0.5 * rspan,
-              np.log(t1s), np.log(t2s), 0.85, 0.85, 0.3 * rspan]
+    for k, taus in enumerate(tau_starts):
+        x0 = [max(l0, 1e-9)]
+        x0 += [rspan / max(n, 1)] * n                 # R_i
+        x0 += [np.log(t) for t in taus]               # lnτ_i
+        x0 += [0.85] * n                              # α_i
+        x0 += [0.3 * rspan]                           # R_d
         if fit_r0:
             x0 = [max(r0, 1e-3)] + x0
         if fit_tau_d:
-            x0.append(np.log(tds))
+            x0.append(np.log(td_starts[k % len(td_starts)]))
         if free_phi:
-            x0.append(phs)
+            x0.append(phi_starts[k % len(phi_starts)])
         x0 = np.clip(x0, lb, ub)
         try:
             res = least_squares(resid, x0, bounds=(lb, ub), max_nfev=20000)
         except Exception as exc:  # noqa: BLE001
-            logging.warning("fit_zarc_warburg_eis start failed: %s", exc)
+            logging.warning("fit_nzarc_warburg_eis start failed: %s", exc)
             continue
         err = float(np.sqrt(np.mean(np.abs(model(res.x, w) - zd) ** 2)))
         if best is None or err < best[0]:
@@ -648,12 +743,15 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
         return fail
 
     rmse, x = best
-    R0_, L_, R1_, R2_, lt1, lt2, a1, a2, Rd_, ltd, phi = _unpack(x)
+    R0_, L_, rs, lts, als, Rd_, ltd, phi = _unpack(x)
     phi = float(phi)
-    ta, tb, aa, ab = np.exp(lt1), np.exp(lt2), a1, a2
-    if ta > tb:
-        R1_, R2_, ta, tb, aa, ab = R2_, R1_, tb, ta, ab, aa
     td = float(np.exp(ltd))
+    # Branches ordered fast -> slow, so R1_z/tau1_z means the same thing in
+    # every row of the table regardless of which start won.
+    branches = sorted(
+        ((float(np.exp(lt)), float(r), float(a)) for r, lt, a in zip(rs, lts, als)),
+        key=lambda b: b[0],
+    )
 
     # Degenerate when the diffusion branch collapses, a ZARC τ sits on the edge
     # of the resolvable band, or a CPE / diffusion exponent pins to a bound —
@@ -663,35 +761,115 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
 
     degenerate = bool(
         Rd_ < 1e-2
-        or _on_edge(ta, tz_lo, tz_hi) or _on_edge(tb, tz_lo, tz_hi)
-        or aa <= ZARC_ALPHA_MIN * 1.02 or ab <= ZARC_ALPHA_MIN * 1.02
-        or aa >= 0.999 or ab >= 0.999
+        or any(_on_edge(t, tz_lo, tz_hi) for t, _, _ in branches)
+        or any(a <= ZARC_ALPHA_MIN * 1.02 or a >= 0.999 for _, _, a in branches)
         or (free_phi and _on_edge(phi, ph_lo, ph_hi))
     )
-    return {
+    out = {
         "R0_z": float(R0_), "L_z": float(L_),
-        "R1_z": float(R1_), "tau1_z": float(ta), "alpha1_z": float(aa),
-        "R2_z": float(R2_), "tau2_z": float(tb), "alpha2_z": float(ab),
         "R_d_z": float(Rd_), "tau_d_z": td, "phi_d_z": phi,
-        "zarc_rmse": rmse, "zarc_degenerate": degenerate,
+        "n_zarc": n, "zarc_rmse": rmse, "zarc_degenerate": degenerate,
         "r0_pinned": pin_r0 is not None,
     }
+    for i in range(1, n_slots + 1):
+        t_i, r_i, a_i = branches[i - 1] if i <= len(branches) else (np.nan,) * 3
+        out[f"R{i}_z"], out[f"tau{i}_z"], out[f"alpha{i}_z"] = r_i, t_i, a_i
+    return out
+
+
+def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
+                         element: str = None, pin_r0=None) -> dict:
+    """Backwards-compatible 2×ZARC alias of :func:`fit_nzarc_warburg_eis`.
+
+    Kept because :mod:`analysis.eis_compare_impedancepy` exists specifically to
+    benchmark the fixed 2RC → 2RC+W → 2×ZARC ladder against ``impedance.py``,
+    so it must keep getting a hard-coded two-branch fit. The pipeline calls
+    ``fit_nzarc_warburg_eis`` with the DRT's model order instead.
+    """
+    return fit_nzarc_warburg_eis(spec, n_zarc=2, seed=seed, r_tot0=r_tot0,
+                                 element=element, pin_r0=pin_r0)
+
+
+#: How much worse (fractionally) a one-branch-simpler fit's RMSE may be and
+#: still be preferred, when the richer fit came back **degenerate**. A
+#: degenerate branch is by definition one the data does not constrain — it has
+#: pinned α to a bound, run its τ to the edge of the box, or split one arc into
+#: two near-identical ones — so a small RMSE gain bought that way is fitting
+#: noise, not structure. 25 % is loose enough that a branch which genuinely
+#: helps still survives.
+ZARC_PARSIMONY_RMSE_TOLERANCE = 0.25
+
+
+def fit_zarc_with_parsimony(spec: pd.DataFrame, n_zarc: int = 2,
+                            tau_seeds=None, **kw) -> dict:
+    """:func:`fit_nzarc_warburg_eis`, dropping a branch that earns nothing.
+
+    **This is the model-order selector.** Fit at ``n_zarc``; if that comes back
+    degenerate and ``n_zarc > 1``, fit again one branch simpler and keep the
+    simpler result unless the richer one is materially better on RMSE
+    (:data:`ZARC_PARSIMONY_RMSE_TOLERANCE`). Adds one solve only on the spectra
+    that actually hit the degenerate path.
+
+    Counting the DRT's peaks was tried first and dropped. It cannot do the job:
+    a dispersive Warburg (φ < 0.5) deposits γ mass *inside* the ZARC τ box that
+    is both large (41 % of the in-band peak area on a synthetic single-arc
+    spectrum, 13–36 % on the LFP sweep) and **narrower** than the real arc, so
+    neither an area threshold nor a width test separates it from a genuine
+    second process. Measured against this guard on real data it added nothing
+    on the LFP cell (identical fit) and made the NFPP cell *worse*, wrongly
+    dropping one spectrum to a single branch (mean rmse 0.0233 → 0.0320).
+
+    What does work is asking the ECM itself: given a branch it does not need,
+    the fit comes back **degenerate** — α pinned to a bound, τ on the edge of
+    its box, or one arc split into two near-identical ones. That test is a
+    property of the fit rather than of a regularisation parameter, so unlike a
+    DRT peak count it carries no dependence on λ.
+
+    ``n_zarc_requested`` records what was asked for, ``n_zarc`` what was kept.
+    """
+    out = fit_nzarc_warburg_eis(spec, n_zarc=n_zarc, tau_seeds=tau_seeds, **kw)
+    out["n_zarc_requested"] = int(n_zarc)
+    if n_zarc <= 1 or not out.get("zarc_degenerate"):
+        return out
+
+    simpler = fit_nzarc_warburg_eis(spec, n_zarc=n_zarc - 1,
+                                    tau_seeds=(tau_seeds or [])[: n_zarc - 1],
+                                    **kw)
+    simpler["n_zarc_requested"] = int(n_zarc)
+    r_full, r_simple = out.get("zarc_rmse"), simpler.get("zarc_rmse")
+    if not np.isfinite(r_simple):
+        return out
+    # Keep the richer fit only if the extra branch bought a real improvement;
+    # it is degenerate either way, so it has to earn its place on residual.
+    if np.isfinite(r_full) and r_full < r_simple / (1 + ZARC_PARSIMONY_RMSE_TOLERANCE):
+        return out
+    logging.info(
+        "ZARC fit: %d branches came back degenerate (rmse %.4g) — keeping %d "
+        "(rmse %.4g, degenerate=%s)",
+        n_zarc, r_full if np.isfinite(r_full) else float("nan"),
+        n_zarc - 1, r_simple, simpler.get("zarc_degenerate"),
+    )
+    return simpler
 
 
 def build_eis_table(df: pd.DataFrame, direction=None, step=None,
-                    fit_2rc=True, fit_warburg=True, fit_zarc=True,
-                    two_stage_r0=True, hf_f_min=None) -> pd.DataFrame:
+                    fit_zarc=True, two_stage_r0=True, hf_f_min=None,
+                    n_zarc: int = ZARC_COLUMN_SLOTS) -> pd.DataFrame:
     """Per-measurement feature table with a time-ordered sweep SOC.
 
     ``two_stage_r0`` measures R0 on the high-frequency window first
-    (:func:`fit_hf_r0`) and pins it in the 2×ZARC fit, instead of letting the
+    (:func:`fit_hf_r0`) and pins it in the ZARC fit, instead of letting the
     full-band fit trade R0 against the mid-frequency arc. **On by default** —
     it is the standard path; pass ``False`` to reproduce a pre-#70 fit.
-    ``hf_f_min`` overrides
-    :data:`HF_R0_MIN_FREQ_HZ` for that first stage.
+    ``hf_f_min`` overrides :data:`HF_R0_MIN_FREQ_HZ` for that first stage.
 
-    One row per ``eis_number`` (measurement), ordered by ``Time``, with SOC
-    assigned by plateau index — mirroring ``assign_pulse_soc``.
+    ``n_zarc`` is the number of ZARC branches to *start* from; each spectrum
+    then keeps that many or fewer, because :func:`fit_zarc_with_parsimony`
+    drops a branch that comes back degenerate. The default of two is the right
+    starting point for both chemistries measured so far — a cell whose spectrum
+    is a single merged arc (LFP) lands on one branch on its own.
+
+    One row per ``eis_number`` (measurement), ordered by ``Time``.
     """
     direction = direction if direction is not None else SOC_SWEEP_DIRECTION
     step = step if step is not None else SOC_SWEEP_STEP_PCT
@@ -708,17 +886,22 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
             hf = fit_hf_r0(spec, f_min=hf_f_min)
             feat.update(hf)
             pin = hf["R0_hf"]
-        if fit_2rc:
-            # The crossing is a biased R0, but it is the right order of
-            # magnitude and costs nothing — fine as a starting guess.
-            fit = fit_2rc_eis(spec, r_ohm0=feat["R_cross"], r_tot0=feat["R_tot"])
-            feat.update(fit)
-            if fit_warburg:
-                wfit = fit_warburg_eis(spec, seed=fit, r_tot0=feat["R_tot"])
-                feat.update(wfit)
-                if fit_zarc:
-                    feat.update(fit_zarc_warburg_eis(
-                        spec, seed=wfit, r_tot0=feat["R_tot"], pin_r0=pin))
+        # The plain 2RC and the 2RC+Warburg stages are **out of the chain**.
+        # They existed to seed the ZARC fit, which now seeds itself from the
+        # DRT peaks (a better guess than an ideal-RC fit of a depressed arc)
+        # and from the spectrum's own high-frequency point. Their outputs were
+        # never a result — the ZARC fit superseded both — so running them cost
+        # two extra least-squares solves per spectrum to produce columns
+        # nothing downstream read. The functions themselves are kept for
+        # `analysis.eis_compare_impedancepy`.
+        #
+        #     fit = fit_2rc_eis(spec, r_ohm0=feat["R_cross"], r_tot0=feat["R_tot"])
+        #     feat.update(fit)
+        #     wfit = fit_warburg_eis(spec, seed=fit, r_tot0=feat["R_tot"])
+        #     feat.update(wfit)
+        if fit_zarc:
+            feat.update(fit_zarc_with_parsimony(
+                spec, n_zarc=n_zarc, r_tot0=feat["R_tot"], pin_r0=pin))
         # No order-based SOC ladder: `100 - step * i` assumes every step moved
         # the same charge, which the measured voltages contradict (the first
         # NFPP step drops 155 mV, the next ones ~15 mV, all labelled "5 %").
@@ -749,6 +932,76 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
     return out
 
 
+#: Default padding around a plotted data range, as a fraction of its span.
+#: Enough that markers on the extremes are not clipped by the frame.
+AXIS_PAD_FRACTION = 0.05
+
+
+def _padded_limits(*values, frac: float = AXIS_PAD_FRACTION, floor: float = None):
+    """``(lo, hi)`` spanning every finite value in ``values``, padded by ``frac``.
+
+    Returns ``None`` when there is nothing finite to frame, so the caller can
+    leave the axis on autoscale rather than setting a degenerate limit. A
+    constant series is given a symmetric window around its value instead of a
+    zero-width one. ``floor`` clamps the lower bound (e.g. an α axis must not
+    run below :data:`ZARC_ALPHA_MIN`, the bound α was fitted against).
+    """
+    vals = []
+    for v in values:
+        arr = pd.to_numeric(pd.Series(np.asarray(v).ravel()), errors="coerce")
+        arr = arr[np.isfinite(arr)]
+        if len(arr):
+            vals.append(arr)
+    if not vals:
+        return None
+    allv = pd.concat(vals)
+    lo, hi = float(allv.min()), float(allv.max())
+    span = hi - lo
+    if span <= 0:
+        span = abs(lo) if lo else 1.0
+        return lo - 0.5 * span, hi + 0.5 * span
+    lo, hi = lo - frac * span, hi + frac * span
+    if floor is not None:
+        lo = max(lo, floor)
+    return lo, hi
+
+
+def _autoscale(ax, x=None, y=None, **kw):
+    """Set padded x/y limits on ``ax`` from the given data, skipping empties."""
+    if x is not None:
+        lim = _padded_limits(x, **kw)
+        if lim:
+            ax.set_xlim(*lim)
+    if y is not None:
+        lim = _padded_limits(y, **kw)
+        if lim:
+            ax.set_ylim(*lim)
+
+
+def _frame_nyquist(ax, *frames):
+    """Frame a Nyquist axis on its **full** measured extent, padded.
+
+    Two things are going on. The limits are set explicitly rather than left to
+    autoscale so the frame comes from the data rather than from matplotlib's
+    tick rounding — which on these spectra padded the diffusion tail out by
+    most of a decade. And the equal aspect is made ``adjustable="box"``: with
+    the default ``"datalim"`` matplotlib holds the axes box fixed and *expands
+    the data limits* to make the scales equal, which silently undoes any limit
+    set here and stretches the plotted range. Adjusting the box instead honours
+    the limits and reshapes the frame around them.
+
+    ``frames`` are ``(Z_real, -Z_imag)`` pairs — pass the fitted curve as well
+    as the measured points so an overlay that overshoots stays in view.
+    """
+    ax.set_aspect("equal", adjustable="box")
+    xlim = _padded_limits(*[f[0] for f in frames])
+    ylim = _padded_limits(*[f[1] for f in frames])
+    if xlim:
+        ax.set_xlim(*xlim)
+    if ylim:
+        ax.set_ylim(*ylim)
+
+
 def plot_eis_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     """Grid of EIS readouts vs SOC — the EIS analogue of ``plot_vs_soc``."""
     import matplotlib
@@ -771,8 +1024,13 @@ def plot_eis_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
         ax.set_xlabel("SOC (%)")
         ax.set_ylabel(label)
         ax.grid(alpha=0.3)
+        _autoscale(ax, x=t["SOC_pct"])
         if col == "f_pk":
             ax.set_yscale("log")
+        else:
+            # A log axis padded in linear space would clip the decades; leave
+            # those on autoscale, which is already sensible in log.
+            _autoscale(ax, y=t[col])
     fig.suptitle(f"EIS parameters vs SOC — {title}", fontsize=11)
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
@@ -780,83 +1038,91 @@ def plot_eis_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     logging.info("EIS vs-SOC plot -> %s", out_png)
 
 
-def plot_2rc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
-    """Grid of the fitted 2RC parameters vs SOC — EIS analogue of the pulse 2RC."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    if "R0" not in table.columns:
-        logging.info("2RC vs-SOC plot: no fit columns, skipping")
-        return
-    metrics = [
-        ("R0", "R0 — series (mΩ)"),
-        ("L", "L — series inductance (mΩ·s)"),
-        ("R1", "R1 — fast branch (mΩ)"),
-        ("tau1", "τ1 (s)"),
-        ("R2", "R2 — slow branch (mΩ)"),
-        ("tau2", "τ2 (s)"),
-        ("rmse", "fit rmse (mΩ)"),
-    ]
-    metrics = [m for m in metrics if m[0] in table.columns]
-    t = table.sort_values("SOC_pct")
-    fig, axes = plt.subplots(2, 4, figsize=(19, 8))
-    for ax, (col, label) in zip(axes.ravel(), metrics):
-        ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#c0392b")
-        ax.set_xlabel("SOC (%)")
-        ax.set_ylabel(label)
-        ax.grid(alpha=0.3)
-        if col in ("tau1", "tau2"):
-            ax.set_yscale("log")
-    for ax in axes.ravel()[len(metrics):]:
-        ax.set_visible(False)
-    fig.suptitle(f"EIS 2RC+L fit parameters vs SOC — {title}", fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=120)
-    plt.close(fig)
-    logging.info("EIS 2RC vs-SOC plot -> %s", out_png)
-
-
-def plot_warburg_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
-    """Grid of the 2RC+L+Warburg fit parameters vs SOC (hides degenerate fits)."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    if "R_d" not in table.columns:
-        logging.info("Warburg vs-SOC plot: no Warburg columns, skipping")
-        return
-    t = table.sort_values("SOC_pct").copy()
-    if "warburg_degenerate" in t.columns:
-        n = int((t["warburg_degenerate"] == True).sum())  # noqa: E712
-        if n:
-            logging.info("Warburg vs-SOC plot: hiding %d degenerate fit(s)", n)
-        t = t[t["warburg_degenerate"] != True]  # noqa: E712
-    if t.empty:
-        logging.info("Warburg vs-SOC plot: nothing to plot")
-        return
-    metrics = [
-        ("R0_w", "R0 — series (mΩ)"),
-        ("R1_w", "R1 (mΩ)"), ("tau1_w", "τ1 (s)"),
-        ("R2_w", "R2 (mΩ)"), ("tau2_w", "τ2 (s)"),
-        ("R_d", "R_d — diffusion (mΩ)"), ("tau_d", "τ_d — diffusion (s)"),
-        ("warburg_rmse", "2RC+W rmse (mΩ)"),
-    ]
-    fig, axes = plt.subplots(2, 4, figsize=(19, 8))
-    for ax, (col, label) in zip(axes.ravel(), metrics):
-        ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#8e44ad")
-        ax.set_xlabel("SOC (%)")
-        ax.set_ylabel(label)
-        ax.grid(alpha=0.3)
-        if col in ("tau1_w", "tau2_w", "tau_d"):
-            ax.set_yscale("log")
-    fig.suptitle(f"EIS 2RC + Warburg fit parameters vs SOC — {title}", fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=120)
-    plt.close(fig)
-    logging.info("EIS Warburg vs-SOC plot -> %s", out_png)
+# ---------------------------------------------------------------------------
+# Retired plotters: the 2RC and the 2RC+Warburg fits are no longer in
+# `build_eis_table`'s chain (see the comment there), so the tables these two
+# drew from carry none of their columns and both would no-op on every call.
+# Commented out rather than deleted: they are the reference for what the
+# retired fits reported, and `analysis.eis_compare_impedancepy` still fits
+# those models. The ZARC grid below covers the live model.
+# ---------------------------------------------------------------------------
+# def plot_2rc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
+#     """Grid of the fitted 2RC parameters vs SOC — EIS analogue of the pulse 2RC."""
+#     import matplotlib
+#
+#     matplotlib.use("Agg")
+#     import matplotlib.pyplot as plt
+#
+#     if "R0" not in table.columns:
+#         logging.info("2RC vs-SOC plot: no fit columns, skipping")
+#         return
+#     metrics = [
+#         ("R0", "R0 — series (mΩ)"),
+#         ("L", "L — series inductance (mΩ·s)"),
+#         ("R1", "R1 — fast branch (mΩ)"),
+#         ("tau1", "τ1 (s)"),
+#         ("R2", "R2 — slow branch (mΩ)"),
+#         ("tau2", "τ2 (s)"),
+#         ("rmse", "fit rmse (mΩ)"),
+#     ]
+#     metrics = [m for m in metrics if m[0] in table.columns]
+#     t = table.sort_values("SOC_pct")
+#     fig, axes = plt.subplots(2, 4, figsize=(19, 8))
+#     for ax, (col, label) in zip(axes.ravel(), metrics):
+#         ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#c0392b")
+#         ax.set_xlabel("SOC (%)")
+#         ax.set_ylabel(label)
+#         ax.grid(alpha=0.3)
+#         if col in ("tau1", "tau2"):
+#             ax.set_yscale("log")
+#     for ax in axes.ravel()[len(metrics):]:
+#         ax.set_visible(False)
+#     fig.suptitle(f"EIS 2RC+L fit parameters vs SOC — {title}", fontsize=11)
+#     fig.tight_layout()
+#     fig.savefig(out_png, dpi=120)
+#     plt.close(fig)
+#     logging.info("EIS 2RC vs-SOC plot -> %s", out_png)
+#
+#
+# def plot_warburg_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
+#     """Grid of the 2RC+L+Warburg fit parameters vs SOC (hides degenerate fits)."""
+#     import matplotlib
+#
+#     matplotlib.use("Agg")
+#     import matplotlib.pyplot as plt
+#
+#     if "R_d" not in table.columns:
+#         logging.info("Warburg vs-SOC plot: no Warburg columns, skipping")
+#         return
+#     t = table.sort_values("SOC_pct").copy()
+#     if "warburg_degenerate" in t.columns:
+#         n = int((t["warburg_degenerate"] == True).sum())  # noqa: E712
+#         if n:
+#             logging.info("Warburg vs-SOC plot: hiding %d degenerate fit(s)", n)
+#         t = t[t["warburg_degenerate"] != True]  # noqa: E712
+#     if t.empty:
+#         logging.info("Warburg vs-SOC plot: nothing to plot")
+#         return
+#     metrics = [
+#         ("R0_w", "R0 — series (mΩ)"),
+#         ("R1_w", "R1 (mΩ)"), ("tau1_w", "τ1 (s)"),
+#         ("R2_w", "R2 (mΩ)"), ("tau2_w", "τ2 (s)"),
+#         ("R_d", "R_d — diffusion (mΩ)"), ("tau_d", "τ_d — diffusion (s)"),
+#         ("warburg_rmse", "2RC+W rmse (mΩ)"),
+#     ]
+#     fig, axes = plt.subplots(2, 4, figsize=(19, 8))
+#     for ax, (col, label) in zip(axes.ravel(), metrics):
+#         ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#8e44ad")
+#         ax.set_xlabel("SOC (%)")
+#         ax.set_ylabel(label)
+#         ax.grid(alpha=0.3)
+#         if col in ("tau1_w", "tau2_w", "tau_d"):
+#             ax.set_yscale("log")
+#     fig.suptitle(f"EIS 2RC + Warburg fit parameters vs SOC — {title}", fontsize=11)
+#     fig.tight_layout()
+#     fig.savefig(out_png, dpi=120)
+#     plt.close(fig)
+#     logging.info("EIS Warburg vs-SOC plot -> %s", out_png)
 
 
 def _z_diffusion_from_row(row, w):
@@ -874,7 +1140,12 @@ def _z_diffusion_from_row(row, w):
 
 
 def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
-    """Grid of the 2×ZARC+L+Warburg fit parameters vs SOC (hides degenerate)."""
+    """Grid of the N×ZARC+L+Warburg fit parameters vs SOC (hides degenerate).
+
+    ``N`` comes from the bundle's DRT, so the branch panels are built from the
+    columns that actually carry data: an all-NaN ``R2_z`` (a one-arc fit) drops
+    its three panels instead of drawing three empty axes.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -892,20 +1163,44 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     if t.empty:
         logging.info("ZARC vs-SOC plot: nothing to plot")
         return
-    metrics = [
-        ("R0_z", "R0 — series (mΩ)"),
-        ("R1_z", "R1 (mΩ)"), ("tau1_z", "τ1 (s)"), ("alpha1_z", "α1"),
-        ("R2_z", "R2 (mΩ)"), ("tau2_z", "τ2 (s)"), ("alpha2_z", "α2"),
+    metrics = [("R0_z", "R0 — series (mΩ)")]
+    for i in range(1, ZARC_COLUMN_SLOTS + 1):
+        metrics += [(f"R{i}_z", f"R{i} (mΩ)"), (f"tau{i}_z", f"τ{i} (s)"),
+                    (f"alpha{i}_z", f"α{i}")]
+    metrics += [
         ("R_d_z", "R_d — diffusion (mΩ)"), ("tau_d_z", "τ_d (s) — shape only"),
         ("phi_d_z", "φ_d — diffusion exponent"),
-        ("zarc_rmse", "2ZARC+W rmse (mΩ)"),
+        ("zarc_rmse", "ZARC+W rmse (mΩ)"),
     ]
-    metrics = [m for m in metrics if m[0] in t.columns]
-    fig, axes = plt.subplots(2, 6, figsize=(26, 8))
+    # Drop both absent and all-NaN columns: with n_zarc=1 the slot-2 columns
+    # exist (the schema is fixed) but hold nothing to draw.
+    metrics = [m for m in metrics if m[0] in t.columns and t[m[0]].notna().any()]
+    # The branch count is per spectrum, so one sweep can hold both one- and
+    # two-arc fits. Slots are ordered τ-ascending: on a two-arc spectrum slot 1
+    # is the *fast* arc, while a one-arc spectrum's single (dominant, slow)
+    # branch also lands in slot 1 — so `tau1_z` genuinely jumps by decades at
+    # the transition. Mark those points instead of letting the line imply a
+    # continuous trend through them.
+    n_col = t["n_zarc"] if "n_zarc" in t.columns else pd.Series(index=t.index, dtype=float)
+    counts = sorted(int(v) for v in n_col.dropna().unique())
+    one_arc = n_col == 1
+    mixed = len(counts) > 1
+    ncol = 6
+    nrow = int(np.ceil(len(metrics) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.4 * ncol, 4.0 * nrow),
+                             squeeze=False)
     for ax in axes.ravel()[len(metrics):]:
         ax.axis("off")
     for ax, (col, label) in zip(axes.ravel(), metrics):
-        ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#16a085")
+        ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#16a085",
+                label="2 ZARC" if mixed else None)
+        if mixed and one_arc.any():
+            ax.plot(t.loc[one_arc, "SOC_pct"], t.loc[one_arc, col], "s",
+                    ms=6, mfc="none", mec="#d35400", mew=1.4,
+                    label="1 ZARC (DRT: one arc)")
+            if col in ("R1_z", "tau1_z", "alpha1_z"):
+                # On these three the slot changes meaning, not just the value.
+                ax.set_facecolor("#fdf6f0")
         # Overlay the stage-1 HF estimate on the R0 panel: when R0 was pinned
         # the two coincide by construction, and when it was not, the gap is
         # exactly the series resistance the full-band fit lost to the arc.
@@ -918,14 +1213,40 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
                                 t["R0_hf"] + t["R0_hf_sigma"],
                                 color="#c0392b", alpha=0.15, lw=0)
             ax.legend(fontsize=7, loc="best")
+        elif mixed and one_arc.any():
+            ax.legend(fontsize=7, loc="best")
         ax.set_xlabel("SOC (%)")
         ax.set_ylabel(label)
         ax.grid(alpha=0.3)
-        if col in ("tau1_z", "tau2_z", "tau_d_z"):
-            ax.set_yscale("log")
-        if col in ("alpha1_z", "alpha2_z"):
-            ax.set_ylim(0.25, 1.05)
-    fig.suptitle(f"EIS 2×ZARC + Warburg fit parameters vs SOC — {title}", fontsize=11)
+        _autoscale(ax, x=t["SOC_pct"])
+        if col.startswith("tau"):
+            ax.set_yscale("log")   # padding a log axis linearly clips decades
+        elif col.startswith("alpha"):
+            # Was a hard-coded (0.25, 1.05). α is fitted inside
+            # [ZARC_ALPHA_MIN, 1], so a fixed window both wasted the band below
+            # the bound and hid how close a fit sat to it. Frame the data, then
+            # clamp to the box α was actually fitted against.
+            _autoscale(ax, y=t[col], floor=ZARC_ALPHA_MIN)
+            ax.axhline(ZARC_ALPHA_MIN, color="0.6", ls=":", lw=0.9)
+        elif col == "R0_z" and "R0_hf" in t.columns:
+            # Include the HF overlay and its ±1σ band in the frame.
+            sig = t["R0_hf_sigma"] if "R0_hf_sigma" in t.columns else 0.0
+            _autoscale(ax, y=[t[col], t["R0_hf"] - sig, t["R0_hf"] + sig])
+        else:
+            _autoscale(ax, y=t[col])
+    if not counts:
+        model_name = "N×ZARC"
+    elif mixed:
+        n_one = int(one_arc.sum())
+        model_name = (f"{'/'.join(str(c) for c in counts)}×ZARC per SOC "
+                      f"({n_one} of {len(t)} spectra fitted with one arc — "
+                      f"slot 1 is the fast arc on the 2-arc points and the "
+                      f"only arc on the 1-arc ones, so R1/τ1/α1 are not one "
+                      f"continuous trend)")
+    else:
+        model_name = f"{counts[0]}×ZARC"
+    fig.suptitle(f"EIS {model_name} + Warburg fit parameters vs SOC — {title}",
+                 fontsize=11 if not mixed else 9)
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     plt.close(fig)
@@ -934,53 +1255,58 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
 
 def plot_fit_overlay(df: pd.DataFrame, table: pd.DataFrame, out_png: str,
                      title: str = "", n_show: int = 6):
-    """Measured vs fitted Nyquist (2RC, 2RC+Warburg, 2ZARC+Warburg) per SOC."""
+    """Measured vs fitted Nyquist (N×ZARC + Warburg) per SOC.
+
+    The 2RC and 2RC+Warburg traces are gone with the fits that produced them
+    (see :func:`build_eis_table`) — this now gates on the ZARC columns.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    if "R0" not in table.columns:
+    if "R_d_z" not in table.columns:
+        logging.info("EIS fit overlay: no ZARC columns, skipping")
         return
-    t = table.dropna(subset=["R0"]).sort_values("SOC_pct")
+    t = table.dropna(subset=["R_d_z"]).sort_values("SOC_pct")
     if t.empty:
+        logging.info("EIS fit overlay: no converged fit to draw")
         return
     pick = t.iloc[np.linspace(0, len(t) - 1, min(n_show, len(t))).astype(int)]
-    has_w = "R_d" in table.columns
 
     ncol = 3
     nrow = int(np.ceil(len(pick) / ncol))
-    fig, axes = plt.subplots(nrow, ncol, figsize=(5 * ncol, 4.2 * nrow))
-    axes = np.atleast_1d(axes).ravel()
+    fig, axes = plt.subplots(nrow, ncol, figsize=(5 * ncol, 4.2 * nrow),
+                             squeeze=False)
+    axes = axes.ravel()
     for ax, (_, row) in zip(axes, pick.iterrows()):
         spec = df[df["eis_number"] == row["eis_number"]].sort_values("frequency")
         w = 2 * np.pi * spec["frequency"].to_numpy(float)
-        z2 = (row["R0"] + 1j * w * row.get("L", 0.0)
-              + row["R1"] / (1 + 1j * w * row["tau1"])
-              + row["R2"] / (1 + 1j * w * row["tau2"]))
-        ax.plot(spec["Z_real"], -spec["Z_imag"], "o", ms=3, color="#2f6fdb", label="measured")
-        ax.plot(z2.real, -z2.imag, "-", color="#c0392b", label=f"2RC ({row['rmse']:.3f})")
-        if has_w and np.isfinite(row.get("R_d", np.nan)):
-            zw = (row["R0_w"] + 1j * w * row["L_w"]
-                  + row["R1_w"] / (1 + 1j * w * row["tau1_w"])
-                  + row["R2_w"] / (1 + 1j * w * row["tau2_w"])
-                  + _z_warburg(row["R_d"], row["tau_d"], w))
-            ax.plot(zw.real, -zw.imag, "-", color="#8e44ad", label=f"2RC+W ({row['warburg_rmse']:.3f})")
-        if "R_d_z" in table.columns and np.isfinite(row.get("R_d_z", np.nan)):
-            zz = (row["R0_z"] + 1j * w * row["L_z"]
-                  + _z_zarc(row["R1_z"], row["tau1_z"], row["alpha1_z"], w)
-                  + _z_zarc(row["R2_z"], row["tau2_z"], row["alpha2_z"], w)
-                  + _z_diffusion_from_row(row, w))
-            ax.plot(zz.real, -zz.imag, "-", color="#16a085", label=f"2ZARC+W ({row['zarc_rmse']:.3f})")
+        zz = row["R0_z"] + 1j * w * row["L_z"] + _z_diffusion_from_row(row, w)
+        n_branch = 0
+        for i in range(1, ZARC_COLUMN_SLOTS + 1):
+            r_i, tau_i, a_i = (row.get(f"R{i}_z"), row.get(f"tau{i}_z"),
+                               row.get(f"alpha{i}_z"))
+            # Slots past this row's n_zarc are NaN — skip them rather than
+            # letting a NaN branch wipe out the whole curve.
+            if not all(np.isfinite(v) for v in (r_i, tau_i, a_i)):
+                continue
+            zz = zz + _z_zarc(r_i, tau_i, a_i, w)
+            n_branch += 1
+        ax.plot(spec["Z_real"], -spec["Z_imag"], "o", ms=3, color="#2f6fdb",
+                label="measured")
+        ax.plot(zz.real, -zz.imag, "-", color="#16a085",
+                label=f"{n_branch}ZARC+W ({row['zarc_rmse']:.3f})")
         title_bits = [f"SOC {row['SOC_pct']:.0f}%"]
-        if "zarc_rmse" in table.columns and np.isfinite(row.get("zarc_rmse", np.nan)):
-            title_bits.append(f"zarc rmse={row['zarc_rmse']:.3f}")
         if bool(row.get("zarc_degenerate", False)):
             title_bits.append("DEGENERATE")
         ax.set_title(" | ".join(title_bits), fontsize=9)
         ax.set_xlabel("Z_real (mΩ)")
         ax.set_ylabel("-Z_imag (mΩ)")
         ax.grid(alpha=0.3)
+        # Frame on measured *and* fitted, so a fit that overshoots is visible
+        # as an overshoot rather than by silently rescaling the measured data.
+        _frame_nyquist(ax, (spec["Z_real"], -spec["Z_imag"]), (zz.real, -zz.imag))
         ax.legend(fontsize=7)
     for ax in axes[len(pick):]:
         ax.set_visible(False)
@@ -1174,8 +1500,8 @@ def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, tit
                 color=_soc_color(soc.get(eid), cmap, norm))
     ax.set_xlabel("Z_real (mΩ)")
     ax.set_ylabel("-Z_imag (mΩ)")
-    ax.set_aspect("equal", adjustable="datalim")
     ax.grid(alpha=0.3)
+    _frame_nyquist(ax, (df["Z_real"], -df["Z_imag"]))
     add_hf_inset(ax, df, table, soc, cmap, norm, marker="-")
     fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="SOC (%)")
     # Bundle filenames are long and this figure is narrow, so wrap rather than
@@ -1223,22 +1549,24 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
 
     ax_nyq.set_xlabel("Z_real (mΩ)")
     ax_nyq.set_ylabel("-Z_imag (mΩ)")
-    ax_nyq.set_aspect("equal", adjustable="datalim")
     ax_nyq.grid(alpha=0.3)
     ax_nyq.set_title("Nyquist (measured)")
+    _frame_nyquist(ax_nyq, (df["Z_real"], -df["Z_imag"]))
     add_hf_inset(ax_nyq, df, table, soc, cmap, norm)
 
-    ax_mag.set_xscale("log")
-    ax_mag.set_xlabel("frequency (Hz)")
+    # Bode: the frequency axis is log (pad it there, not in linear space), the
+    # value axes are linear and get framed on the measured range — the phase
+    # one especially, which was left entirely to autoscale.
+    for ax in (ax_mag, ax_ph):
+        ax.set_xscale("log")
+        ax.set_xlabel("frequency (Hz)")
+        ax.grid(alpha=0.3, which="both")
     ax_mag.set_ylabel("|Z| (mΩ)")
-    ax_mag.grid(alpha=0.3, which="both")
     ax_mag.set_title("Bode — magnitude")
-
-    ax_ph.set_xscale("log")
-    ax_ph.set_xlabel("frequency (Hz)")
+    _autoscale(ax_mag, y=df["Z_abs"])
     ax_ph.set_ylabel("phase")
-    ax_ph.grid(alpha=0.3, which="both")
     ax_ph.set_title("Bode — phase")
+    _autoscale(ax_ph, y=df["phase"])
 
     fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=[ax_nyq, ax_mag, ax_ph],
                  label="SOC (%)", shrink=0.85, pad=0.02)
@@ -1269,9 +1597,9 @@ def main():
     table.to_csv(f"{stem}_eis_params.csv", index=False)
     logging.info("EIS param table -> %s", f"{stem}_eis_params.csv")
     plot_eis_vs_soc(table, f"{stem}_eis_vs_SOC.png", title=title)
-    plot_2rc_vs_soc(table, f"{stem}_eis_2RC_vs_SOC.png", title=title)
-    plot_warburg_vs_soc(table, f"{stem}_eis_2RC_warburg_vs_SOC.png", title=title)
-    plot_zarc_vs_soc(table, f"{stem}_eis_2ZARC_warburg_vs_SOC.png", title=title)
+    # The 2RC / 2RC+Warburg grids went with their fits — see the retired-plotter
+    # banner above.
+    plot_zarc_vs_soc(table, f"{stem}_eis_zarc_warburg_vs_SOC.png", title=title)
     plot_fit_overlay(df, table, f"{stem}_eis_fit_overlay.png", title=title)
     plot_nyquist_by_soc(df, table, f"{stem}_eis_nyquist_by_SOC.png", title=title)
 
