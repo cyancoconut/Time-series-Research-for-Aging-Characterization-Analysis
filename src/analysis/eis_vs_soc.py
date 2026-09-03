@@ -395,9 +395,6 @@ DIFFUSION_PHI_BOX = (0.2, 0.9)
 #: two-branch spectrum, all flagged degenerate. 0.7 decades (factor ~5, so
 #: τ_d = 5 s → a 1 s ceiling) separates them properly.
 #:
-#: The same margin governs which DRT peaks count as arcs
-#: (:func:`analysis.eis_drt.select_model_order` via :func:`zarc_tau_box`), so a
-#: peak is never counted as a branch the fit has no box to put it in.
 ZARC_DIFFUSION_MARGIN_DECADES = 0.7
 
 
@@ -580,14 +577,15 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     Each branch is a **ZARC** (depressed arc): a CPE exponent ``α ∈ (0,1]`` lets
     a real, flattened Nyquist semicircle be captured without inflating R/τ.
 
-    ``n_zarc`` is chosen from the spectrum's own DRT rather than fixed, via
-    :func:`analysis.eis_drt.select_model_order` — the DRT is the only thing in
-    the pipeline that can say how many relaxation processes are in a spectrum
-    *at all*, which is exactly the question "how many branches" asks. Two is the
-    normal answer on the parametrization cells; a cell resolving one arc gets
-    one branch instead of a second that has no peak to attach to (α pins to a
-    bound and the two branches swap roles between adjacent SOC points).
-    ``tau_seeds`` are the peak τ behind that count, used as the first multistart.
+    ``n_zarc`` is not fixed by the caller in normal use: :func:`build_eis_table`
+    starts every spectrum at :data:`ZARC_COLUMN_SLOTS` and
+    :func:`fit_zarc_with_parsimony` drops a branch that comes back degenerate,
+    so a cell whose spectrum is a single merged arc (LFP) lands on one branch
+    and one with two resolved processes (NFPP) keeps two.
+
+    ``tau_seeds`` optionally supplies the first multistart's τ. Measured to make
+    no difference on either chemistry — the fixed spreads find the same minima —
+    so nothing in the pipeline passes it; it is kept for one-off experiments.
 
     ``element`` picks the diffusion branch — see :data:`ZARC_DIFFUSION_ELEMENT`
     for the three forms; ``None`` takes that module default. Only
@@ -806,21 +804,26 @@ def fit_zarc_with_parsimony(spec: pd.DataFrame, n_zarc: int = 2,
                             tau_seeds=None, **kw) -> dict:
     """:func:`fit_nzarc_warburg_eis`, dropping a branch that earns nothing.
 
-    The DRT peak count is a good proposal but not a proof: a dispersive
-    Warburg (φ < 0.5) deposits γ mass *inside* the ZARC τ box, and that mass
-    can be both large (41 % of the in-band peak area on a synthetic
-    single-arc + big-diffusion spectrum) and **narrower** than the real arc, so
-    neither an area threshold nor a width test separates it from a genuine
-    second process. What does separate them is what the ECM makes of it: fitted
-    a branch it doesn't need, the model comes back **degenerate** — α pinned to
-    a bound, τ on the edge of its box, or one arc split into two near-identical
-    ones.
+    **This is the model-order selector.** Fit at ``n_zarc``; if that comes back
+    degenerate and ``n_zarc > 1``, fit again one branch simpler and keep the
+    simpler result unless the richer one is materially better on RMSE
+    (:data:`ZARC_PARSIMONY_RMSE_TOLERANCE`). Adds one solve only on the spectra
+    that actually hit the degenerate path.
 
-    So: fit at ``n_zarc``; if that is degenerate and ``n_zarc > 1``, fit again
-    one branch simpler and keep the simpler result unless the richer one is
-    both non-degenerate *or* materially better
-    (:data:`ZARC_PARSIMONY_RMSE_TOLERANCE`). Adds one solve only on the
-    spectra that actually hit the degenerate path.
+    Counting the DRT's peaks was tried first and dropped. It cannot do the job:
+    a dispersive Warburg (φ < 0.5) deposits γ mass *inside* the ZARC τ box that
+    is both large (41 % of the in-band peak area on a synthetic single-arc
+    spectrum, 13–36 % on the LFP sweep) and **narrower** than the real arc, so
+    neither an area threshold nor a width test separates it from a genuine
+    second process. Measured against this guard on real data it added nothing
+    on the LFP cell (identical fit) and made the NFPP cell *worse*, wrongly
+    dropping one spectrum to a single branch (mean rmse 0.0233 → 0.0320).
+
+    What does work is asking the ECM itself: given a branch it does not need,
+    the fit comes back **degenerate** — α pinned to a bound, τ on the edge of
+    its box, or one arc split into two near-identical ones. That test is a
+    property of the fit rather than of a regularisation parameter, so unlike a
+    DRT peak count it carries no dependence on λ.
 
     ``n_zarc_requested`` records what was asked for, ``n_zarc`` what was kept.
     """
@@ -851,7 +854,7 @@ def fit_zarc_with_parsimony(spec: pd.DataFrame, n_zarc: int = 2,
 
 def build_eis_table(df: pd.DataFrame, direction=None, step=None,
                     fit_zarc=True, two_stage_r0=True, hf_f_min=None,
-                    n_zarc=2, tau_seeds_by_eid=None) -> pd.DataFrame:
+                    n_zarc: int = ZARC_COLUMN_SLOTS) -> pd.DataFrame:
     """Per-measurement feature table with a time-ordered sweep SOC.
 
     ``two_stage_r0`` measures R0 on the high-frequency window first
@@ -860,20 +863,16 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
     it is the standard path; pass ``False`` to reproduce a pre-#70 fit.
     ``hf_f_min`` overrides :data:`HF_R0_MIN_FREQ_HZ` for that first stage.
 
-    ``n_zarc`` is the number of ZARC branches. Pass an ``int`` to use one count
-    for the whole bundle, or a **mapping** ``{eis_number: n}`` to fit each
-    spectrum with its own — which is what the pipeline does, from
-    :func:`analysis.eis_drt.select_model_order`: a SOC whose DRT resolves one
-    arc gets one branch, one resolving two or more gets two. Measurements
-    missing from the mapping fall back to :data:`ZARC_COLUMN_SLOTS`.
-    ``tau_seeds_by_eid`` maps ``eis_number`` to that spectrum's DRT peak τ,
-    used as the fit's first multistart.
+    ``n_zarc`` is the number of ZARC branches to *start* from; each spectrum
+    then keeps that many or fewer, because :func:`fit_zarc_with_parsimony`
+    drops a branch that comes back degenerate. The default of two is the right
+    starting point for both chemistries measured so far — a cell whose spectrum
+    is a single merged arc (LFP) lands on one branch on its own.
 
     One row per ``eis_number`` (measurement), ordered by ``Time``.
     """
     direction = direction if direction is not None else SOC_SWEEP_DIRECTION
     step = step if step is not None else SOC_SWEEP_STEP_PCT
-    tau_seeds_by_eid = tau_seeds_by_eid or {}
 
     order = (
         df.groupby("eis_number")["Time"].min().sort_values().index.tolist()
@@ -901,11 +900,8 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
         #     wfit = fit_warburg_eis(spec, seed=fit, r_tot0=feat["R_tot"])
         #     feat.update(wfit)
         if fit_zarc:
-            n_i = (n_zarc.get(eid, ZARC_COLUMN_SLOTS)
-                   if isinstance(n_zarc, dict) else n_zarc)
             feat.update(fit_zarc_with_parsimony(
-                spec, n_zarc=n_i, tau_seeds=tau_seeds_by_eid.get(eid),
-                r_tot0=feat["R_tot"], pin_r0=pin))
+                spec, n_zarc=n_zarc, r_tot0=feat["R_tot"], pin_r0=pin))
         # No order-based SOC ladder: `100 - step * i` assumes every step moved
         # the same charge, which the measured voltages contradict (the first
         # NFPP step drops 155 mV, the next ones ~15 mV, all labelled "5 %").

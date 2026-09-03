@@ -159,106 +159,16 @@ def drt_peaks(tau, gamma, rel_height=0.05):
     return pd.DataFrame(rows)
 
 
-#: Fraction of the in-band DRT peak area a peak must carry to count as a
-#: **separate ZARC branch** in :func:`select_model_order`. The NFPP sweep
-#: carries one dominant arc (R ≈ 2.3 mΩ at τ ≈ 0.01 s) plus two small ones
-#: (≈ 0.3–0.4 mΩ) and one runt (≈ 0.1 mΩ at τ ≈ 0.2 s); 5 % keeps the three
-#: and drops the runt. Raise it if the fit starts chasing noise.
-ARC_MIN_R_FRACTION = 0.05
-
-#: Hard cap on the number of ZARC branches the model order may request. Two
-#: is what the parametrization spectra support: a third has no discrete peak
-#: to attach to below 20 % SOC (α pins to 1.0 on 19/21 spectra and branches
-#: 2/3 swap roles between adjacent SOC points).
-MAX_ZARC_BRANCHES = 2
-
-def select_model_order(peaks: pd.DataFrame, f_min: float, f_max: float,
-                       tau_max: float = None,
-                       min_r_fraction: float = ARC_MIN_R_FRACTION,
-                       max_branches: int = MAX_ZARC_BRANCHES) -> tuple:
-    """How many ZARC branches this spectrum's DRT actually supports.
-
-    Returns ``(n_zarc, tau_seeds, diag)``. ``n_zarc`` is at least 1 — a
-    spectrum with no usable peak still gets one arc, because the alternative
-    is an ECM with no kinetics at all — and at most ``max_branches``.
-    ``tau_seeds`` are the τ of the retained peaks, largest ``R_peak`` first, so
-    the fit is seeded on the structure the DRT found rather than on a fixed
-    spread.
-
-    A DRT peak counts as an arc when all three hold:
-
-    * **inside the resolvable band** ``1/(2π f_max) … 1/(2π f_min)`` — the τ
-      grid is padded half a decade past the sweep on both sides (see
-      :data:`TAU_PAD_DECADES`) and the solver parks unidentifiable mass out
-      there, so a peak in the pad is a property of the grid, not the cell;
-    * **inside the box the ECM could actually put a branch in** — ``tau_max``
-      defaults to :func:`analysis.eis_vs_soc.zarc_tau_box`'s ceiling, which is
-      held clear of the pinned diffusion τ. Slower mass belongs to the Warburg
-      branch, already in the model, so counting it would buy a second element
-      for one process — and would also inflate the area denominator below,
-      hiding real fast arcs. A generalized Warburg with φ < 0.5 is dispersive
-      rather than purely blocking, so it deposits real γ mass *below* its own
-      τ_d, not only in the tail the series ``C_blk`` absorbs — which is why the
-      ceiling needs the margin and not just ``τ_d`` itself;
-    * **not a runt** — ``R_peak`` at least ``min_r_fraction`` of the total
-      in-band peak area.
-
-    Peak counts are λ-dependent (the same NFPP_02 data reads differently at
-    4e-3 and 1e-3), so this is a statement about (data, λ), like every other
-    number the DRT produces. ``diag`` carries the retained/rejected split so
-    that is auditable from ``parameters.json`` rather than only from the plot.
-    """
-    tau_lo = 1.0 / (2 * np.pi * float(f_max))
-    tau_hi = 1.0 / (2 * np.pi * float(f_min))
-    if tau_max is None:
-        # Same box the fit will use, so a peak is never counted as a branch the
-        # ECM has nowhere to put. Imported lazily: eis_vs_soc does not depend
-        # on this module and must not be made to.
-        from analysis.eis_vs_soc import zarc_tau_box
-        tau_max = zarc_tau_box(f_min, f_max)[1]
-    if tau_max is not None and np.isfinite(tau_max):
-        tau_hi = min(tau_hi, float(tau_max))
-
-    diag = {
-        "tau_band_s": [float(tau_lo), float(tau_hi)],
-        "min_r_fraction": float(min_r_fraction),
-        "n_peaks_total": int(len(peaks)),
-    }
-    if peaks is None or peaks.empty:
-        diag.update({"n_peaks_in_band": 0, "n_arcs": 1,
-                     "reason": "no DRT peaks — defaulting to 1 arc"})
-        return 1, [], diag
-
-    in_band = peaks[(peaks["tau_peak"] >= tau_lo) & (peaks["tau_peak"] <= tau_hi)]
-    diag["n_peaks_in_band"] = int(len(in_band))
-    if in_band.empty:
-        diag.update({"n_arcs": 1, "reason": "no DRT peak inside the resolvable band"})
-        return 1, [], diag
-
-    total = float(in_band["R_peak"].sum())
-    keep = in_band[in_band["R_peak"] >= min_r_fraction * total] if total > 0 else in_band
-    keep = keep.sort_values("R_peak", ascending=False)
-    diag["n_peaks_significant"] = int(len(keep))
-    diag["rejected_tau_s"] = [
-        float(t) for t in in_band.loc[~in_band.index.isin(keep.index), "tau_peak"]
-    ]
-
-    n = int(min(max(len(keep), 1), max_branches))
-    seeds = [float(t) for t in keep["tau_peak"].head(n)]
-    diag.update({"n_arcs": n, "tau_seeds_s": seeds})
-    return n, seeds, diag
-
-
 def solve_bundle(df: pd.DataFrame, lam=None):
     """DRT solve for every spectrum in a bundle — **no SOC**.
 
-    Split out of :func:`run_bundle` because γ(τ) does not depend on SOC (SOC
-    is only a label on the result) while the two consumers need it at
-    different times: :func:`select_model_order` has to see the peaks *before*
-    the ECM fit runs, and the plots need the SOC that only exists *after* it.
-    Solving once here and labelling afterwards keeps that from costing a second
-    solve — and keeps the DRT panel and the ``eis_fits.csv`` row beside it from
-    ever disagreeing about which SOC a spectrum was measured at.
+    Split from the SOC labelling (:func:`label_bundle`, with
+    :func:`run_bundle` a wrapper over both) because γ(τ) does not depend on SOC
+    — SOC is only a label on the result — so a caller that wants the peaks
+    before it has an SOC to attach can solve here and label later, without
+    paying for a second solve and without the DRT panel and the
+    ``eis_fits.csv`` row beside it ever disagreeing about which SOC a spectrum
+    was measured at.
 
     Returns ``(solved, lcurves)`` where ``solved`` is a list of per-measurement
     dicts in bundle time order, each carrying ``eis_number``, the ``tau``/

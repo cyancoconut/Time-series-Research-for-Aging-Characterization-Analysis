@@ -12,11 +12,13 @@ Models are fixed defaults:
   — notably SOC-plateau detection — don't touch the shared paper-analysis
   module; see the fork notice at the top of ``characterize/pulse_fit.py``).
 * **EIS** — N×ZARC + series-L + generalized Warburg
-  (:func:`analysis.eis_vs_soc.fit_nzarc_warburg_eis`). **N is not fixed**: it
-  is read off the bundle's own DRT
-  (:func:`analysis.eis_drt.select_model_order`), 2 on the parametrization
-  cells and 1 where only one arc is resolved, so a second branch is never
-  fitted against structure that isn't there. φ is fitted; τ_d is
+  (:func:`analysis.eis_vs_soc.fit_nzarc_warburg_eis`). **N is not fixed**:
+  every spectrum starts at two branches and
+  :func:`analysis.eis_vs_soc.fit_zarc_with_parsimony` drops one that comes
+  back degenerate, so a cell whose spectrum is a single merged arc (LFP) lands
+  on one branch and one with two resolved processes (NFPP) keeps two — without
+  a second branch ever being fitted against structure that isn't there.
+  φ is fitted; τ_d is
   **pinned** by ``DIFFUSION_TAU_BOX``, so ``R_d_z`` is the amplitude at
   ω = 1/τ_d and ``tau_d_z`` is a shape constant, not a result. Those settings
   are recorded in the params file so the numbers stay interpretable. Each
@@ -61,11 +63,11 @@ from util.run_context import CHARACTERIZATION
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 PULSE_MODEL = "2rc"
-#: The EIS branch count is no longer part of the model name: it is chosen per
-#: bundle from that bundle's DRT (:func:`analysis.eis_drt.select_model_order`),
-#: so a fixed "2zarc_warburg" would be a claim the run may not honour. The
-#: number actually used is in ``settings.bundles[].n_zarc`` and in the
-#: ``n_zarc`` column of every fit row.
+#: The EIS branch count is no longer part of the model name: it is decided per
+#: spectrum by :func:`analysis.eis_vs_soc.fit_zarc_with_parsimony`, so a fixed
+#: "2zarc_warburg" would be a claim the run may not honour. The number actually
+#: used is the ``n_zarc`` column of every fit row (``n_zarc_requested`` is what
+#: it started from).
 EIS_MODEL = "nzarc_warburg"
 
 #: Fixed DRT regularisation used by the pipeline. See the note in ``fit_eis``
@@ -111,12 +113,12 @@ EIS_COLS = [
     # visible from the CSV alone rather than having to be inferred.
     "R_cross", "f_cross_Hz", "R0_z", "L_z",
     "R0_hf", "R0_hf_sigma", "hf_rmse", "hf_n", "r0_pinned",
-    # Branch slots are fixed (eis_vs_soc.ZARC_COLUMN_SLOTS) even when the DRT
-    # asked for one arc, so one cell fitted with one branch and another fitted
-    # with two still share a CSV schema. `n_zarc` says how many were fitted and
-    # `drt_n_arcs` how many this spectrum's own DRT supported — they differ when
-    # the bundle-level consensus overrode a single spectrum.
-    "n_zarc", "drt_n_arcs",
+    # Branch slots are fixed (eis_vs_soc.ZARC_COLUMN_SLOTS) whatever N a given
+    # spectrum kept, so a one-branch cell and a two-branch cell still share a
+    # CSV schema (the unused slot is NaN). `n_zarc` is what was kept,
+    # `n_zarc_requested` what the fit started from — they differ exactly where
+    # the parsimony guard dropped a degenerate branch.
+    "n_zarc", "n_zarc_requested",
     "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
     "zarc_rmse", "zarc_degenerate",
@@ -729,78 +731,6 @@ def _eis_bundle_temperature(name: str, bundle_df: pd.DataFrame,
     return np.nan, "unavailable"
 
 
-def _bundle_model_order(bundle_df: pd.DataFrame, name: str, drt: bool = True,
-                        drt_lambda: float = None):
-    """How many ZARC branches to fit **each spectrum** with, from its own DRT.
-
-    Returns ``(n_by_eid, tau_seeds_by_eid, diag, solved)``. ``solved`` is the
-    :func:`analysis.eis_drt.solve_bundle` result, handed back so the DRT plots
-    later in :func:`fit_eis` reuse it instead of solving a second time.
-
-    The count is **per spectrum**: a SOC whose DRT resolves two or more arcs is
-    fitted with two ZARC branches, one that resolves a single arc with one. A
-    spectrum with no discrete second peak has nothing for a second branch to
-    attach to, and fitting one anyway is how α pins to a bound and two branches
-    start swapping roles between adjacent SOC points.
-
-    **This makes the branch slots mean different things at different SOC.**
-    Slots are ordered τ-ascending, so on a two-arc spectrum slot 1 is the *fast*
-    arc while on a one-arc spectrum the single (dominant, slow) branch also
-    lands in slot 1 — ``tau1_z`` then jumps by decades at the transition. That
-    is a property of the sweep, not an artefact, but it does mean the
-    ``R1_z``/``tau1_z`` vs-SOC curves must be read together with ``n_zarc``.
-    :func:`analysis.eis_vs_soc.plot_zarc_vs_soc` marks the one-arc points
-    separately for that reason.
-
-    With the DRT off, every spectrum falls back to the two-branch default: two
-    is what the parametrization spectra support, and dropping to one on no
-    evidence would be a worse guess than the model we already trust.
-    """
-    default_n = eis_drt.MAX_ZARC_BRANCHES
-    eids = bundle_df["eis_number"].unique().tolist()
-    if not drt:
-        return ({e: default_n for e in eids}, {},
-                {"n_zarc_source": "default (DRT off)"}, None)
-
-    solved, _ = eis_drt.solve_bundle(bundle_df, lam=drt_lambda)
-    if not solved:
-        return ({e: default_n for e in eids}, {},
-                {"n_zarc_source": "default (DRT found nothing)"}, solved)
-
-    seeds, n_by_eid = {}, {}
-    for sol in solved:
-        # Ceiling = the fit's own ZARC τ box, so the DRT never asks for a
-        # branch the ECM has no room to place (which is how a slow branch ends
-        # up sitting on τ_d absorbing the Warburg).
-        n_i, tau_i, _ = eis_drt.select_model_order(
-            sol["peaks"], sol["f_min"], sol["f_max"],
-            tau_max=eis_vs_soc.zarc_tau_box(sol["f_min"], sol["f_max"])[1],
-        )
-        seeds[sol["eis_number"]] = tau_i
-        n_by_eid[sol["eis_number"]] = n_i
-
-    counts = list(n_by_eid.values())
-    diag = {
-        "n_zarc_source": "drt-per-spectrum",
-        "n_zarc_by_measurement": dict(n_by_eid),
-        "n_zarc_counts": {str(k): counts.count(k) for k in sorted(set(counts))},
-        "drt_arc_min_r_fraction": eis_drt.ARC_MIN_R_FRACTION,
-        "drt_tau_diffusion_floor_s": eis_vs_soc.DIFFUSION_TAU_BOX[0],
-        "zarc_tau_margin_decades": eis_vs_soc.ZARC_DIFFUSION_MARGIN_DECADES,
-    }
-    if len(set(counts)) > 1:
-        logging.info(
-            "EIS %s: DRT arc count varies across the sweep (%s) — each spectrum "
-            "fitted with its own branch count; tau1_z/R1_z are not comparable "
-            "across the transition, read them with n_zarc",
-            name, diag["n_zarc_counts"],
-        )
-    else:
-        logging.info("EIS %s: DRT resolves %d arc(s) on every spectrum",
-                     name, counts[0])
-    return n_by_eid, seeds, diag, solved
-
-
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             soc_step_pct: float = None, ir_ohm: float = None,
             two_stage_r0: bool = True, hf_f_min: float = None,
@@ -856,15 +786,14 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             "hf_r0_f_min_hz": hf_f_min if two_stage_r0 else None,
             "drt": drt,
             "drt_lambda": drt_lambda if drt else None,
-            # The DRT is not only a companion diagnostic any more: it picks the
-            # ZARC branch count, **per spectrum**. These are the thresholds that
-            # turn its peaks into that count — see eis_drt.select_model_order.
-            # settings.bundles[].n_zarc_by_measurement records what each SOC got.
-            "zarc_branches_from_drt": drt,
-            "zarc_branches_per_spectrum": drt,
-            "zarc_branches_default": eis_drt.MAX_ZARC_BRANCHES,
-            "zarc_branches_max": eis_drt.MAX_ZARC_BRANCHES,
-            "drt_arc_min_r_fraction": eis_drt.ARC_MIN_R_FRACTION,
+            # Branch count: every spectrum starts here and keeps this many or
+            # fewer — `fit_zarc_with_parsimony` drops a branch that comes back
+            # degenerate. The DRT is a companion diagnostic only; it does not
+            # choose the model order (counting its peaks was tried and dropped:
+            # it added nothing on LFP and made NFPP worse).
+            "zarc_branches_start": eis_vs_soc.ZARC_COLUMN_SLOTS,
+            "zarc_parsimony_rmse_tolerance": eis_vs_soc.ZARC_PARSIMONY_RMSE_TOLERANCE,
+            "zarc_tau_margin_decades": eis_vs_soc.ZARC_DIFFUSION_MARGIN_DECADES,
             "zarc_column_slots": eis_vs_soc.ZARC_COLUMN_SLOTS,
             "soc_step_pct": step,
             "soc_direction_source": direction_source,
@@ -906,7 +835,6 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
 
     tables, bundle_diag = [], []
     raw_by_source = {}   # source -> raw measured-spectra df
-    solved_by_source = {}  # source -> eis_drt.solve_bundle result, reused for plots
     for path in files:
         name = os.path.basename(path)
         try:
@@ -915,26 +843,12 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             if direction is None:
                 logging.warning("%s: no EIS measurements — skipping", name)
                 continue
-            # Model order comes from the bundle's own DRT, before the ECM fit
-            # runs — it is the only thing here that can say how many relaxation
-            # processes a spectrum contains at all, which is exactly the
-            # question "how many ZARC branches" asks. The solve is kept and
-            # reused for the DRT plots further down, so this costs nothing
-            # extra; only the SOC labelling waits for the fit.
-            n_by_eid, tau_seeds, order_diag, solved = _bundle_model_order(
-                bundle_df, name, drt=drt, drt_lambda=drt_lambda)
-            diag.update(order_diag)
-            solved_by_source[name] = solved
+            # Branch count is decided inside the fit, per spectrum: start at
+            # two and let `fit_zarc_with_parsimony` drop one that comes back
+            # degenerate. Nothing is passed in here.
             table = eis_vs_soc.build_eis_table(
                 bundle_df, direction=direction, step=step,
-                two_stage_r0=two_stage_r0, hf_f_min=hf_f_min,
-                n_zarc=n_by_eid, tau_seeds_by_eid=tau_seeds)
-            # `n_zarc` (from the fit) is what was fitted; `drt_n_arcs` is what
-            # the DRT resolved. They are the same number on this path — the
-            # branch count is no longer overridden at bundle level — but the
-            # column is kept so a run that *does* override (DRT off) still says
-            # what the DRT would have asked for.
-            table["drt_n_arcs"] = table["eis_number"].map(n_by_eid)
+                two_stage_r0=two_stage_r0, hf_f_min=hf_f_min)
             table["sweep_direction"] = direction
             table["sweep_direction_source"] = diag["sweep_direction_source"]
             table["source"] = name
@@ -1104,21 +1018,11 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         # structure than it has parameters for.
         if not drt:
             continue
-        solved = solved_by_source.get(source)
-        if not solved:
-            logging.info("DRT: no solve retained for %s — skipping its plots", source)
-            continue
         try:
-            # Label the solve that already chose this bundle's model order,
-            # rather than solving again: same γ(τ), and the SOC on the DRT
-            # panel is by construction the SOC the fits used.
-            soc_by_eid = {k: v for k, v in
-                          zip(group["eis_number"], group["SOC_pct"])
-                          if pd.notna(v)}
-            curves, peaks, meta = eis_drt.label_bundle(
-                solved, soc_by_eid=soc_by_eid, direction=direction, step=step,
-                soc_source=(diag_by_source.get(source, {}).get("soc_source")
-                            or "supplied by caller"),
+            curves, peaks, meta, _ = eis_drt.run_bundle(
+                raw_df, lam=drt_lambda, data_dir=data_dir, ir_ohm=ir_ohm,
+                soc_by_eid=dict(zip(group["eis_number"], group["SOC_pct"])),
+                soc_source=diag_by_source.get(source, {}).get("soc_source"),
             )
         except Exception as exc:
             logging.warning("DRT failed for %s: %s", source, exc)

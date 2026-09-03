@@ -198,22 +198,36 @@ axis is scaled to the SOC 10–95 % interior because dV/dQ diverges into both
 voltage rails and would otherwise flatten the staging structure; the SOC axis
 is normalised against the full sweep so both panels line up.
 
-**EIS branch count comes from the DRT** — `N` in `N×ZARC` is not fixed.
-`eis_drt.select_model_order` counts the DRT peaks of each spectrum that are
-(a) inside the resolvable band `1/(2πf_max) … 1/(2πf_min)`, (b) faster than the
-pinned diffusion τ **by `ARC_TAU_DIFFUSION_MARGIN_DECADES` (0.7 dec)**, and
-(c) carrying at least `ARC_MIN_R_FRACTION` (5 %) of the in-band peak area.
-The count is taken **per spectrum**, so one sweep can hold both 1- and 2-arc
-fits: a SOC whose DRT resolves a single arc gets a single branch rather than a
-second fitted against structure that isn't there (which is how α pins to a
-bound and two branches swap roles between adjacent SOC points). Clamped to
-1–`MAX_ZARC_BRANCHES`=2. The count is in the `n_zarc` column and in
-`settings.bundles[].n_zarc_by_measurement`; `drt_n_arcs` records what the DRT
-asked for, which differs from `n_zarc` only when the DRT is off. The DRT peak
-τ additionally **seed** the fit's first multistart. With `eis_drt: false` every
-spectrum falls back to 2. Column slots are fixed at `ZARC_COLUMN_SLOTS`=2
-whatever N is, so a one-arc spectrum leaves `R2_z`/`tau2_z`/`alpha2_z` NaN
-rather than changing the CSV schema.
+**EIS branch count is decided by the fit, per spectrum** — `N` in `N×ZARC` is
+not fixed. Every spectrum starts at `ZARC_COLUMN_SLOTS` (2) and
+`fit_zarc_with_parsimony` refits at N−1 whenever the richer fit comes back
+**degenerate**, keeping the simpler result unless the richer one is better on
+RMSE by more than `ZARC_PARSIMONY_RMSE_TOLERANCE` (25 %). So one sweep can hold
+both 1- and 2-arc fits, and a second branch is never fitted against structure
+that isn't there (which is how α pins to a bound and two branches swap roles
+between adjacent SOC points). `n_zarc` is what was kept, `n_zarc_requested`
+what it started from. Column slots are fixed at 2 whatever N is, so a one-arc
+spectrum leaves `R2_z`/`tau2_z`/`alpha2_z` NaN rather than changing the CSV
+schema.
+
+Measured on two chemistries: **LFP** (A123 APR18650M1B, one merged arc) lands
+on N=1 on all 21 spectra with 0 degenerate; **NFPP** keeps N=2 on all 21 with 1
+degenerate, reproducing the pre-change committed fit to ~1e-5 relative on every
+parameter.
+
+**Counting DRT peaks was tried for this and dropped** (it was the first design).
+It cannot do the job: a dispersive Warburg deposits γ mass *inside* the ZARC τ
+box that is both large (41 % of the in-band peak area on a synthetic
+single-arc spectrum; 13–36 % on the LFP sweep) and **narrower** than the real
+arc — 0.10–0.42 decades against the true arc's 1.07–1.36 — so neither an area
+threshold nor a width test separates it from a genuine second process. Measured
+head-to-head against the parsimony guard on real data it added nothing on LFP
+(identical fit) and made NFPP **worse**, wrongly dropping one spectrum to a
+single branch (mean rmse 0.0233 → 0.0320). The DRT's τ as fit seeds likewise
+changed nothing (identical rmse on both cells). The degeneracy test is also a
+property of the fit rather than of a regularisation parameter, so unlike a peak
+count it carries no λ dependence. The DRT remains a companion diagnostic (γ/map
+plots, peak CSV) — its original purpose.
 
 **The ZARC and diffusion τ boxes must not touch.** `tz_hi` used to be
 `min(3/(2πf_min), DIFFUSION_TAU_BOX[0])`, i.e. capped at τ_d **exactly** — so
@@ -227,27 +241,11 @@ ceiling) below τ_d, and is the single source of truth for both the fit's box
 and the DRT's arc band — so a peak is never counted as a branch the ECM has
 nowhere to put.
 
-**Parsimony guard** (`fit_zarc_with_parsimony`, `ZARC_PARSIMONY_RMSE_TOLERANCE`
-0.25) — the DRT peak count is a proposal, not a proof. A dispersive Warburg
-deposits γ mass *inside* the ZARC box that is both large (41 % of the in-band
-peak area on a synthetic single-arc + big-diffusion spectrum) and **narrower**
-than the real arc, so neither an area threshold nor a width test separates it
-from a real process. What does is what the ECM makes of it: an unneeded branch
-comes back **degenerate**. So a degenerate N-branch fit is refitted at N−1 and
-the simpler result kept unless the richer one is materially better on RMSE.
-Costs one extra solve only on spectra that hit that path.
-
-**The diffusion margin is not cosmetic.** A generalized Warburg with φ < 0.5 is
-dispersive, not purely blocking, so it deposits real γ mass *below* its own τ_d
-rather than only in the blocking tail the DRT's series `C_blk` absorbs. Cutting
-the band at τ_d exactly counts that mass twice: once as a spurious kinetic arc
-(the fit then parks the extra branch on the ZARC τ box edge, flagged
-degenerate), and once in the denominator of the 5 % area test, where it dilutes
-genuine small *fast* arcs below the threshold — the mechanism that suppressed
-the fast arc at low SOC, where diffusion grows. Verified on synthetic spectra
-built from known circuits: 1-ZARC (α=0.8 and α=1.0) → N=1, 2-ZARC → N=2
-including a small fast arc beside a 20× larger slow one, each recovering its
-true τ.
+**Synthetic validation.** The selector is checked against spectra built from
+known circuits (ZARC + generalized Warburg + series L), where there is a ground
+truth to recover: 1-ZARC at α=0.8 and α=1.0 → N=1; 2-ZARC → N=2, including a
+small fast arc beside a 20× larger slow one; each recovering its true τ to the
+third digit.
 
 **Reading a mixed-N sweep.** Branch slots are ordered τ-ascending, so on a
 2-arc spectrum slot 1 is the *fast* arc while a 1-arc spectrum's single
@@ -366,9 +364,10 @@ that damages R0 most. **R0 stays monotone in SOC under all three**, so the
 two-stage fix is robust to this; left unmodelled deliberately. Untested idea:
 narrow the HF window's top instead of adding an element.
 
-**DRT** (`analysis/eis_drt.py`) — model-free companion **and the EIS model
-selector** (see the branch-count note above), run by default alongside every
-EIS fit (`eis_drt`, default true). `fit_eis` runs it per
+**DRT** (`analysis/eis_drt.py`) — model-free companion diagnostic, run by
+default alongside every EIS fit (`eis_drt`, default true). It does **not**
+choose the ECM branch count — that was tried and dropped, see the branch-count
+note above. `fit_eis` runs it per
 bundle on the same raw spectra, writing `plots/eis_drt_{gamma,map}_<stem>_<dir>.png`
 and `<cell>_eis_drt_peaks.csv` (one row per peak: `tau_peak`, `gamma_peak`,
 `R_peak`, `width_decades`), plus an `eis.drt` block in `parameters.json`. It
@@ -378,11 +377,10 @@ processes are in the spectrum at all — and the γ plot overlays the fitted τ,
 blanketing a region with more structure than it has parameters for (which is
 what `tau1_z` does on NFPP_01; see the bandwidth note). Adds ~0.5 s per bundle.
 The solve is **split from the SOC labelling** (`solve_bundle` → `label_bundle`,
-with `run_bundle` a wrapper over both) because γ(τ) does not depend on SOC while
-its two consumers need it at different times: `select_model_order` must see the
-peaks *before* the ECM fit, the plots need the SOC that exists only *after* it.
-`fit_eis` therefore solves once and labels later — no second solve, and the DRT
-panel still carries the same SOC as the `eis_fits.csv` row beside it.
+with `run_bundle` a wrapper over both, which is what `fit_eis` calls) because
+γ(τ) does not depend on SOC — SOC is only a label on the result. A caller that
+needs the peaks before it has an SOC to attach can therefore solve first and
+label later without paying for a second solve.
 
 **λ is fixed** (`eis_drt_lambda`, default `1e-3`), *not* the L-curve corner.
 The corner is better for a one-off investigation but is not reproducible enough
@@ -556,7 +554,7 @@ the "Run all 1→2→3→4→5" chain.
 | `eis_match_tolerance_minutes` | Max time gap to match an EIS measurement to a segment (default 120) |
 | `eis_two_stage_r0` | Measure R0 on the HF window and pin it in the N×ZARC fit, instead of fitting it against the correlated mid-frequency arc (**default true**). Fixes the spurious low-SOC R0 turnover; set false only to reproduce a pre-#70 fit. |
 | `eis_hf_r0_f_min_hz` | Lower frequency bound of the two-stage R0 window (default 100). Needs ≥10 points above it or the stage is skipped and R0 is fitted as before. |
-| `eis_drt` | Run the DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block, **and** the ZARC branch count. ~0.5 s per bundle. Set false and the count falls back to 2. |
+| `eis_drt` | Run the DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block. Diagnostic only — it does not set the ZARC branch count. ~0.5 s per bundle. |
 | `eis_drt_lambda` | Fixed DRT regularisation (default `1e-3`). Deliberately not the L-curve corner — see the DRT section. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |
