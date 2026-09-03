@@ -731,65 +731,70 @@ def _eis_bundle_temperature(name: str, bundle_df: pd.DataFrame,
 
 def _bundle_model_order(bundle_df: pd.DataFrame, name: str, drt: bool = True,
                         drt_lambda: float = None):
-    """How many ZARC branches to fit this bundle with, from its own DRT.
+    """How many ZARC branches to fit **each spectrum** with, from its own DRT.
 
-    Returns ``(n_zarc, tau_seeds_by_eid, diag, solved)``. ``solved`` is the
+    Returns ``(n_by_eid, tau_seeds_by_eid, diag, solved)``. ``solved`` is the
     :func:`analysis.eis_drt.solve_bundle` result, handed back so the DRT plots
     later in :func:`fit_eis` reuse it instead of solving a second time.
 
-    The count is taken at **bundle** level — the median of the per-spectrum
-    counts — not per spectrum. A branch count that flips between adjacent SOC
-    points would make ``R1_z``/``tau1_z`` mean different things on either side
-    of the flip and the vs-SOC curves jump there, which is the same failure the
-    disjoint τ boxes exist to prevent. The per-spectrum counts are kept in
-    ``drt_n_arcs`` so a bundle whose structure genuinely changes across the
-    sweep is still visible.
+    The count is **per spectrum**: a SOC whose DRT resolves two or more arcs is
+    fitted with two ZARC branches, one that resolves a single arc with one. A
+    spectrum with no discrete second peak has nothing for a second branch to
+    attach to, and fitting one anyway is how α pins to a bound and two branches
+    start swapping roles between adjacent SOC points.
 
-    With the DRT off, this falls back to the two-branch default: two is what
-    the parametrization spectra support, and dropping to one on no evidence
-    would be a worse guess than the model we already trust.
+    **This makes the branch slots mean different things at different SOC.**
+    Slots are ordered τ-ascending, so on a two-arc spectrum slot 1 is the *fast*
+    arc while on a one-arc spectrum the single (dominant, slow) branch also
+    lands in slot 1 — ``tau1_z`` then jumps by decades at the transition. That
+    is a property of the sweep, not an artefact, but it does mean the
+    ``R1_z``/``tau1_z`` vs-SOC curves must be read together with ``n_zarc``.
+    :func:`analysis.eis_vs_soc.plot_zarc_vs_soc` marks the one-arc points
+    separately for that reason.
+
+    With the DRT off, every spectrum falls back to the two-branch default: two
+    is what the parametrization spectra support, and dropping to one on no
+    evidence would be a worse guess than the model we already trust.
     """
     default_n = eis_drt.MAX_ZARC_BRANCHES
+    eids = bundle_df["eis_number"].unique().tolist()
     if not drt:
-        return default_n, {}, {"n_zarc": default_n,
-                               "n_zarc_source": "default (DRT off)"}, None
+        return ({e: default_n for e in eids}, {},
+                {"n_zarc_source": "default (DRT off)"}, None)
 
     solved, _ = eis_drt.solve_bundle(bundle_df, lam=drt_lambda)
     if not solved:
-        return default_n, {}, {"n_zarc": default_n,
-                               "n_zarc_source": "default (DRT found nothing)"}, solved
+        return ({e: default_n for e in eids}, {},
+                {"n_zarc_source": "default (DRT found nothing)"}, solved)
 
-    counts, seeds, per_meas = [], {}, {}
+    seeds, n_by_eid = {}, {}
     for sol in solved:
         n_i, tau_i, _ = eis_drt.select_model_order(
             sol["peaks"], sol["f_min"], sol["f_max"],
             tau_diffusion_floor=eis_vs_soc.DIFFUSION_TAU_BOX[0],
         )
-        counts.append(n_i)
         seeds[sol["eis_number"]] = tau_i
-        per_meas[sol["eis_number"]] = n_i
+        n_by_eid[sol["eis_number"]] = n_i
 
-    n_zarc = int(np.clip(round(float(np.median(counts))), 1,
-                         eis_drt.MAX_ZARC_BRANCHES))
+    counts = list(n_by_eid.values())
     diag = {
-        "n_zarc": n_zarc,
-        "n_zarc_source": "drt-median",
-        "drt_n_arcs_by_measurement": per_meas,
+        "n_zarc_source": "drt-per-spectrum",
+        "n_zarc_by_measurement": dict(n_by_eid),
+        "n_zarc_counts": {str(k): counts.count(k) for k in sorted(set(counts))},
         "drt_arc_min_r_fraction": eis_drt.ARC_MIN_R_FRACTION,
         "drt_tau_diffusion_floor_s": eis_vs_soc.DIFFUSION_TAU_BOX[0],
     }
-    disagree = sum(1 for c in counts if c != n_zarc)
-    if disagree:
-        diag["n_zarc_disagreeing_measurements"] = disagree
+    if len(set(counts)) > 1:
         logging.info(
-            "EIS %s: DRT arc count varies (%s) — fitting the whole bundle with "
-            "%d branch(es) so the vs-SOC curves stay comparable",
-            name, sorted(set(counts)), n_zarc,
+            "EIS %s: DRT arc count varies across the sweep (%s) — each spectrum "
+            "fitted with its own branch count; tau1_z/R1_z are not comparable "
+            "across the transition, read them with n_zarc",
+            name, diag["n_zarc_counts"],
         )
     else:
-        logging.info("EIS %s: DRT resolves %d arc(s) — fitting %d ZARC branch(es)",
-                     name, n_zarc, n_zarc)
-    return n_zarc, seeds, diag, solved
+        logging.info("EIS %s: DRT resolves %d arc(s) on every spectrum",
+                     name, counts[0])
+    return n_by_eid, seeds, diag, solved
 
 
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
@@ -848,9 +853,11 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             "drt": drt,
             "drt_lambda": drt_lambda if drt else None,
             # The DRT is not only a companion diagnostic any more: it picks the
-            # ZARC branch count. These are the thresholds that turn its peaks
-            # into that count — see eis_drt.select_model_order.
+            # ZARC branch count, **per spectrum**. These are the thresholds that
+            # turn its peaks into that count — see eis_drt.select_model_order.
+            # settings.bundles[].n_zarc_by_measurement records what each SOC got.
             "zarc_branches_from_drt": drt,
+            "zarc_branches_per_spectrum": drt,
             "zarc_branches_default": eis_drt.MAX_ZARC_BRANCHES,
             "zarc_branches_max": eis_drt.MAX_ZARC_BRANCHES,
             "drt_arc_min_r_fraction": eis_drt.ARC_MIN_R_FRACTION,
@@ -910,17 +917,20 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             # question "how many ZARC branches" asks. The solve is kept and
             # reused for the DRT plots further down, so this costs nothing
             # extra; only the SOC labelling waits for the fit.
-            n_zarc, tau_seeds, order_diag, solved = _bundle_model_order(
+            n_by_eid, tau_seeds, order_diag, solved = _bundle_model_order(
                 bundle_df, name, drt=drt, drt_lambda=drt_lambda)
             diag.update(order_diag)
             solved_by_source[name] = solved
             table = eis_vs_soc.build_eis_table(
                 bundle_df, direction=direction, step=step,
                 two_stage_r0=two_stage_r0, hf_f_min=hf_f_min,
-                n_zarc=n_zarc, tau_seeds_by_eid=tau_seeds)
-            table["drt_n_arcs"] = table["eis_number"].map(
-                order_diag.get("drt_n_arcs_by_measurement", {})
-            )
+                n_zarc=n_by_eid, tau_seeds_by_eid=tau_seeds)
+            # `n_zarc` (from the fit) is what was fitted; `drt_n_arcs` is what
+            # the DRT resolved. They are the same number on this path — the
+            # branch count is no longer overridden at bundle level — but the
+            # column is kept so a run that *does* override (DRT off) still says
+            # what the DRT would have asked for.
+            table["drt_n_arcs"] = table["eis_number"].map(n_by_eid)
             table["sweep_direction"] = direction
             table["sweep_direction_source"] = diag["sweep_direction_source"]
             table["source"] = name

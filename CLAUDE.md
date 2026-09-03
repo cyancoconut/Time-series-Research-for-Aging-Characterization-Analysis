@@ -201,19 +201,39 @@ is normalised against the full sweep so both panels line up.
 **EIS branch count comes from the DRT** — `N` in `N×ZARC` is not fixed.
 `eis_drt.select_model_order` counts the DRT peaks of each spectrum that are
 (a) inside the resolvable band `1/(2πf_max) … 1/(2πf_min)`, (b) faster than the
-pinned diffusion τ (5 s — anything slower is the Warburg branch, which is
-already in the model), and (c) carrying at least `ARC_MIN_R_FRACTION` (5 %) of
-the in-band peak area. The count is taken at **bundle** level (median over the
-spectra, clamped to 1–`MAX_ZARC_BRANCHES`=2) rather than per spectrum: a branch
-count that flipped mid-sweep would make `R1_z`/`tau1_z` mean different things
-on either side of the flip and the vs-SOC curves jump there. Per-spectrum
-counts survive as the `drt_n_arcs` column; the fitted count is `n_zarc`, also
-in `settings.bundles[]`. The DRT peak τ additionally **seed** the fit's first
-multistart. On the NFPP parametrization cells this resolves 2; a cell showing
-one arc gets one branch instead of a second fitted against structure that isn't
-there. With `eis_drt: false` the count falls back to 2. Column slots are fixed
-at `ZARC_COLUMN_SLOTS`=2 whatever N is, so a one-arc cell leaves `R2_z`/
-`tau2_z`/`alpha2_z` NaN rather than changing the CSV schema.
+pinned diffusion τ **by `ARC_TAU_DIFFUSION_MARGIN_DECADES` (0.7 dec)**, and
+(c) carrying at least `ARC_MIN_R_FRACTION` (5 %) of the in-band peak area.
+The count is taken **per spectrum**, so one sweep can hold both 1- and 2-arc
+fits: a SOC whose DRT resolves a single arc gets a single branch rather than a
+second fitted against structure that isn't there (which is how α pins to a
+bound and two branches swap roles between adjacent SOC points). Clamped to
+1–`MAX_ZARC_BRANCHES`=2. The count is in the `n_zarc` column and in
+`settings.bundles[].n_zarc_by_measurement`; `drt_n_arcs` records what the DRT
+asked for, which differs from `n_zarc` only when the DRT is off. The DRT peak
+τ additionally **seed** the fit's first multistart. With `eis_drt: false` every
+spectrum falls back to 2. Column slots are fixed at `ZARC_COLUMN_SLOTS`=2
+whatever N is, so a one-arc spectrum leaves `R2_z`/`tau2_z`/`alpha2_z` NaN
+rather than changing the CSV schema.
+
+**The diffusion margin is not cosmetic.** A generalized Warburg with φ < 0.5 is
+dispersive, not purely blocking, so it deposits real γ mass *below* its own τ_d
+rather than only in the blocking tail the DRT's series `C_blk` absorbs. Cutting
+the band at τ_d exactly counts that mass twice: once as a spurious kinetic arc
+(the fit then parks the extra branch on the ZARC τ box edge, flagged
+degenerate), and once in the denominator of the 5 % area test, where it dilutes
+genuine small *fast* arcs below the threshold — the mechanism that suppressed
+the fast arc at low SOC, where diffusion grows. Verified on synthetic spectra
+built from known circuits: 1-ZARC (α=0.8 and α=1.0) → N=1, 2-ZARC → N=2
+including a small fast arc beside a 20× larger slow one, each recovering its
+true τ.
+
+**Reading a mixed-N sweep.** Branch slots are ordered τ-ascending, so on a
+2-arc spectrum slot 1 is the *fast* arc while a 1-arc spectrum's single
+(dominant, slow) branch also lands in slot 1 — `tau1_z` genuinely jumps by
+decades at the transition. `R1_z`/`tau1_z`/`alpha1_z` are therefore **not one
+continuous trend** across such a sweep and must be read with `n_zarc`.
+`plot_zarc_vs_soc` marks the 1-arc points with open squares, tints those three
+panels, and says so in the title.
 
 **The 2RC and 2RC+Warburg EIS fits are retired** (commented out of
 `build_eis_table`'s chain, functions kept for

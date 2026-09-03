@@ -775,8 +775,12 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
     it is the standard path; pass ``False`` to reproduce a pre-#70 fit.
     ``hf_f_min`` overrides :data:`HF_R0_MIN_FREQ_HZ` for that first stage.
 
-    ``n_zarc`` is the number of ZARC branches, normally chosen from the
-    bundle's DRT by :func:`analysis.eis_drt.select_model_order`, and
+    ``n_zarc`` is the number of ZARC branches. Pass an ``int`` to use one count
+    for the whole bundle, or a **mapping** ``{eis_number: n}`` to fit each
+    spectrum with its own — which is what the pipeline does, from
+    :func:`analysis.eis_drt.select_model_order`: a SOC whose DRT resolves one
+    arc gets one branch, one resolving two or more gets two. Measurements
+    missing from the mapping fall back to :data:`ZARC_COLUMN_SLOTS`.
     ``tau_seeds_by_eid`` maps ``eis_number`` to that spectrum's DRT peak τ,
     used as the fit's first multistart.
 
@@ -812,8 +816,10 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
         #     wfit = fit_warburg_eis(spec, seed=fit, r_tot0=feat["R_tot"])
         #     feat.update(wfit)
         if fit_zarc:
+            n_i = (n_zarc.get(eid, ZARC_COLUMN_SLOTS)
+                   if isinstance(n_zarc, dict) else n_zarc)
             feat.update(fit_nzarc_warburg_eis(
-                spec, n_zarc=n_zarc, tau_seeds=tau_seeds_by_eid.get(eid),
+                spec, n_zarc=n_i, tau_seeds=tau_seeds_by_eid.get(eid),
                 r_tot0=feat["R_tot"], pin_r0=pin))
         # No order-based SOC ladder: `100 - step * i` assumes every step moved
         # the same charge, which the measured voltages contradict (the first
@@ -1088,7 +1094,16 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     # Drop both absent and all-NaN columns: with n_zarc=1 the slot-2 columns
     # exist (the schema is fixed) but hold nothing to draw.
     metrics = [m for m in metrics if m[0] in t.columns and t[m[0]].notna().any()]
-    n_zarc = int(t["n_zarc"].max()) if "n_zarc" in t.columns and t["n_zarc"].notna().any() else None
+    # The branch count is per spectrum, so one sweep can hold both one- and
+    # two-arc fits. Slots are ordered τ-ascending: on a two-arc spectrum slot 1
+    # is the *fast* arc, while a one-arc spectrum's single (dominant, slow)
+    # branch also lands in slot 1 — so `tau1_z` genuinely jumps by decades at
+    # the transition. Mark those points instead of letting the line imply a
+    # continuous trend through them.
+    n_col = t["n_zarc"] if "n_zarc" in t.columns else pd.Series(index=t.index, dtype=float)
+    counts = sorted(int(v) for v in n_col.dropna().unique())
+    one_arc = n_col == 1
+    mixed = len(counts) > 1
     ncol = 6
     nrow = int(np.ceil(len(metrics) / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.4 * ncol, 4.0 * nrow),
@@ -1096,7 +1111,15 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     for ax in axes.ravel()[len(metrics):]:
         ax.axis("off")
     for ax, (col, label) in zip(axes.ravel(), metrics):
-        ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#16a085")
+        ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#16a085",
+                label="2 ZARC" if mixed else None)
+        if mixed and one_arc.any():
+            ax.plot(t.loc[one_arc, "SOC_pct"], t.loc[one_arc, col], "s",
+                    ms=6, mfc="none", mec="#d35400", mew=1.4,
+                    label="1 ZARC (DRT: one arc)")
+            if col in ("R1_z", "tau1_z", "alpha1_z"):
+                # On these three the slot changes meaning, not just the value.
+                ax.set_facecolor("#fdf6f0")
         # Overlay the stage-1 HF estimate on the R0 panel: when R0 was pinned
         # the two coincide by construction, and when it was not, the gap is
         # exactly the series resistance the full-band fit lost to the arc.
@@ -1108,6 +1131,8 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
                                 t["R0_hf"] - t["R0_hf_sigma"],
                                 t["R0_hf"] + t["R0_hf_sigma"],
                                 color="#c0392b", alpha=0.15, lw=0)
+            ax.legend(fontsize=7, loc="best")
+        elif mixed and one_arc.any():
             ax.legend(fontsize=7, loc="best")
         ax.set_xlabel("SOC (%)")
         ax.set_ylabel(label)
@@ -1128,9 +1153,19 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
             _autoscale(ax, y=[t[col], t["R0_hf"] - sig, t["R0_hf"] + sig])
         else:
             _autoscale(ax, y=t[col])
-    model_name = f"{n_zarc}×ZARC" if n_zarc else "N×ZARC"
+    if not counts:
+        model_name = "N×ZARC"
+    elif mixed:
+        n_one = int(one_arc.sum())
+        model_name = (f"{'/'.join(str(c) for c in counts)}×ZARC per SOC "
+                      f"({n_one} of {len(t)} spectra fitted with one arc — "
+                      f"slot 1 is the fast arc on the 2-arc points and the "
+                      f"only arc on the 1-arc ones, so R1/τ1/α1 are not one "
+                      f"continuous trend)")
+    else:
+        model_name = f"{counts[0]}×ZARC"
     fig.suptitle(f"EIS {model_name} + Warburg fit parameters vs SOC — {title}",
-                 fontsize=11)
+                 fontsize=11 if not mixed else 9)
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     plt.close(fig)
