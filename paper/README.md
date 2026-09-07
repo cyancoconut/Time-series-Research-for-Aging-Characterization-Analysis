@@ -47,7 +47,7 @@ source below; anything not yet measured is a TODO box, not a placeholder value.
 | 5.3 | Hand-labelled segment F1 | Not run — needs a human labeller |
 | 5.4 | Detection recall + fixed-threshold baseline | `evaluation.detection_recall` → `50_evaluation/detection_recall_fleet_*.csv` |
 | 5.5 | Label space vs features | `evaluation.feature_ablation` → `50_evaluation/feature_ablation_*.csv` |
-| 5.6 | Cross-laboratory (ISU-ILCC, UConn-ILCC) | `evaluation.external_validation` → `50_evaluation/external_validation_*.csv` |
+| 5.6 | Cross-laboratory (ISU-ILCC, UConn-ILCC) | `evaluation.external_validation` → `50_evaluation/external_validation_*.csv`. Needs the layer-2 fix on branch `fix/layer2-capacity-cluster-selection` |
 
 Regenerate 5.4 and 5.5:
 
@@ -73,6 +73,13 @@ python -m evaluation.external_validation \
   --in-house /home/ann/Documents/Data_Metabatt/battery_config_{VTC,APR,Hina}_linux.json \
   -o /home/ann/Documents/Data_Metabatt/50_evaluation
 ```
+
+**The UConn epsilon workaround.** `battery_config_UConn_linux.json` had
+`cluster_selection_epsilon: 0.0` on both HDBSCAN layers, set to dodge the
+sklearn/numpy crash described at the bottom of this file. That crash is an
+environment problem, not a code one, so the config now carries the in-house
+values (0.3 / 0.001). These configs are gitignored, so that change lives only on
+disk — check it before reproducing 5.6.
 
 **Caveat on the ISU clustering row.** `external_validation` evaluates whichever
 routes a dataset has been run through. ISU-ILCC had only been run through the
