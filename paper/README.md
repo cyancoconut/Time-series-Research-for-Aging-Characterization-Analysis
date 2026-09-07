@@ -47,7 +47,7 @@ source below; anything not yet measured is a TODO box, not a placeholder value.
 | 5.3 | Hand-labelled segment F1 | Not run — needs a human labeller |
 | 5.4 | Detection recall + fixed-threshold baseline | `evaluation.detection_recall` → `50_evaluation/detection_recall_fleet_*.csv` |
 | 5.5 | Label space vs features | `evaluation.feature_ablation` → `50_evaluation/feature_ablation_*.csv` |
-| 5.6 | External dataset (Pozzato–Onori) | Not run |
+| 5.6 | Cross-laboratory (ISU-ILCC, UConn-ILCC) | `evaluation.external_validation` → `50_evaluation/external_validation_*.csv` |
 
 Regenerate 5.4 and 5.5:
 
@@ -65,16 +65,42 @@ python -m evaluation.feature_ablation \
   -o /home/ann/Documents/Data_Metabatt/50_evaluation
 ```
 
+Regenerate 5.6 (external laboratories):
+
+```bash
+python -m evaluation.external_validation \
+  --external ../battery_config_ISU_linux.json ../battery_config_UConn_linux.json \
+  --in-house /home/ann/Documents/Data_Metabatt/battery_config_{VTC,APR,Hina}_linux.json \
+  -o /home/ann/Documents/Data_Metabatt/50_evaluation
+```
+
+**Caveat on the ISU clustering row.** `external_validation` evaluates whichever
+routes a dataset has been run through. ISU-ILCC had only been run through the
+classifier route, so its clustering number (89.3 %) came from a separate HDBSCAN
+run on a *copy* of `ISU_pipeline/BRONZE_CU` — done on a copy because an in-place
+run would have overwritten the classifier-route GOLD and capacity exports. To
+reproduce it, copy `BRONZE_CU` to a scratch `working_path`, drop
+`classifier_model_path` from the config, and run
+`main.py <scratch_cfg> --clustering hdbscan --overwrite`; the resulting
+`with_features_post_labeled/*.csv` are what the row is computed from. Those CSVs
+are **not** currently in the ISU tree.
+
+Comparing a laboratory under one route against a laboratory under another
+confounds route with laboratory — which routes a dataset happens to have been
+processed with is an accident of its history. The module now loads every
+available route separately for this reason.
+
 ## Status
 
-Written from real results: **5.1, 5.2, 5.4, 5.5**. Scaffolding: 5.3, 5.6,
+Written from real results: **5.1, 5.2, 5.4, 5.5, 5.6**. Scaffolding: 5.3,
 related work, conclusion.
 
 Before submission, in rough priority order:
-1. **External-dataset validation (5.6)** — otherwise the portability claim must
-   be scoped to a single laboratory in the abstract, not just the limitations.
-2. **Hand-labelled F1 (5.3)** — the only place labels meet ground truth rather
+1. **Hand-labelled F1 (5.3)** — the only place labels meet ground truth rather
    than another automated route.
+2. Widen 5.6 beyond capacity: both external sources give an independent ground
+   truth for the capacity test only, and both are NMC-type, so laboratory and
+   chemistry are not fully crossed. Pozzato–Onori carries the full taxonomy.
 3. Either re-run and archive the per-cell 5.2 comparison, or cut its cell-level
    counts and let 5.5 carry the finding. Do not ship numbers whose artefacts
    are gone.

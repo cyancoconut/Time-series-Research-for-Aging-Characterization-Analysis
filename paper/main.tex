@@ -10,6 +10,7 @@
 \usepackage{amsmath}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{multirow}
 \usepackage{siunitx}
 \usepackage{xcolor}
 \usepackage{url}
@@ -64,7 +65,7 @@ segments a raw time series into procedures, describes each segment with
 scale-normalised features, and assigns capacity (CAP), pulse (PUL) and
 quasi-OCV (qOCV) labels.
 %
-We report two experiments. First, an ablation over the segmentation stage shows
+We report four experiments. First, an ablation over the segmentation stage shows
 that the protocol columns it currently reads are not load-bearing: the cycler's
 state column is redundant with the sign of the measured current to
 \SI{0.0008}{\percent} of \num{131442261} samples, and boundary placement driven
@@ -83,7 +84,12 @@ matches it on the chemistry it was calibrated for and finds nothing at all on
 either unseen one. Under controlled folds the difference is attributable to the
 label space rather than to the features: held-out capacity recall is
 \SI{0}{\percent} when the capacity C-rate must be learned and \SI{100}{\percent}
-when it is supplied as configuration, for every feature set tried.
+when it is supplied as configuration, for every feature set tried. Fourth, on
+\num{177} reference tests from two independent laboratories, given only their
+published cell parameters and no target-laboratory labels, the parameterised
+route recovers every capacity test, while density-based clustering tuned on our
+own bench recovers \SI{89.3}{\percent} on one of them and \SI{9.7}{\percent}
+on the other.
 \end{abstract}
 
 \begin{keyword}
@@ -143,6 +149,11 @@ assert and rarely tested; we test it.
 cells (Section~\ref{sec:res-loco}), including a negative result --- a
 conventionally-trained classifier that fails on an unseen chemistry --- and the
 design property that fixes it.
+\item A controlled separation of \emph{which} design property carries that
+transfer (Section~\ref{sec:res-ablation}), and a cross-laboratory test on two
+independent external sources (Section~\ref{sec:res-external}) in which the
+same property decides between recovering all \num{177} of their reference
+tests and recovering one in ten.
 \end{enumerate}
 
 We are explicit about what is \emph{not} claimed. The method is not
@@ -643,20 +654,110 @@ Section~\ref{sec:features} claims that excluding voltage-shape and temperature
 features costs no accuracy. Run that ablation --- add them back and report the
 change --- or soften the claim to a design rationale.}
 
-\subsection{Validation on an external dataset}
+\subsection{Validation on independent laboratories}
 \label{sec:res-external}
 
-\todobox{Experiment not yet run}{%
-All cells in Table~\ref{tab:cells} come from one institute, so nothing here
-supports a cross-laboratory claim. The strongest available remedy is the
-Pozzato--Onori dataset \cite{pozzato}, which contains the full taxonomy ---
-C/20 capacity, HPPC pulses and pseudo-OCV --- from an independent laboratory.
-Ingest it with a thin format adapter (which itself demonstrates the thesis:
-adapter, not analysis code) and report the same metrics.
-\textbf{Verify the file structure against the original dataset, not against a
-secondary processing script.} If this cannot be completed, the portability
-claim must be explicitly scoped to within-laboratory in the abstract and the
-conclusion, not only in the limitations.}
+Every cell in Table~\ref{tab:cells} was measured at one institute on one cycler
+family, so none of the preceding results speaks to portability between
+laboratories. We therefore ran the method against reference performance tests
+from two independent laboratories --- ISU-ILCC and UConn-ILCC --- ingested
+through thin format adapters and given nothing but their published cell
+parameters. \textbf{No label from either laboratory was used.}
+
+\paragraph{What an adapted dataset can and cannot test.} The adapters
+synthesise the columns the pipeline expects, and for ISU-ILCC the procedure
+field is a single constant while the state field is a per-sweep tag the adapter
+itself invents. The metadata ablation of Section~\ref{sec:res-metadata} is
+therefore \emph{not} run on these data: one cannot meaningfully ablate protocol
+columns one has written oneself, and reporting such a number would be
+circular. What the external data does test is the question that matters most
+here --- given a foreign laboratory's record and its datasheet scalars, are the
+check-ups found?
+
+\paragraph{Ground truth and detectors.} One programme is one reference
+performance test, guaranteed by both adapters' construction, so the denominator
+needs no labelling. Four detectors run over identical segments: the two
+labelling routes of Section~\ref{sec:labelling} as the pipeline actually runs
+them --- \emph{clustering} and the shipped \emph{classifier}; the
+\emph{configured criterion} applied as a rule (a full sweep that is a discharge
+within \SI{5}{\percent} of the laboratory's declared $C_{\mathrm{cap}}$); and a
+\emph{learned shape} model trained on the in-house fleet only, whose
+predictions are resolved against the external laboratory's $C_{\mathrm{cap}}$
+--- the procedure of Section~\ref{sec:res-ablation} with a laboratory boundary
+in place of a chemistry boundary.
+
+Both routes are run on both laboratories. This matters: which routes a dataset
+has happened to be processed with is an accident of its history, and comparing
+one laboratory under one route against another laboratory under another would
+confound the route with the laboratory.
+
+\begin{table}[t]
+\centering
+\caption{Cross-laboratory validation. \num{177} reference performance tests from
+two independent laboratories (3 cells each), no target-laboratory labels used.
+\emph{Tagged} is segments selected per test; one is ideal, and a detector that
+finds every test by tagging three segments in each has not solved the problem.}
+\label{tab:external}
+\begin{tabular}{llrrr}
+\toprule
+Laboratory & Detector & RPTs & Recovered & Tagged \\
+\midrule
+\multirow{4}{*}{ISU-ILCC}
+ & clustering            & \num{84} & \SI{89.3}{\percent} & \num{0.89} \\
+ & classifier (shipped)  & \num{84} & \SI{100}{\percent}  & \num{3.07} \\
+ & configured criterion  & \num{84} & \SI{100}{\percent}  & \num{1.00} \\
+ & learned shape         & \num{84} & \SI{100}{\percent}  & \num{1.00} \\
+\midrule
+\multirow{4}{*}{UConn-ILCC}
+ & clustering            & \num{93} & \SI{9.7}{\percent}  & \num{0.10} \\
+ & classifier (shipped)  & \num{93} & \SI{100}{\percent}  & \num{1.84} \\
+ & configured criterion  & \num{93} & \SI{100}{\percent}  & \num{1.09} \\
+ & learned shape         & \num{93} & \SI{100}{\percent}  & \num{1.12} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:external} gives the result. \textbf{Every parameterised detector
+recovers all \num{177} external capacity tests}, on laboratories whose cells
+differ from ours in capacity by a factor of eight (\SI{0.28}{\ampere\hour} for
+ISU-ILCC against \SI{3.0}{\ampere\hour} for our NMC) and whose capacity C-rates
+match none of ours. The learned model was never shown a segment from either
+laboratory; it was given each laboratory's declared $C_{\mathrm{cap}}$ and
+nothing else.
+
+The unsupervised route does not survive the move. It recovers \SI{89.3}{\percent}
+of the ISU-ILCC tests and \SI{9.7}{\percent} of the UConn-ILCC ones. That
+failure is instructive because it is not a failure of segmentation or of
+features: the UConn-ILCC records contain, per cell, \num{37} discharges within
+\SI{5}{\percent} of the declared C/3 rate with corrected SoC swings of
+\num{0.98}, each preceded by a full charge --- textbook capacity tests,
+correctly cut and correctly described --- of which the clustering labels three.
+Density-based clustering assigns labels by the composition of the population it
+is given, and a foreign laboratory's mix of segment types is not the one its
+thresholds were set against. The configured criterion, which asks only whether a
+segment is a full discharge at a declared rate, is indifferent to that mix.
+
+Recall is not the whole picture, and the last column is where the two
+parameterised detectors separate from the shipped classifier. All three recover
+every test, but the classifier tags \num{3.07} segments per test on ISU-ILCC and
+\num{1.84} on UConn-ILCC, against \num{1.00} and \num{1.09} for the configured
+criterion. This is the same over-tagging the in-house sodium-ion result showed
+(Section~\ref{sec:res-loco}) and the same remedy: resolving by rate alone admits
+partial discharges at that rate, and a scale-free measure of swept charge
+excludes them. The pattern therefore reproduces on foreign data, at a
+laboratory boundary rather than a chemistry one.
+
+\paragraph{Scope of the claim.} This establishes portability across
+laboratories for the \emph{capacity} test, on two sources. It does not yet
+establish it for the pulse and quasi-OCV labels, which these adapters do not
+give us an independent ground truth for.
+
+\todobox{Widening the external evidence}{%
+Both external sources are NMC-type cells, so laboratory and chemistry are not
+fully crossed. The Pozzato--Onori dataset \cite{pozzato} carries the complete
+taxonomy --- C/20 capacity, HPPC pulses and pseudo-OCV --- and would extend
+this section from capacity alone to all three segment types. \textbf{Verify its
+structure against the original dataset, not a secondary processing script.}}
 
 %% ===================================================================
 \section{Discussion}
@@ -706,10 +807,11 @@ segments at all; features decide how cleanly.
 \subsection{Limitations}
 
 \begin{itemize}
-\item \textbf{Single laboratory.} All cells in Table~\ref{tab:cells} were
-measured at one institute on one cycler family, so cross-laboratory portability
-is argued from construction, not demonstrated
-(Section~\ref{sec:res-external}).
+\item \textbf{Cross-laboratory evidence covers capacity only.} The in-house
+fleet is single-institute; Section~\ref{sec:res-external} adds two independent
+laboratories, but their adapters give an independent ground truth for the
+capacity test alone, not for the pulse and quasi-OCV labels. Both external
+sources are also NMC-type, so laboratory and chemistry are not fully crossed.
 \item \textbf{The signal-only segmenter was measured, not adopted.}
 Section~\ref{sec:res-metadata} evaluates it as an ablation of the shipped
 implementation. We report what it recovers, not a system built on it, and the
