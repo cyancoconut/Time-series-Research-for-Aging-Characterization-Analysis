@@ -474,10 +474,36 @@ learned ``capacity test'' to mean ``a full discharge at C/2''
 (Section~\ref{sec:res-ablation} isolates this under controlled folds).
 Retraining the
 same model on a scale-free description of segment shape --- full or partial,
-charge or discharge, at a measured C-rate --- and resolving that description
-against the target cell's $C_{\mathrm{cap}}$ at inference recovers all \num{16},
-reproducing the unsupervised result exactly. On sodium-ion, both routes recover
-all \num{6} check-ups.
+charge or discharge --- and resolving that description against the target cell's
+$C_{\mathrm{cap}}$ at inference recovers all \num{16}, reproducing the
+unsupervised result exactly. On sodium-ion, both routes recover all \num{6}
+check-ups.
+
+\paragraph{Why a model trained at C/2 recognises a discharge at 1C.} The
+result is initially counter-intuitive --- the model has never seen a 1C capacity
+test --- so it is worth being explicit about what changes, because nothing about
+the model, the features or the training data does. Only the question does.
+
+In the absolute space the model is asked \emph{is this the capacity test?} That
+question is rate-dependent: its ``yes'' examples all sit at a normalised current
+of \num{0.5}, so an LFP discharge at \num{1.0} is outside the class it learned
+and there is no route by which the model could know that this cell's capacity
+rate is different. In the shape space it is asked \emph{what shape is this?} ---
+a question with no rate in it. A full discharge is a full discharge whether it
+takes one hour or two, and the training class reflects that: on our fleet its
+members already span normalised currents from \num{0.05} to \num{1.0}. A 1C full
+discharge is therefore an ordinary member of a class the model learned from NMC
+and sodium-ion cells, not an extrapolation.
+
+The rate then enters exactly once, after the model has finished, as arithmetic
+rather than inference: is this segment's \emph{measured} current within
+\SI{5}{\percent} of the rate this cell's configuration declares? LFP declares
+1C and the segment measures 1C, so it resolves to a capacity test. Under the
+controlled folds of Section~\ref{sec:res-ablation} --- training on NMC and
+sodium-ion, testing on LFP --- all \num{39} LFP capacity tests are predicted
+\texttt{full\_discharge} and all \num{39} resolve correctly.
+
+The chemistry-specific quantity is never learned, so it never has to transfer.
 
 The sodium-ion result carries a caveat that must be stated with it: the
 scale-free model tags \emph{two} capacity segments per check-up in four of the
