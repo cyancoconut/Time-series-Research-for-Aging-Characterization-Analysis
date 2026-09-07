@@ -20,7 +20,7 @@ sudo apt install -y --no-install-recommends \
 `texlive-publishers` carries `elsarticle.cls` and `elsarticle-num.bst`;
 `texlive-science` carries `siunitx`. Those two are the easy ones to miss.
 
-Builds clean (8 pages, 5 references, no undefined citations, no overfull boxes
+Builds clean (11 pages, 5 references, no undefined citations, no overfull boxes
 over 20 pt). Citations need two `latexmk` passes on a cold build — run it twice
 if you see `Citation ... undefined`.
 
