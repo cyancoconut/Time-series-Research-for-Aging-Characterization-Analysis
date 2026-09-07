@@ -9,10 +9,23 @@ Strategy and scope decisions: `.claude/handoffs/2026-07-23-paper-scope-checkup-s
 latexmk -pdf main.tex
 ```
 
-Needs the `elsarticle` class (TeX Live package `elsarticle`, or start from the
-Overleaf "Elsevier article" template). **Not yet compiled** — no LaTeX
-toolchain was available on the machine where this draft was written, so the
-first build may surface package or syntax errors.
+Needs `elsarticle`. On Ubuntu 24.04:
+
+```bash
+sudo apt install -y --no-install-recommends \
+  latexmk texlive-latex-recommended texlive-latex-extra \
+  texlive-publishers texlive-science texlive-fonts-recommended
+```
+
+`texlive-publishers` carries `elsarticle.cls` and `elsarticle-num.bst`;
+`texlive-science` carries `siunitx`. Those two are the easy ones to miss.
+
+Builds clean (8 pages, 5 references, no undefined citations, no overfull boxes
+over 20 pt). Citations need two `latexmk` passes on a cold build — run it twice
+if you see `Citation ... undefined`.
+
+Build artifacts are gitignored. Note that Elsevier wants `main.bbl` included at
+submission time, so un-ignore it when you get there.
 
 ## Draft conventions
 
