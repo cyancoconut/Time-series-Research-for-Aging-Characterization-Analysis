@@ -76,7 +76,14 @@ capacity test on unseen LFP and sodium-ion cells given only their physical
 parameters, provided its label space is scale-free; a classifier trained on
 absolute C-rates fails completely on LFP.
 %
-\todo{one closing sentence once items 3--5 have run}
+Third, on \num{210} check-ups the method detects every one that is not a
+fragmentary or aborted file, with no false detections on any chemistry, while a
+fixed-current detector of the kind used to discard RPTs in existing pipelines
+matches it on the chemistry it was calibrated for and finds nothing at all on
+either unseen one. Under controlled folds the difference is attributable to the
+label space rather than to the features: held-out capacity recall is
+\SI{0}{\percent} when the capacity C-rate must be learned and \SI{100}{\percent}
+when it is supplied as configuration, for every feature set tried.
 \end{abstract}
 
 \begin{keyword}
@@ -243,9 +250,10 @@ $I_{\text{range}}$, $|I|_{\text{mean}}$), the voltage \emph{edges}
 
 Two choices deserve comment. First, voltage \emph{shape} descriptors (mean and
 standard deviation of $V$ within the segment) and temperature are deliberately
-excluded: they are the most chemistry- and fixture-bound quantities available,
-and omitting them costs no accuracy \todo{cite the ablation number once
-Section~\ref{sec:res-ablation} is run}. Second, a segment is not interpretable
+excluded as the most chemistry- and fixture-bound quantities available
+\todo{this is a design rationale until the add-them-back ablation of
+Section~\ref{sec:res-ablation} is run --- do not claim ``costs no accuracy''
+until it is}. Second, a segment is not interpretable
 in isolation --- a capacity discharge and a preparatory discharge differ mainly
 in what preceded them --- so we add the normalised end-of-segment voltage of the
 most recent non-rest predecessor. This is the signal a rule-based capacity test
@@ -301,14 +309,19 @@ Na-ion & \todo{Hina, model} & 10.5 & C/2 & 1 \\
 \end{tabular}
 \end{table}
 
-The three chemistries were chosen for what they stress. LFP is the hard case for
-any voltage-based feature: its flat plateau compresses the voltage range that
-distinguishes a full sweep from a partial one. Sodium-ion is included because
-automated check-up decomposition for this chemistry is, to our knowledge,
-unreported, and because its differing voltage window tests whether normalisation
-by $(V_{\max}-V_{\min})$ is doing real work. The capacity C-rate also differs
-between NMC (C/2) and LFP (1C), which turns out to be the decisive variable in
-Section~\ref{sec:res-loco}.
+The three chemistries were chosen for what they stress. Their capacity tests run
+at different C-rates --- C/2 for NMC and sodium-ion, 1C for LFP --- and their
+cells differ in size by nearly an order of magnitude, so a method that has
+absorbed any absolute current or duration from one will fail on the others.
+That turns out to be the decisive variable (Sections~\ref{sec:res-recall}
+and~\ref{sec:res-ablation}). Sodium-ion is included because automated check-up
+decomposition for this chemistry is, to our knowledge, unreported, and because
+its differing voltage window tests whether normalisation by
+$(V_{\max}-V_{\min})$ is doing real work.
+
+We also expected LFP's flat discharge plateau to be the hard case for any
+voltage-based feature. It is not; Section~\ref{sec:res-ablation} reports the
+measurement rather than the expectation.
 
 \todo{The larger fleet (\num{200} LFP, \num{80} sodium-ion cells) exists but was
 not used here. Either bring it in --- it turns per-chemistry $n$ from 1--2 into a
@@ -436,34 +449,42 @@ monotonic capacity trajectory from \SI{98.3}{\percent} to \SI{60.2}{\percent} of
 nominal, with a first measured capacity of \SI{1.18}{\ampere\hour} against
 \SI{1.2}{\ampere\hour} nominal. The mechanism is that the capacity C-rate enters
 as a parameter rather than being learned: on LFP the first clustering layer
-finds no clean capacity cluster --- the flat plateau removes the voltage
-contrast it relies on --- and a second, stricter layer recovers it.
+finds no clean capacity cluster and a second, stricter layer recovers it, with
+the target rate supplied by configuration at both stages.
 
 The supervised route exposes a design failure worth reporting. A random forest
 trained on NMC and applied to LFP labels \emph{none} of the \num{16} capacity
 discharges correctly, and every check-up consequently reports no state of
-health. The cause is not the flat plateau but the C-rate: NMC capacity tests run
+health. The cause is the C-rate: NMC capacity tests run
 at C/2 and LFP at 1C, and a model trained on absolute pipeline labels has
-learned ``capacity test'' to mean ``a full discharge at C/2''. Retraining the
+learned ``capacity test'' to mean ``a full discharge at C/2''
+(Section~\ref{sec:res-ablation} isolates this under controlled folds).
+Retraining the
 same model on a scale-free description of segment shape --- full or partial,
 charge or discharge, at a measured C-rate --- and resolving that description
 against the target cell's $C_{\mathrm{cap}}$ at inference recovers all \num{16},
 reproducing the unsupervised result exactly. On sodium-ion, both routes recover
 all \num{6} check-ups.
 
-\todobox{Provenance and completeness}{%
-These numbers are from a run of 2026-07-23 whose comparison artefacts have since
-been overwritten (the comparison tool writes to a fixed filename, so a later
-chemistry's run replaced the earlier one's output). \textbf{Re-run all three
-chemistries and archive the outputs under per-chemistry names before this
-section is submitted.} Also report, in the table this paragraph should become:
-per-chemistry counts of segments and check-ups, precision and recall per label
-class rather than capacity counts alone, and the sodium-ion over-tagging
-behaviour --- the scale-free model tags two capacity segments per check-up in
-four of six programmes, because it resolves capacity by C-rate alone and does
-not test for a full voltage swing. The downstream capacity calculation rejects
-the extras, so the reported capacity is unaffected, but the label precision is
-not \SI{100}{\percent} and the paper must say so.}
+The sodium-ion result carries a caveat that must be stated with it: the
+scale-free model tags \emph{two} capacity segments per check-up in four of the
+six programmes. It resolves capacity by C-rate alone and does not test for a
+full voltage swing, so a partial discharge at the capacity rate is accepted. The
+downstream capacity calculation rejects the extras --- it requires a preceding
+full charge --- so the reported capacity is unaffected, but label precision is
+not \SI{100}{\percent}. Section~\ref{sec:res-ablation} quantifies this and shows
+the coulombic feature removes it.
+
+\todobox{Provenance}{%
+The per-cell numbers in this section come from a run of 2026-07-23 whose
+comparison artefacts were overwritten (the comparison tool writes to a fixed
+filename, so a later chemistry's run replaced the earlier one's). The
+\emph{finding} is independently reproduced under controlled folds in
+Section~\ref{sec:res-ablation}, which is the version a reader can re-run.
+Before submission, either re-run the per-cell comparison and archive it under
+per-chemistry names, or cut this section's cell-level counts and let
+Section~\ref{sec:res-ablation} carry the result. Do not present numbers whose
+artefacts no longer exist.}
 
 \subsection{Segment-type accuracy against hand labels}
 \label{sec:res-f1}
@@ -478,39 +499,149 @@ other --- Section~\ref{sec:res-loco} compares two automated routes, which cannot
 detect an error both make. Without it, a reviewer is entitled to ask what the
 accuracy actually is.}
 
-\subsection{Check-up detection recall against the test plan}
+\subsection{Check-up detection recall, and a fixed-threshold baseline}
 \label{sec:res-recall}
 
-\todobox{Experiment not yet run}{%
-The test plan states when every check-up was scheduled, which is ground truth
-that requires no labelling effort: for each cell, compare the set of detected
-check-ups against the scheduled set and report recall and false-detection rate.
-This measures the question the paper is actually about --- \emph{did we find the
-check-ups} --- as opposed to whether we labelled their contents correctly.}
+Sections~\ref{sec:res-metadata} and~\ref{sec:res-loco} ask whether segments are
+cut and labelled correctly. This section asks the question the method exists for:
+given a cell's raw record, are the check-ups found at all?
 
-\subsection{Comparison against a rule-based baseline}
-\label{sec:res-baseline}
+\paragraph{Ground truth.} The cycler writes one file per test, and the procedure
+name in each file's header states whether that test was a check-up. That
+assignment is made once, at ingest, and is independent of everything downstream:
+it says \emph{where the answer is}, while the method has to find the check-up
+inside the signal. Using it as ground truth to score a method that never reads
+it is therefore not circular. It is, however, weaker than a written schedule,
+and we state the limitation rather than the stronger claim: it counts check-ups
+\emph{present in the data}, so one that was scheduled but never ran, or ran but
+was never uploaded, is invisible here. Ground truth is read from the raw layer
+rather than from the segmented output, so that a programme the segmenter dropped
+entirely cannot disappear from the denominator.
 
-\todobox{Experiment not yet run}{%
-Report the method against the fixed-threshold approach the foils use, applied to
-our data: a hard current threshold for capacity detection of the kind used in
-\cite{batterylife}. Report where it fails and why. The comparison must be fair
---- the baseline was written for a different purpose --- so frame it as
-quantifying the cost of a fixed threshold under a chemistry change, not as a
-defeat of prior work.}
+A check-up counts as \emph{detected} when the pipeline produced a capacity value
+for it, and as \emph{complete} when it also yielded a pulse and both quasi-OCV
+branches.
 
-\subsection{Feature ablation}
+\paragraph{Baseline.} The foils locate the capacity test with a fixed absolute
+current --- in BatteryLife's MICH script, a hard-coded threshold near
+\SI{2.37}{\ampere}, used to \emph{delete} the RPT \cite{batterylife}. We
+reproduce the structure of that approach rather than its constant: a single
+absolute current, calibrated on one chemistry (NMC, whose capacity test is C/2
+on a \SI{3.0}{\ampere\hour} cell, i.e.\ \SI{1.5}{\ampere}), applied unchanged to
+the others. A segment is called a capacity test when it is a discharge within
+\SI{5}{\percent} of that current lasting at least \SI{30}{\minute}. This is not
+a defeat of prior work --- the threshold was written for a different purpose, on
+a single source. It measures what a fixed constant costs when the chemistry
+changes.
+
+\begin{table}[t]
+\centering
+\caption{Check-up detection. \emph{Substantial} excludes files below
+\SI{10}{\percent} of the median check-up size --- aborted runs and setup stubs
+that share the check-up's procedure name. The baseline is calibrated on NMC.}
+\label{tab:recall}
+\begin{tabular}{lrrrrrr}
+\toprule
+& & \multicolumn{3}{c}{this method} & \multicolumn{2}{c}{fixed threshold} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-7}
+Chemistry & $n$ & recall & subst. & complete & recall & false \\
+\midrule
+NMC    & \num{163} & \SI{98.8}{\percent} & \SI{100}{\percent} & \SI{93.9}{\percent} & \SI{98.8}{\percent} & 0 \\
+LFP    & \num{41}  & \SI{95.1}{\percent} & \SI{100}{\percent} & \SI{95.1}{\percent} & \SI{0.0}{\percent}  & 0 \\
+Na-ion & \num{6}   & \SI{100}{\percent}  & \SI{100}{\percent} & \SI{100}{\percent}  & \SI{0.0}{\percent}  & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:recall} gives the result. Across \num{210} check-ups on three
+chemistries the method makes \textbf{no false detections at all}, and every
+check-up it does not detect is a fragment: the four misses are between
+\SI{0.4}{\percent} and \SI{3}{\percent} of the median check-up file size, and
+are aborted runs or temperature-criterion stubs that share the check-up's
+procedure name. Above a \SI{10}{\percent} size floor, recall is
+\SI{100}{\percent} on all three chemistries.
+
+The baseline behaves exactly as its design predicts. On the chemistry it was
+calibrated for it is indistinguishable from the method (\SI{98.8}{\percent},
+the same two fragmentary misses). On both unseen chemistries it finds
+\emph{nothing} --- \num{0} of \num{41} LFP and \num{0} of \num{6} sodium-ion
+check-ups --- because LFP's capacity test runs at 1C on a
+\SI{1.2}{\ampere\hour} cell (\SI{1.2}{\ampere}) and sodium-ion's at C/2 on a
+\SI{10.5}{\ampere\hour} cell (\SI{5.25}{\ampere}), and neither is within
+\SI{5}{\percent} of \SI{1.5}{\ampere}. The constant does not transfer because a
+current in amperes is not a property of the test; the C-rate is.
+
+This is the paper's argument in its simplest form. The same quantity ---
+``which discharge is the capacity test'' --- is a hard-coded constant in the
+baseline and a declared parameter in the method, and that difference alone is
+the gap between \SI{0}{\percent} and \SI{100}{\percent} on an unseen chemistry.
+
+\subsection{What carries transfer: the features or the label space?}
 \label{sec:res-ablation}
 
-\todobox{Experiment not yet run}{%
-Two ablations are promised earlier in the text and must be run:
-(i) adding back voltage-shape and temperature features, to support the claim in
-Section~\ref{sec:features} that excluding them costs no accuracy;
-(ii) the LFP plateau case --- show the failure mechanism of the
-voltage-range feature on a flat OCV curve, then the coulombic replacement
-($|I|\,\Delta t / Q_{\mathrm{nom}}$, the charge swept as a fraction of nominal
-capacity, already implemented) and the recovery it produces. Mechanism, failure,
-fix, number.}
+Section~\ref{sec:res-loco} showed that one supervised model transfers and
+another does not. Two things differ between them, and this section separates
+them: the model could fail because its \emph{features} are chemistry-bound, or
+because its \emph{label space} is. We hold the features, the model and the folds
+fixed and vary only the label space.
+
+\paragraph{Two label spaces.} In the \emph{absolute} space the classes are the
+pipeline's own: CAP, PUL, qOCV and the leftovers. ``CAP'' there means ``a full
+discharge at this fleet's capacity C-rate'', so the rate is inside the class
+definition and must be learned from the training chemistries. In the
+\emph{shape} space the classes describe only what the segment is --- full
+discharge, full charge, partial discharge, partial charge, pulse --- with no
+rate in any class name; a prediction is resolved to CAP afterwards by testing
+the segment's own measured C-rate against the held-out chemistry's declared
+$C_{\mathrm{cap}}$. The chemistry-specific number is learned in the first case
+and supplied as configuration in the second.
+
+\paragraph{Result.} In the absolute space, held-out capacity recall is
+\textbf{zero} on LFP and on sodium-ion, and no feature set changes it --- not
+removing the voltage-range feature, not adding the coulombic duration, not
+substituting one for the other. In the shape space it is \SI{100}{\percent} on
+all three chemistries, for every feature set.
+
+The reason is visible in the training distribution. With LFP held out, every
+training capacity segment sits at a normalised current of exactly \num{0.500} ---
+NMC and sodium-ion are both C/2 --- while LFP's is \num{1.000}. The model has
+learned ``capacity test'' to mean ``a full discharge at C/2'', and at prediction
+time the LFP segments fall outside that region on most of the current features
+at once. It is broad covariate shift, not a deficiency of any single feature,
+which is why no feature substitution repairs it. Held-out sodium-ion fails for
+the same reason from the other side: its capacity current, \num{0.476}, sits
+just below the \num{0.500}--\num{1.000} band the model saw.
+
+\paragraph{Where the features do matter.} Not for recall, but for precision.
+Resolving a full discharge to CAP by its C-rate alone accepts any discharge at
+that rate, whether or not it swept the full cell. On sodium-ion the shipped
+feature set predicts \num{12} capacity segments where there are \num{6}: the six
+extras are partial C/2 discharges whose measured rate (\num{0.476}) is
+\emph{identical} to the true capacity tests', but whose corrected SoC swing is
+\num{0.229} against \num{0.951}. Adding the coulombic duration
+$|I|\,\Delta t / Q_{\mathrm{nom}}$ --- \num{0.104} for the extras against
+\num{0.985} for the true ones --- restores precision to \SI{100}{\percent}
+without changing recall. It is a scale-free measure of how much charge the
+segment actually moved, and it is what the rate test alone cannot see.
+
+\paragraph{A hypothesis this replaced.} We had expected LFP's flat discharge
+plateau to break the voltage-range feature, by compressing the voltage span that
+distinguishes a full sweep from a partial one, and had intended the coulombic
+feature as the remedy. That mechanism does not occur in this data.
+\texttt{Voltage\_range} separates full from partial discharges on LFP with a ROC
+AUC of \num{1.0} (medians \num{0.90} against \num{0.04}), because a full LFP
+discharge still traverses both knees of the curve even though its middle is
+flat, while the partial discharges this protocol contains are small SoC-adjust
+steps. The failure would require a partial discharge that is large in charge but
+small in voltage; the largest partial here moves \SI{40}{\percent} of nominal
+capacity, and none is confusable. We report this as a negative result: the
+coulombic feature earns its place in this method, but for the precision reason
+above, not the one we assumed.
+
+\todobox{Ablation still owed}{%
+Section~\ref{sec:features} claims that excluding voltage-shape and temperature
+features costs no accuracy. Run that ablation --- add them back and report the
+change --- or soften the claim to a design rationale.}
 
 \subsection{Validation on an external dataset}
 \label{sec:res-external}
@@ -545,14 +676,32 @@ edited, and does not exist at all for a dataset one did not generate.
 
 \subsection{Where portability comes from}
 
-Section~\ref{sec:res-loco} isolates the mechanism. The two routes that transfer
---- the rule-based one and the scale-free supervised one --- share the property
-that the chemistry-specific quantity ($C_{\mathrm{cap}}$) enters as a
-\emph{parameter at inference time} rather than being absorbed into learned
-weights. The route that fails absorbed it. This is a statement about how the
-label space is designed, not about model capacity, and it suggests that
-portability across chemistries is achieved by choosing what to parameterise
-rather than by training on more chemistries.
+Three results in Section~\ref{sec:results} are the same result seen from
+different angles, and it is worth stating once.
+
+Everything that transfers shares one property: the chemistry-specific quantity
+($C_{\mathrm{cap}}$) enters as a \emph{parameter at the point of use} rather
+than being absorbed into something fitted. Everything that fails absorbed it ---
+the fixed-current baseline into a constant
+(Section~\ref{sec:res-recall}), the absolute-label classifier into learned
+weights (Section~\ref{sec:res-ablation}). The failures are not partial: both go
+to \SI{0}{\percent} on an unseen chemistry, because a quantity that has been
+absorbed is not merely inaccurate off-domain, it is silently wrong.
+
+The controlled comparison in Section~\ref{sec:res-ablation} is what makes this
+more than an observation about two implementations. Holding the features, the
+model and the folds fixed and varying only whether the C-rate is learned or
+declared moves held-out capacity recall from \SI{0}{\percent} to
+\SI{100}{\percent}. No feature set we tried recovers any of that gap. So
+portability here is a property of what the method \emph{refuses to learn}, not
+of how its inputs are engineered --- and it is bought with roughly five
+datasheet scalars, which is the trade the introduction claims is worth making.
+
+This also bounds the claim. Feature design is not irrelevant; it sets precision
+once recall is secured. Resolving capacity by C-rate alone accepts partial
+discharges at that rate, and it took a scale-free measure of swept charge to
+reject them. Parameterisation decides whether the method finds the right
+segments at all; features decide how cleanly.
 
 \subsection{Limitations}
 
