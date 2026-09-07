@@ -727,15 +727,37 @@ nothing else.
 
 The unsupervised route does not survive the move. It recovers \SI{89.3}{\percent}
 of the ISU-ILCC tests and \SI{9.7}{\percent} of the UConn-ILCC ones. That
-failure is instructive because it is not a failure of segmentation or of
-features: the UConn-ILCC records contain, per cell, \num{37} discharges within
+failure is worth dissecting, because it is not a failure of segmentation or of
+features: the UConn-ILCC records contain, per cell, \num{36} discharges within
 \SI{5}{\percent} of the declared C/3 rate with corrected SoC swings of
 \num{0.98}, each preceded by a full charge --- textbook capacity tests,
-correctly cut and correctly described --- of which the clustering labels three.
-Density-based clustering assigns labels by the composition of the population it
-is given, and a foreign laboratory's mix of segment types is not the one its
-thresholds were set against. The configured criterion, which asks only whether a
-segment is a full discharge at a declared rate, is indifferent to that mix.
+correctly cut and correctly described --- of which the clustering route labels
+three. Two mechanisms combine, and both are instances of the same disease.
+
+First, the rule that confirms a capacity cluster carries an unstated
+beginning-of-life assumption. It requires the segment's duration to lie within
+\SI{20}{\percent} of $60/C_{\mathrm{cap}}$ minutes --- the time a
+\emph{nominal-capacity} cell takes to discharge at that rate. A constant-current
+full discharge shortens in proportion to state of health, so at C/3 the admitted
+band of \SIrange{145}{218}{\minute} silently demands $\mathrm{SOH} \ge
+\SI{80}{\percent}$. The UConn-ILCC cells span \SIrange{80.0}{62.6}{\percent}
+SOH, so most of their measured life falls below that floor: only \num{19} of the
+\num{36} capacity tests are admissible at all. Our own fleet never exposed this,
+because it sits above \SI{80}{\percent} SOH throughout. The assumption is not
+wrong so much as unowned --- it ties a measured quantity to a nameplate one, and
+the tie only becomes visible on a cell that has aged.
+
+Second, the confirmation step selects exactly \emph{one} cluster as the capacity
+cluster. That is safe when the capacity tests form a single tight group, which
+in our data they do: across a cell's \num{27} capacity tests the mean current
+varies by \num{8e-6}. On UConn-ILCC the same quantity varies by \num{0.0196},
+some \num{2450} times wider, and the population splits into six clusters. Five
+are discarded by construction, whatever their contents.
+
+Both mechanisms are the paper's thesis in miniature. One hard-codes a
+relationship to nominal capacity; the other hard-codes an expectation about
+population structure. The configured criterion asks only whether a segment is a
+full discharge at a declared rate, commits to neither, and is unaffected.
 
 Recall is not the whole picture, and the last column is where the two
 parameterised detectors separate from the shipped classifier. All three recover
