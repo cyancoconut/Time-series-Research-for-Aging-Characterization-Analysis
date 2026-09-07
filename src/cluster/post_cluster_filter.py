@@ -162,13 +162,31 @@ class cluster_filter:
             ]  # Filter out -1 cluster
 
             if potential_capacity_clusters:
-                # Get the cluster with the minimum size
-                capacity_cluster = cluster_size.loc[
-                    potential_capacity_clusters
-                ].idxmin()
+                # Pick the candidate whose mean current is closest to CAP_Rate,
+                # which is the same rule layer 1's fallback above uses. The
+                # previous rule took the *smallest* candidate; that is only ever
+                # exercised when more than one cluster survives the mask, which
+                # our own protocols never produce (one candidate, so the choice
+                # was vacuous). A protocol that discharges twice near the
+                # capacity rate does produce two — e.g. a CC capacity test at
+                # exactly CAP_Rate alongside a CC-CV discharge whose CV tail
+                # drags its mean ~5 % low, still inside the +/-5 % band. Taking
+                # the smaller one then selects the CC-CV contaminant over the
+                # real capacity population. Size carries no information about
+                # which cluster is the capacity test; proximity to the
+                # configured rate does.
+                capacity_cluster = (
+                    cluster_means.loc[potential_capacity_clusters, "Current_mean"]
+                    .abs()
+                    .sub(self.CAP_Rate)
+                    .abs()
+                    .idxmin()
+                )
                 print(
                     "We found potential capacity clusters at Cluster: ",
                     potential_capacity_clusters,
+                    " picked:",
+                    capacity_cluster,
                     " with size:",
                     cluster_size.loc[capacity_cluster],
                 )
