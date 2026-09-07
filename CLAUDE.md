@@ -117,6 +117,35 @@ A per-segment CSV helper layer (one row per segment) supports clustering: an **i
 
 **Aging matrix** — `evaluation/aging_matrix.py` (`python -m evaluation.aging_matrix <cfg> [-o …]`): per-cell capacity loss normalized by Ah throughput, aggregated over the design space. Reuses `export_cap_pulse.build_capacity_table`; needs `Ah_throughput` (aborts otherwise). Per cell: `capacity_lost` = max−min `Capacity_py`, `Delta_Ah_throughput` = max−min `Ah_throughput`. Matrix: group by `(C_Rate, Temperature, DOD, SOC)` → mean/std, `candidate_count`, cell list, `capacity_lost_norm`. Output: `<working_path>/50_evaluation/aging_matrix.{csv,html}` (interactive plotly), MinIO untagged.
 
+**Segmentation metadata leak** — `evaluation/segmentation_audit.py`
+(`python -m evaluation.segmentation_audit <cfg> [--cells …] [--i-tol-frac F]
+[--boundary-tol N] [-o …]`, then `--pool -o <dir>`): read-only ablation
+measuring how much of *boundary detection* depends on the protocol columns
+`Prozedur`/`Zustand` rather than on signal + physical config — the claim the
+paper rests on. Three levels: **L0** production (all four rules in
+`dismembling`), **L1** minus the `Prozedur`-change rule, **L2** with `Zustand`
+rebuilt from the current (`|I| < i_tol·nom_capacity` → PAU, else sign) and the
+qOCV rule ungated, i.e. **no protocol column read at all**. `_dismember_at_level`
+is a level-parameterised **copy** of `DismemblerFunctions.dismembling` — the
+production segmenter is untouched — kept honest by a hard gate: its L0 output is
+compared **row for row against `dismember_raw_cell` run live**, and one differing
+row aborts the cell. The gate is not built on the stored label CSVs (they predate
+the current segmenter); production labels are joined afterwards for reporting
+only, with the dismember-time `pre_target` carried alongside so a legitimately
+absent label (PAU/EIS/AGING segments never reach `with_features_post_labeled`) is
+distinguishable from a stale one. Outputs are namespaced by `type_cell`
+(`segmentation_audit_<type_cell>_{summary,segments,zustand}.csv`) so chemistries
+coexist in one `50_evaluation/`; `--pool` aggregates them into
+`segmentation_audit_fleet_{boundary,checkup,rule3,zustand_confusion}.csv`.
+**Measured over 7 NMC + 2 LFP + 1 SIB cells (131.4 M rows):** `Zustand` is
+redundant with `sign(I)` to 0.0008 % of rows, flat over `i_tol` from C/10 000 to
+C/33; 57 %/61 %/21 % of `Prozedur`-change boundaries fire where no other rule
+does, but 81–87 % of those land in the discard bucket; and at **L2 the check-up
+taxonomy is 100 % intact on all three chemistries** (zero merged, zero lost —
+every deviation is a split). L1 loses 349 `PUL` + 27 `PUL*RES` to merges;
+`CAP` and `qOCV_*` never break at any level. Full write-up and the caveats that
+must ship with it: `docs/segmentation_metadata_audit.md`.
+
 **HDBSCAN vs classifier diff** — `evaluation/compare_labels.py` (`python -m evaluation.compare_labels <cfg> [--source local|minio] [--hdbscan-dir] [--classifier-dir] [-o]`): diffs the two per-segment label sets per cell (joined on `ID`) to see whether the classifier recovers CAP check-ups HDBSCAN missed (invisible to the LOCO report, which scores against HDBSCAN's own labels). Prereq: run the pipeline twice on the same cells (HDBSCAN, then classifier with `--overwrite`). `local` reads `<working_path>/with_features_post_labeled/` (HDBSCAN) + `…/60_classifier/with_features_post_labeled/` (classifier); `minio` reads tagged `TRACY/…` (falling back to the legacy `10_TRACY/…`) + untagged `60_classifier/…`. Reports cell coverage (both / classifier-only / HDBSCAN-only), per-`(cell, BM_Programm)` CAP-count delta, label transitions, and per-segment disagreements with explanatory features. Output (default `<working_path>/50_evaluation`): `label_diff_segments.csv`, `cap_count_diff.csv`, `cap_recovered_cells.csv` (always written locally).
 
 ## Initial characterization (BOL parametrization)
