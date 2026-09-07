@@ -678,15 +678,23 @@ check-ups found?
 
 \paragraph{Ground truth and detectors.} One programme is one reference
 performance test, guaranteed by both adapters' construction, so the denominator
-needs no labelling. Four detectors run over identical segments: the two
+needs no labelling. Three detectors run over identical segments: the two
 labelling routes of Section~\ref{sec:labelling} as the pipeline actually runs
-them --- \emph{clustering} and the shipped \emph{classifier}; the
-\emph{configured criterion} applied as a rule (a full sweep that is a discharge
-within \SI{5}{\percent} of the laboratory's declared $C_{\mathrm{cap}}$); and a
-\emph{learned shape} model trained on the in-house fleet only, whose
+them --- \emph{clustering} and the shipped \emph{classifier} --- and the
+\emph{configured criterion}, a full sweep that is a discharge within
+\SI{5}{\percent} of the laboratory's declared $C_{\mathrm{cap}}$.
+
+The configured criterion is reported in two implementations. The first states
+it directly as a rule. The second learns it: a model trained on the in-house
+fleet only, predicting segment shape with no C-rate in any class, whose
 predictions are resolved against the external laboratory's $C_{\mathrm{cap}}$
 --- the procedure of Section~\ref{sec:res-ablation} with a laboratory boundary
-in place of a chemistry boundary.
+in place of a chemistry boundary. These are \emph{not} independent evidence, and
+we do not present them as two results: the model is largely recovering the same
+full-versus-partial cut the rule states outright. The variant is included only
+to show that the criterion survives being learned rather than written, so that
+the transfer claim of Section~\ref{sec:res-ablation} is not an artefact of
+having hand-written a good rule.
 
 Both routes are run on both laboratories. This matters: which routes a dataset
 has happened to be processed with is an accident of its history, and comparing
@@ -698,34 +706,36 @@ confound the route with the laboratory.
 \caption{Cross-laboratory validation. \num{177} reference performance tests from
 two independent laboratories (3 cells each), no target-laboratory labels used.
 \emph{Tagged} is segments selected per test; one is ideal, and a detector that
-finds every test by tagging three segments in each has not solved the problem.}
+finds every test by tagging three segments in each has not solved the problem.
+The indented row is the configured criterion learned rather than written, not a
+separate detector.}
 \label{tab:external}
 \begin{tabular}{llrrr}
 \toprule
 Laboratory & Detector & RPTs & Recovered & Tagged \\
 \midrule
-\multirow{4}{*}{ISU-ILCC}
- & clustering            & \num{84} & \SI{89.3}{\percent} & \num{0.89} \\
- & classifier (shipped)  & \num{84} & \SI{100}{\percent}  & \num{3.07} \\
- & configured criterion  & \num{84} & \SI{100}{\percent}  & \num{1.00} \\
- & learned shape         & \num{84} & \SI{100}{\percent}  & \num{1.00} \\
+\multirow{3}{*}{ISU-ILCC}
+ & clustering                     & \num{84} & \SI{89.3}{\percent} & \num{0.89} \\
+ & classifier (shipped)           & \num{84} & \SI{100}{\percent}  & \num{3.07} \\
+ & configured criterion           & \num{84} & \SI{100}{\percent}  & \num{1.00} \\
+ & \quad\emph{as a learned model} & \num{84} & \SI{100}{\percent}  & \num{1.00} \\
 \midrule
-\multirow{4}{*}{UConn-ILCC}
- & clustering            & \num{93} & \SI{100}{\percent}  & \num{1.00} \\
- & classifier (shipped)  & \num{93} & \SI{100}{\percent}  & \num{1.84} \\
- & configured criterion  & \num{93} & \SI{100}{\percent}  & \num{1.09} \\
- & learned shape         & \num{93} & \SI{100}{\percent}  & \num{1.12} \\
+\multirow{3}{*}{UConn-ILCC}
+ & clustering                     & \num{93} & \SI{100}{\percent}  & \num{1.00} \\
+ & classifier (shipped)           & \num{93} & \SI{100}{\percent}  & \num{1.84} \\
+ & configured criterion           & \num{93} & \SI{100}{\percent}  & \num{1.09} \\
+ & \quad\emph{as a learned model} & \num{93} & \SI{100}{\percent}  & \num{1.12} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:external} gives the result. \textbf{Every parameterised detector
+Table~\ref{tab:external} gives the result. \textbf{The configured criterion
 recovers all \num{177} external capacity tests}, on laboratories whose cells
 differ from ours in capacity by a factor of eight (\SI{0.28}{\ampere\hour} for
 ISU-ILCC against \SI{3.0}{\ampere\hour} for our NMC) and whose capacity C-rates
-match none of ours. The learned model was never shown a segment from either
-laboratory; it was given each laboratory's declared $C_{\mathrm{cap}}$ and
-nothing else.
+match none of ours. It holds whether the criterion is written or learned: the
+learned variant was never shown a segment from either laboratory, and was given
+each laboratory's declared $C_{\mathrm{cap}}$ and nothing else.
 
 \paragraph{What the external data found in our own code.} The numbers in
 Table~\ref{tab:external} are the corrected ones. On first contact with
@@ -758,18 +768,17 @@ We report this rather than quietly fixing it, because it is the clearest
 argument for the experiment. A latent defect had sat in the labelling path
 indefinitely and \emph{could not} be found on our own fleet: exposing it
 required a protocol that discharges twice near the capacity rate, which ours
-never does. The parameterised detectors were unaffected before and after, since
-neither consults cluster size. Cross-laboratory validation is usually justified
+never does. The configured criterion was unaffected before and after, in both
+its implementations, since neither consults cluster size. Cross-laboratory validation is usually justified
 as a generalisation check; here it functioned as a test of the implementation.
 
 After the correction the unsupervised route recovers all \num{93} UConn-ILCC
 tests and \SI{89.3}{\percent} of the ISU-ILCC ones.
 
 Recall is not the whole picture, and the last column is where the shipped
-classifier separates from the two parameterised detectors. All recover every
-test, but the classifier tags \num{3.07} segments per test on ISU-ILCC and
-\num{1.84} on UConn-ILCC, against \num{1.00} and \num{1.09} for the configured
-criterion. This is the same over-tagging the in-house sodium-ion result showed
+classifier separates from the configured criterion. Both recover every test,
+but the classifier tags \num{3.07} segments per test on ISU-ILCC and \num{1.84}
+on UConn-ILCC, against \num{1.00} and \num{1.09} for the criterion. This is the same over-tagging the in-house sodium-ion result showed
 (Section~\ref{sec:res-loco}) and has the same remedy: resolving by rate alone
 admits partial discharges at that rate, and a scale-free measure of swept charge
 excludes them. The pattern reproduces on foreign data, at a laboratory boundary
