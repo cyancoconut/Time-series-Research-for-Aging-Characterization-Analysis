@@ -31,10 +31,10 @@ from sklearn.preprocessing import StandardScaler
 # than discovering the capacity population. Removing the flag and clustering on
 # the remaining physical features failed on 11 of 20 vehicles.
 #
-# Clustering on dSOC alone is both non-circular and better. It partitions the
-# excursion axis finely (~50 clusters); pick_cap_cluster then takes the slice
-# with the highest median_SOC_end above a dSOC floor — "among deep charges, the
-# ones that ended fullest". Measured against the previous default, per vehicle:
+# Clustering on dSOC alone is both non-circular and better. pick_cap_cluster
+# then takes the cluster with the highest median_SOC_end, ties broken by the
+# broadest median_dSOC — "of the charges that ended full, the ones that came
+# furthest". Measured against the previous default, per vehicle:
 #
 #     variant                      found   med n   resid%   coverage%
 #     previous (has_cv_tail)       20/20     290     1.33          79
@@ -74,6 +74,11 @@ def _build_feature_matrix(feats: pd.DataFrame) -> pd.DataFrame:
 # at 97%, and the same sessions selected (55 against 57). Above ~0.05 the bands
 # merge too far: the selected population broadens to 114 then 478 sessions and
 # scatter degrades to 0.71% and 1.02%.
+#
+# Those numbers were measured at min_cluster_size = 1% of sessions, which was
+# the default at the time; the default is now 5% and already merges the bands
+# structurally, so epsilon does much less work than it used to. It has not been
+# re-swept against the coarser partition.
 def cluster_sessions(
     feats: pd.DataFrame,
     *,
@@ -84,29 +89,28 @@ def cluster_sessions(
 ) -> pd.DataFrame:
     """Add a ``cluster_label`` column (-1 = noise) to the per-session features.
 
-    Default ``min_cluster_size`` is ``max(10, 1% of session count)`` — 26-30 on
-    these vehicles. Small enough to surface a CAP cluster on a single vehicle
-    (~50-90 candidates) but big enough to suppress micro-clusters of noise.
+    Default ``min_cluster_size`` is ``max(10, 5% of session count)`` — 112-153
+    on these vehicles. This is a coarse partition on purpose: it yields 2-3
+    clusters per vehicle, one of which is the broad "charged most of the way and
+    ended full" population, and every vehicle has one. At 1% (26-30) the same
+    population splits into 5-10 narrow dSOC bands, and on vehicles 3 and 16 the
+    deepest bands failed to reach cluster status at all and fell into noise,
+    leaving those two with no CAP cluster and an empty capacity table.
 
-    The working band is narrow and 1% sits inside it. At 5% (112-153) the
-    deep-charge bands — 30-100 sessions each — cannot reach cluster status at
-    all: HDBSCAN either merges them into one broad cluster diluted below the
-    dSOC floor (vehicle 6: three bands at 79.2/69.2/59.6 become one of 446 at
-    63.0) or drops them into noise, and *no* vehicle yields a CAP cluster,
-    against 18 of 20 at 1%. Below ~15 the partition fragments and the pick turns
-    unstable: vehicle 16 finds a CAP population at 20, loses it at 15, and finds
-    a much smaller one at 10.
+    The trade is scatter for coverage — see ``pick_cap_cluster``. Below ~15 the
+    partition fragments further and the pick turns unstable: vehicle 16 finds a
+    CAP population at 20, loses it at 15, and finds a much smaller one at 10.
 
-    That sensitivity is a known weakness of tying selection to cluster size. The
-    deep-full-charge population is physically well-defined, but how many members
-    it has is an accident of how often a given driver charged from empty.
+    Cluster membership counts are in any case an accident of how often a given
+    driver charged from empty, not a property of the cell, so tying selection to
+    a size threshold is inherently soft.
     """
     if feats.empty:
         out = feats.copy()
         out["cluster_label"] = pd.Series(dtype=int)
         return out
 
-    mcs = min_cluster_size if min_cluster_size is not None else max(10, int(len(feats) * 0.01))
+    mcs = min_cluster_size if min_cluster_size is not None else max(10, int(len(feats) * 0.05))
     ms = min_samples if min_samples is not None else max(5, mcs // 2)
 
     X = _build_feature_matrix(feats)[feature_columns].to_numpy(dtype=float)
@@ -150,48 +154,61 @@ def summarize_clusters(labeled: pd.DataFrame) -> pd.DataFrame:
 def pick_cap_cluster(
     labeled: pd.DataFrame,
     *,
-    min_median_dsoc: float = 70.0,
+    min_median_dsoc: float = 0.0,
 ) -> int | None:
-    """Pick the cluster best matching 'a deep charge that ended full'.
-
-    Two criteria, both about where the charge *ended* rather than how much was
-    added:
+    """Pick the cluster that ended fullest, and among those, charged broadest.
 
     * ``median_SOC_end`` — the completeness signal. A session that ends at the
       top of the SOC window reached full charge; a partial top-up stops lower.
-      Selection is the cluster with the highest ``median_SOC_end``.
 
-      SOC saturates: on all 20 shiyunliu vehicles the top clusters share a
-      median SOC_end of exactly 97.6, so on its own this sort is decided by row
-      order rather than by the criterion. ``median_dSOC`` therefore breaks the
-      tie, descending — among the clusters that end full, the deepest charge.
-      (``median_V_max`` saturates the same way, ~380 V, so the criterion this
-      replaced was equally tie-bound.)
-    * ``median_dSOC >= min_median_dsoc`` (default 70) — the depth floor. A
-      sliver of charge can end at a high SOC without spanning enough of the
-      window to be a usable capacity sample; coulomb-counting a shallow
-      excursion into a full-capacity estimate amplifies the SOC error by the
-      reciprocal of the excursion.
+      SOC saturates: the qualifying clusters share a median SOC_end of exactly
+      97.6, so on its own this sort is decided by row order rather than by the
+      criterion. ``median_dSOC`` therefore breaks the tie, descending — among
+      the clusters that end full, the broadest charge. (``median_V_max``
+      saturates the same way, ~380 V, so the criterion this replaced was equally
+      tie-bound.)
+    * ``median_dSOC >= min_median_dsoc`` — an optional depth floor, off by
+      default. See the note on its removal below.
 
     ``median_V_max`` was the previous completeness criterion and is still
-    computed in ``summarize_clusters``. SOC_end says the same thing in the unit
-    the depth floor is already written in, and is not lifted by the
-    current-dependent IR offset that inflates V_max on fast charges. The CV-tail
-    rate is deliberately unused — it was the criterion before that and made the
-    stage circular (it is also a clustering input). Both remain useful as
-    independent checks on what was selected.
+    computed in ``summarize_clusters``. SOC_end says the same thing in SOC
+    points and is not lifted by the current-dependent IR offset that inflates
+    V_max on fast charges. The CV-tail rate is deliberately unused — it was the
+    criterion before that and made the stage circular (it is also a clustering
+    input). Both remain useful as independent checks on what was selected.
 
-    One cluster, not all qualifying ones. Reading the two criteria as a
-    predicate and taking the union of every cluster that satisfies them was
-    tried and reverted: it roughly doubles the yield (1219 to 2019 sessions over
-    the fleet) but admits the 70-77 dSOC bands alongside the deepest, and median
-    trend-residual scatter degrades from 0.61% to 0.71%. Depth is the quality
-    axis here, so the deepest band is the one to keep.
+    **The depth floor is off by default because it cannot coexist with the 5%
+    min_cluster_size.** At that coarser partition the winning clusters sit at
+    median dSOC 54-70, so a floor of 70 rejects every one of them and no vehicle
+    yields a CAP cluster at all. Paired with 5%, this rule finds a cluster on
+    20 of 20 vehicles where 1%-plus-floor-70 found 18.
 
-    Two vehicles (3 and 16) have no cluster clearing the floor and return None;
-    ``extract_capacity`` logs a warning and emits an empty table. Their deep
-    charges are real but land in HDBSCAN's noise label rather than in a cluster
-    — see the min_cluster_size note above.
+    What that costs, measured over the fleet — 1% with a floor of 70 against 5%
+    with none:
+
+        variant           vehicles   total n   med n   med resid%   med cov%   med dSOC
+        1%, floor 70         18/20      1219      52         0.61       96.6       79.9
+        5%, no floor         20/20      7317     390         1.02       99.9       60.0
+
+    Six times the sessions and near-total record coverage, at 1.7x the
+    trend-residual scatter. The scatter is the price of a broad cluster: the
+    selected population spans ~28 dSOC points p10-p90 against ~4 before, and its
+    dSOC mix wanders 9-15 points from quarter to quarter. That wandering is
+    non-monotonic, so it inflates scatter rather than faking a trend, and on
+    trend precision the trade is favourable — the standard error of the ageing
+    trend improves from 0.085 to 0.052.
+
+    The bias it accepts is real but small. With the charge endpoint held fixed,
+    capacity-vs-dSOC is flat above 70 points and inflates below: ~+1% at dSOC
+    50-60 against the >=70 reference, rising to ~+7% below 20. A median dSOC of
+    60 therefore reads roughly 1% high.
+
+    **Vehicle 9 is the case to watch.** Without a floor it selects a cluster at
+    median dSOC 28.4 — its deep sessions are all in noise at this
+    min_cluster_size, 49% of the vehicle — giving 2.70% residual scatter, four
+    times the fleet median, at a depth where the estimate reads several percent
+    high. It is *found* rather than *usable*. A floor around 40 would return
+    None there instead, at the cost of dropping back to 19 of 20.
     """
     summary = summarize_clusters(labeled)
     candidates = summary[
@@ -237,7 +254,7 @@ if __name__ == "__main__":
         print(summary.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
         cap = pick_cap_cluster(labeled)
         if cap is None:
-            print("  ← no cluster passes the dSOC floor")
+            print("  ← no cluster selected")
         else:
             cap_rows = labeled[labeled["cluster_label"] == cap]
             print(f"  ← CAP cluster: {cap}  (n={len(cap_rows)}, "
