@@ -13,8 +13,8 @@ greyscale by position and marker as well as by hue):
               cluster, as paired dumbbells - the comparison against doing no
               selection at all.
 ``fleet_timelines``
-              all 20 vehicles as small multiples: the published per-session
-              capacities against the CAP cluster this method selects, each
+              all 20 vehicles as small multiples: the published monthly-median
+              curve against the CAP cluster this method selects, each
               normalised to its own first level so the panels share an axis.
 
 Usage (from src/):
@@ -199,8 +199,9 @@ def fleet_timelines(base_dir: str, our_dir: str, out_path: str,
                     ncols: int = 5, show_sessions: bool = False) -> str:
     """All 20 vehicles: ageing trend from all sessions vs from the CAP cluster.
 
-    One monthly-median line per method per panel — the dataset author's own
-    aggregation, and the comparison the figure is for: whether selecting changes the *shape* of the fade curve, not
+    One line per method per panel: the author's monthly median against the CAP
+    cluster at its native per-session resolution. The comparison the figure is
+    for: whether selecting changes the *shape* of the fade curve, not
     just its scatter. ``show_sessions=True`` puts the individual estimates back
     underneath as faint points — useful for one-off inspection, but at 2700
     sessions per vehicle they bury the lines they are meant to support.
@@ -246,10 +247,15 @@ def fleet_timelines(base_dir: str, our_dir: str, out_path: str,
                        rasterized=True)
             ax.scatter(d["do"], d["yo"], s=3.2, c=C_CAP, alpha=0.55, linewidths=0,
                        rasterized=True)
+        # Author's curve: monthly median, their published construction — the
+        # binning is what makes their session cloud readable.
         ma_x, ma_y = _monthly_median(d["da"], d["ya"])
         ax.plot(ma_x, ma_y, color=C_AUT, lw=1.2, zorder=3, solid_capstyle="round")
-        mo_x, mo_y = _monthly_median(d["do"], d["yo"])
-        ax.plot(mo_x, mo_y, color=C_CAP, lw=1.2, zorder=4, solid_capstyle="round")
+        # Ours at native resolution. Selection already did the noise reduction
+        # that their monthly binning does, so binning ours too would smooth
+        # twice and discard ~14 estimates per month for no gain.
+        ts_o, _, tr_o = _trend(d["do"], d["yo"])
+        ax.plot(ts_o, tr_o, color=C_CAP, lw=1.2, zorder=4, solid_capstyle="round")
         # where the selected sessions stop, against where the record stops
         ax.axvline(d["do"].max(), color=MUTED, lw=0.8, ls=(0, (3, 2)), zorder=2)
         ax.set_title(f"#{d['v']}", loc="left", fontsize=8, pad=2)
