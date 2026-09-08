@@ -91,7 +91,12 @@ route recovers every capacity test. That experiment also exposed a latent defect
 in the unsupervised route --- a cluster-selection rule our own protocols can
 never reach, which cost \SI{90}{\percent} of one laboratory's capacity tests
 until corrected --- illustrating that cross-laboratory validation tests the
-implementation as much as the generalisation.
+implementation as much as the generalisation. Finally, applying the first three
+stages to the opportunistic charging records of \num{20} on-road electric
+vehicles recovers a consistent near-full-charge population and reduces the
+scatter of capacity estimates about their ageing trend by a factor of \num{1.27}
+on every vehicle, which demonstrates the reach of the description while marking
+where the parameterised step stops applying.
 \end{abstract}
 
 \begin{keyword}
@@ -931,6 +936,58 @@ fully crossed. The Pozzato--Onori dataset \cite{pozzato} carries the complete
 taxonomy --- C/20 capacity, HPPC pulses and pseudo-OCV --- and would extend
 this section from capacity alone to all three segment types. \textbf{Verify its
 structure against the original dataset, not a secondary processing script.}}
+
+\subsection{Beyond check-ups: opportunistic capacity from field data}
+\label{sec:res-field}
+
+Every result so far comes from a designed check-up, where a protocol exists even
+if the method does not read it. This section asks what survives when there is no
+protocol at all.
+
+We use the on-road charging records of \num{20} production electric vehicles
+\cite{deng2023}, roughly \num{29} months per vehicle. The data are
+charging-only, and the charging is opportunistic: whatever the driver plugged in
+for, at whatever state of charge, for whatever duration. Nothing schedules a
+capacity test, and there is no $C_{\mathrm{cap}}$ to declare, because the
+vehicle does not have a specified charge rate.
+
+Stages (i)--(iii) of Section~\ref{sec:method} carry over directly. Sessions are
+split on gaps in the record; each is described by duration, charge and voltage
+excursion, mean current, current variability, and whether the charge reached a
+constant-voltage tail; and the descriptors are clustered. Stage (iv) has nothing
+to resolve against, so it is replaced by fixed thresholds --- a cluster must
+mostly reach a CV tail and sweep at least \SI{30}{\percent} state of charge.
+That substitution is exactly what this paper argues against elsewhere, and we
+return to it below.
+
+The selected cluster is nonetheless a consistent object across the fleet. On
+every vehicle it is the same kind of session: a median excursion of about
+\SI{50}{\percent} state of charge over roughly \SI{75}{\minute}, with a CV tail
+on every member --- a near-full charge, which is what a capacity estimate needs.
+It holds \SIrange{5.5}{17}{\percent} of each vehicle's sessions
+(\numrange{155}{457} of some \num{2700}).
+
+Two checks. First, on the sessions both retain, our coulomb count reproduces the
+dataset authors' own published extraction exactly: median and maximum absolute
+difference are \SI{0.000}{\ampere\hour} on all \num{20} vehicles. Second, and
+the point of selecting at all, estimates drawn from the cluster are less noisy.
+Because these packs fade \SIrange{20}{30}{\percent} over the record, scatter
+must be measured about the ageing trend rather than across it; the spread of the
+raw timeline is dominated by real degradation and is nearly blind to estimator
+noise. Detrended, the scatter falls from \SI{1.67}{\percent} to
+\SI{1.33}{\percent} of median capacity --- a factor of \num{1.27} (IQR
+\numrange{1.20}{1.36}), and an improvement on \num{20} of \num{20} vehicles.
+
+\paragraph{What this does and does not show.} It is a generality result, not a
+portability one. Field charging contains no pulses and no quasi-OCV sweep, so
+only the capacity branch of the taxonomy is exercised. More importantly, the
+stage that carries portability everywhere else in this paper is precisely the
+stage that cannot run here: with no declared rate, selection falls back to
+hard-coded thresholds of the kind Section~\ref{sec:res-recall} shows do not
+transfer between chemistries. We report the field result as evidence that the
+first three stages describe charge/discharge structure generally enough to be
+useful outside a laboratory, and as a demarcation of where the method's central
+mechanism stops applying.
 
 %% ===================================================================
 \section{Discussion}

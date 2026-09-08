@@ -47,6 +47,7 @@ source below; anything not yet measured is a TODO box, not a placeholder value.
 | 5.3 | Hand-labelled segment F1 | Not run — needs a human labeller |
 | 5.4 | Detection recall + fixed-threshold baseline | `evaluation.detection_recall` → `50_evaluation/detection_recall_fleet_*.csv` |
 | 5.5 | Label space vs features | `evaluation.feature_ablation` → `50_evaluation/feature_ablation_*.csv` |
+| 5.7 | Field data (20 on-road EVs) | `field.extract_capacity` then `field.benchmark_shiyunliu --our-dir <dir>`. Needs the metric fix on branch `fix/field-benchmark-trend-residual` |
 | 5.6 | Cross-laboratory (ISU-ILCC, UConn-ILCC) | `evaluation.external_validation` → `50_evaluation/external_validation_*.csv`. Needs the layer-2 fix on branch `fix/layer2-capacity-cluster-selection` |
 
 Regenerate 5.4 and 5.5:
@@ -99,22 +100,28 @@ available route separately for this reason.
 
 ## Status
 
-Written from real results: **5.1, 5.2, 5.4, 5.5, 5.6**. Scaffolding: 5.3,
+Written from real results: **5.1, 5.2, 5.4, 5.5, 5.6, 5.7**. Scaffolding: 5.3,
 related work, conclusion.
 
 Before submission, in rough priority order:
 1. **Hand-labelled F1 (5.3)** — the only place labels meet ground truth rather
    than another automated route.
-2. Widen 5.6 beyond capacity: both external sources give an independent ground
+2. The field capacity tables in
+   `field_data/shiyunliu_20ev/40_capacity_monitore/` were regenerated on
+   2026-09-08; the previous files dated from 2026-06-09 and were produced by
+   older code, which made session retention look bimodal (24 to 2701 rows per
+   vehicle against a true 155-457). A backup of the stale set is not kept in the
+   repo. Regenerate with `python -m field.extract_capacity --vehicle N`.
+3. Widen 5.6 beyond capacity: both external sources give an independent ground
    truth for the capacity test only, and both are NMC-type, so laboratory and
    chemistry are not fully crossed. Pozzato–Onori carries the full taxonomy.
-3. Either re-run and archive the per-cell 5.2 comparison, or cut its cell-level
+4. Either re-run and archive the per-cell 5.2 comparison, or cut its cell-level
    counts and let 5.5 carry the finding. Do not ship numbers whose artefacts
    are gone.
-4. The add-them-back feature ablation owed by §3.3 (voltage-shape and
+5. The add-them-back feature ablation owed by §3.3 (voltage-shape and
    temperature features).
-5. Related work (§2) and the conclusion.
-6. Decide whether to bring in the full fleet (200 LFP, 80 Na-ion) — Na-ion is
+6. Related work (§2) and the conclusion.
+7. Decide whether to bring in the full fleet (200 LFP, 80 Na-ion) — Na-ion is
    n=1 here and a reviewer will notice.
 
 ## A note on reproducing the numbers
