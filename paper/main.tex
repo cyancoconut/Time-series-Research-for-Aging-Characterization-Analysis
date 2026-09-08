@@ -91,12 +91,12 @@ route recovers every capacity test. That experiment also exposed a latent defect
 in the unsupervised route --- a cluster-selection rule our own protocols can
 never reach, which cost \SI{90}{\percent} of one laboratory's capacity tests
 until corrected --- illustrating that cross-laboratory validation tests the
-implementation as much as the generalisation. Finally, applying the first three
-stages to the opportunistic charging records of \num{20} on-road electric
-vehicles recovers a consistent near-full-charge population and reduces the
-scatter of capacity estimates about their ageing trend by a factor of \num{1.27}
-on every vehicle, which demonstrates the reach of the description while marking
-where the parameterised step stops applying.
+implementation as much as the generalisation. Finally, applying the method to the
+opportunistic charging records of \num{20} on-road electric vehicles --- data
+with no protocol at all --- recovers a consistent near-full-charge population
+and reduces the scatter of capacity estimates about their ageing trend by a
+factor of \num{2.47} on every vehicle, which demonstrates the reach of the
+description while marking where the parameterised step stops applying.
 \end{abstract}
 
 \begin{keyword}
@@ -951,21 +951,41 @@ for, at whatever state of charge, for whatever duration. Nothing schedules a
 capacity test, and there is no $C_{\mathrm{cap}}$ to declare, because the
 vehicle does not have a specified charge rate.
 
-Stages (i)--(iii) of Section~\ref{sec:method} carry over directly. Sessions are
-split on gaps in the record; each is described by duration, charge and voltage
-excursion, mean current, current variability, and whether the charge reached a
-constant-voltage tail; and the descriptors are clustered. Stage (iv) has nothing
-to resolve against, so it is replaced by fixed thresholds --- a cluster must
-mostly reach a CV tail and sweep at least \SI{30}{\percent} state of charge.
-That substitution is exactly what this paper argues against elsewhere, and we
-return to it below.
+Stages (i) and (ii) of Section~\ref{sec:method} carry over unchanged: sessions
+are split on gaps in the record, and each is described by its duration, charge
+and voltage excursion, current level and variability. Stage (iii) clusters those
+descriptors. Stage (iv) has nothing to resolve against --- an opportunistic
+charge declares no $C_{\mathrm{cap}}$ --- so it selects instead by
+top-of-charge voltage: among clusters whose median excursion clears a floor, the
+one that ends highest. A charge that ends high reached the top of charge, where
+a partial top-up stops lower.
 
-The selected cluster is nonetheless a consistent object across the fleet. On
-every vehicle it is the same kind of session: a median excursion of about
-\SI{50}{\percent} state of charge over roughly \SI{75}{\minute}, with a CV tail
-on every member --- a near-full charge, which is what a capacity estimate needs.
-It holds \SIrange{5.5}{17}{\percent} of each vehicle's sessions
-(\numrange{155}{457} of some \num{2700}).
+\paragraph{A stage that looked load-bearing and was not.} Our first attempt at
+stage (iii) clustered on six descriptors, one of which was a hand-written flag
+marking whether the charge reached a constant-voltage tail. It appeared to work
+on all \num{20} vehicles. It did not: the selected cluster reproduced that flag
+to \SIrange{99.7}{100}{\percent} agreement on every vehicle, so the clustering
+was relabelling an input it had been handed rather than discovering anything.
+Deleting stages (iii) and (iv) and writing the flag as a rule directly would
+have given the same tables to within about one session per vehicle.
+
+Removing the flag and keeping the other physical descriptors does not repair it
+--- on \num{11} of \num{20} vehicles the full charges then fail to separate at
+all, and no selection rule can choose a cluster that does not exist. What does
+work is clustering on the state-of-charge excursion \emph{alone}: it partitions
+that axis finely, and selection by top-of-charge voltage then picks the deep
+charges that ended highest. Only about \SI{37}{\percent} of the sessions it
+selects carry a CV tail, so it is finding a different and cleaner population
+rather than the flag under another name --- and the flag becomes an independent
+check on the result instead of its cause. We report this because a stage that
+contributes nothing is easy to leave in place unexamined, and the check that
+exposed it is cheap: compare what the stage selects against each of its own
+inputs.
+
+The result is a consistent object across the fleet: a median excursion of about
+\SI{66}{\percent} state of charge ending near the top of charge, holding a
+median of \num{57} sessions per vehicle (\numrange{28}{565}) out of some
+\num{2700}.
 
 Two checks. First, on the sessions both retain, our coulomb count reproduces the
 dataset authors' own published extraction exactly: median and maximum absolute
@@ -975,8 +995,8 @@ Because these packs fade \SIrange{20}{30}{\percent} over the record, scatter
 must be measured about the ageing trend rather than across it; the spread of the
 raw timeline is dominated by real degradation and is nearly blind to estimator
 noise. Detrended, the scatter falls from \SI{1.67}{\percent} to
-\SI{1.33}{\percent} of median capacity --- a factor of \num{1.27} (IQR
-\numrange{1.20}{1.36}), and an improvement on \num{20} of \num{20} vehicles.
+\SI{0.67}{\percent} of median capacity --- a factor of \num{2.47} (IQR
+\numrange{2.14}{3.18}), and an improvement on \num{20} of \num{20} vehicles.
 
 \begin{figure}[t]
 \centering
@@ -984,9 +1004,9 @@ noise. Detrended, the scatter falls from \SI{1.67}{\percent} to
 \caption{Capacity estimates for one vehicle over its record, every charging
 session against the sessions the CAP cluster selects, each with its own
 rolling-median ageing trend. Selection removes most of the scatter, and the
-selected estimates sit systematically higher --- a partial charge under-reports
-capacity. The selected series also stops short of the record, which is discussed
-in the text.}
+selected series is sparse but spans the record. Its trend tracks the
+all-session trend closely; the two agree to within \SI{0.32}{\percent} of
+capacity.}
 \label{fig:field-timeline}
 \end{figure}
 
@@ -1005,53 +1025,48 @@ extraction over all sessions against the CAP cluster. Sorted by the former.}
 dataset authors; blue, the sessions this method selects, with their ageing
 trend. Each panel is normalised to its own first level so the fade is
 comparable. The dashed line marks the last selected session: on most vehicles it
-falls well short of the record. Note also that the grey population drifts below
-the blue as each record progresses.}
+now sits at or near the end of the record on every vehicle. The selected series
+is sparse --- a median of \num{57} sessions --- but tracks the grey population
+without systematic offset.}
 \label{fig:field-fleet-timelines}
 \end{figure*}
 
-\paragraph{The unselected estimate drifts low, increasingly.}
-Figure~\ref{fig:field-fleet-timelines} shows the two populations separating over
-each record. Comparing them like with like --- medians in matched
-\num{30}-day bins, restricted to the window where both exist --- the
-all-session estimate sits below the selected one by a median of
-\SI{0.80}{\percent} of capacity, on \num{20} of \num{20} vehicles. The gap is
-not constant: \SI{0.28}{\percent} over the first half of the overlap and
-\SI{1.80}{\percent} over the second.
+\paragraph{The selection agrees with the unselected estimate.} Comparing the two
+populations like with like --- medians in matched \num{30}-day bins, restricted
+to the window where both exist --- the selected estimate sits within
+\SI{0.32}{\percent} of capacity of the all-session one, and the difference
+narrows over each record rather than widening (\SI{-0.37}{\percent} over the
+first half of the overlap, \SI{-0.03}{\percent} over the second). Selection here
+buys precision, not a different answer.
 
-A drift of that size and direction matters more than the scatter does, because
-it does not average out: \SI{1.8}{\percent} is a substantial fraction of the
-fade these packs show, so a trend fitted to all sessions slopes down faster than
-one fitted to full charges. The direction is what a partial-charge bias
-predicts. Dividing accumulated charge by a reported $\Delta$SOC assumes the
-state-of-charge estimate is accurate across the window; a charge that runs to a
-constant-voltage tail terminates at a known state and anchors that window, while
-a partial top-up does not. As the share of partial sessions rises over a
-vehicle's record, so does their influence. We report the divergence and its
-mechanism, but note that these vehicles carry no reference capacity measurement,
-so the data cannot by itself adjudicate which estimate is closer to truth.
+That is worth stating because an earlier version of this selection, the circular
+one described above, did show a divergence that grew to \SI{1.8}{\percent} over
+each record. It was an artefact of what that selection admitted, not a property
+of the data, and it disappears once the selection is sound. The lesson we take
+from it is that a systematic drift between two estimators is easy to
+over-interpret when one of them has not been validated.
 
-\paragraph{Coverage is incomplete, and systematically so.} The selected sessions
-do not span each record evenly. On \num{17} of \num{20} vehicles the last CAP
-session falls well before the end of the record --- median coverage
-\SI{79}{\percent} of the span, minimum \SI{69}{\percent} --- and consecutive
-selected sessions are separated by a median of \num{64} days, at worst
-\num{178}. Figure~\ref{fig:field-timeline} shows both effects. A field SOH
-timeline built this way is therefore sparse and truncated rather than
-continuous, which is a property of when drivers happen to charge to full and not
-something the estimator can fix. Any use of it downstream has to tolerate
-multi-month gaps.
+\paragraph{Coverage is high but sparse.} The selected sessions span essentially
+the whole of each record --- median coverage \SI{97}{\percent} of the span,
+minimum \SI{90}{\percent}, and only \num{1} of \num{20} vehicles below
+\SI{90}{\percent} --- but they are few, so consecutive estimates are separated
+by a median of \num{133} days and at worst \num{260}
+(Figure~\ref{fig:field-fleet-timelines}). A field SOH timeline built this way
+tracks the fade over the full record but samples it coarsely, and any use of it
+downstream has to tolerate multi-month gaps. The sparseness is a property of how
+rarely these vehicles are charged to the top, not something the estimator can
+fix.
 
 \paragraph{What this does and does not show.} It is a generality result, not a
 portability one. Field charging contains no pulses and no quasi-OCV sweep, so
 only the capacity branch of the taxonomy is exercised. More importantly, the
 stage that carries portability everywhere else in this paper is precisely the
-stage that cannot run here: with no declared rate, selection falls back to
-hard-coded thresholds of the kind Section~\ref{sec:res-recall} shows do not
-transfer between chemistries. We report the field result as evidence that the
-first three stages describe charge/discharge structure generally enough to be
-useful outside a laboratory, and as a demarcation of where the method's central
-mechanism stops applying.
+stage that cannot run here: with no declared rate, selection falls back to a
+threshold on top-of-charge voltage, of the kind Section~\ref{sec:res-recall}
+shows does not transfer between chemistries. We report the field result as
+evidence that the segmentation and description stages capture
+charge/discharge structure generally enough to be useful outside a laboratory,
+and as a demarcation of where the method's central mechanism stops applying.
 
 %% ===================================================================
 \section{Discussion}

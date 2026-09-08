@@ -49,7 +49,10 @@ source below; anything not yet measured is a TODO box, not a placeholder value.
 | 5.5 | Label space vs features | `evaluation.feature_ablation` → `50_evaluation/feature_ablation_*.csv` |
 | 5.7 | Field data (20 on-road EVs) | `field.extract_capacity` then `field.benchmark_shiyunliu --our-dir <dir>`. Needs the metric fix on branch `fix/field-benchmark-trend-residual` |
 
-The three `figures/field_*.pdf` are checked in as build artifacts. Their
+The three `figures/field_*.pdf` are checked in as build artifacts. They and
+§5.7's numbers reflect the **dSOC-alone** selection (`field-data`, commit
+`12eb905`); anything generated before 2026-09-08 used the earlier circular
+selection and does not match the text. Their
 generator, `field/plot_field.py`, lives on the **`field-data`** branch, not
 here — field code is kept off `main`. To regenerate:
 `git checkout field-data -- src/field/plot_field.py` then
