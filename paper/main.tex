@@ -998,6 +998,39 @@ extraction over all sessions against the CAP cluster. Sorted by the former.}
 \label{fig:field-fleet}
 \end{figure}
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/field_fleet_timelines.pdf}
+\caption{All \num{20} vehicles. Grey, every charging session as extracted by the
+dataset authors; blue, the sessions this method selects, with their ageing
+trend. Each panel is normalised to its own first level so the fade is
+comparable. The dashed line marks the last selected session: on most vehicles it
+falls well short of the record. Note also that the grey population drifts below
+the blue as each record progresses.}
+\label{fig:field-fleet-timelines}
+\end{figure*}
+
+\paragraph{The unselected estimate drifts low, increasingly.}
+Figure~\ref{fig:field-fleet-timelines} shows the two populations separating over
+each record. Comparing them like with like --- medians in matched
+\num{30}-day bins, restricted to the window where both exist --- the
+all-session estimate sits below the selected one by a median of
+\SI{0.80}{\percent} of capacity, on \num{20} of \num{20} vehicles. The gap is
+not constant: \SI{0.28}{\percent} over the first half of the overlap and
+\SI{1.80}{\percent} over the second.
+
+A drift of that size and direction matters more than the scatter does, because
+it does not average out: \SI{1.8}{\percent} is a substantial fraction of the
+fade these packs show, so a trend fitted to all sessions slopes down faster than
+one fitted to full charges. The direction is what a partial-charge bias
+predicts. Dividing accumulated charge by a reported $\Delta$SOC assumes the
+state-of-charge estimate is accurate across the window; a charge that runs to a
+constant-voltage tail terminates at a known state and anchors that window, while
+a partial top-up does not. As the share of partial sessions rises over a
+vehicle's record, so does their influence. We report the divergence and its
+mechanism, but note that these vehicles carry no reference capacity measurement,
+so the data cannot by itself adjudicate which estimate is closer to truth.
+
 \paragraph{Coverage is incomplete, and systematically so.} The selected sessions
 do not span each record evenly. On \num{17} of \num{20} vehicles the last CAP
 session falls well before the end of the record --- median coverage

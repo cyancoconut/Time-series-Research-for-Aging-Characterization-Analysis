@@ -9,6 +9,10 @@ greyscale by position and marker as well as by hue):
               ageing trend. Shows directly what the scatter numbers mean.
 ``fleet``     residual scatter about the ageing trend for all 20 vehicles,
               author's extraction against ours, as a paired plot.
+``fleet_timelines``
+              all 20 vehicles as small multiples: the published per-session
+              capacities against the CAP cluster this method selects, each
+              normalised to its own first level so the panels share an axis.
 
 Usage (from src/):
     python -m field.plot_field --out-dir <dir> [--vehicle N] [--base-dir D]
@@ -137,6 +141,81 @@ def fleet(base_dir: str, our_dir: str, out_path: str) -> str:
     return out_path
 
 
+def fleet_timelines(base_dir: str, our_dir: str, out_path: str,
+                    ncols: int = 5) -> str:
+    """All 20 vehicles: published extraction vs the CAP cluster, one panel each.
+
+    Capacity is normalised to each vehicle's own initial level so the panels
+    share a y axis and the fade is comparable; the absolute pack capacities
+    differ between vehicles and would otherwise force 20 different scales.
+    """
+    vehicles = io_shiyunliu.list_vehicles(base_dir)
+    data = []
+    for v in vehicles:
+        p_ours = os.path.join(our_dir, f"{v}_capacity.csv")
+        if not os.path.exists(p_ours):
+            continue
+        a = bs.author_capacities(base_dir, v)
+        o = pd.read_csv(p_ours)
+        if a.empty or o.empty:
+            continue
+        ta = pd.to_datetime(a["start_time"], errors="coerce", utc=True)
+        to = pd.to_datetime(o["CAP_start_time"], errors="coerce", utc=True)
+        t0 = ta.min()
+        # Reference level: median of the CAP cluster's first 20 estimates - the
+        # cleanest early measurement available, so 100% means "as first seen".
+        ref = float(o["Capacity_py"].head(20).median())
+        data.append({
+            "v": int(v),
+            "da": (ta - t0).dt.total_seconds().to_numpy() / 86400.0,
+            "ya": a["Capacity_py_author"].to_numpy() / ref * 100.0,
+            "do": (to - t0).dt.total_seconds().to_numpy() / 86400.0,
+            "yo": o["Capacity_py"].to_numpy() / ref * 100.0,
+            "span": (ta.max() - t0).total_seconds() / 86400.0,
+        })
+    data.sort(key=lambda d: d["v"])
+    nrows = int(np.ceil(len(data) / ncols))
+
+    _style()
+    fig, axes = plt.subplots(nrows, ncols, figsize=(9.4, 1.85 * nrows),
+                             sharex=True, sharey=True)
+    axes = np.atleast_1d(axes).ravel()
+    for ax, d in zip(axes, data):
+        ax.scatter(d["da"], d["ya"], s=1.4, c=C_ALL, alpha=0.30, linewidths=0,
+                   rasterized=True)
+        ax.scatter(d["do"], d["yo"], s=3.2, c=C_CAP, alpha=0.85, linewidths=0,
+                   rasterized=True)
+        ts, _, tr = _trend(d["do"], d["yo"])
+        ax.plot(ts, tr, color=C_CAP, lw=1.1, zorder=3)
+        # where the selected sessions stop, against where the record stops
+        ax.axvline(d["do"].max(), color=C_AUT, lw=0.9, ls=(0, (3, 2)), zorder=2)
+        ax.set_title(f"#{d['v']}", loc="left", fontsize=8, pad=2)
+        ax.tick_params(labelsize=7)
+    for ax in axes[len(data):]:
+        ax.set_visible(False)
+    axes[0].set_ylim(60, 108)
+    for i, ax in enumerate(axes[:len(data)]):
+        if i % ncols == 0:
+            ax.set_ylabel("capacity (\\% of first)".replace("\\%", "%"), fontsize=7.5)
+        if i >= len(data) - ncols:
+            ax.set_xlabel("days", fontsize=7.5)
+
+    handles = [
+        plt.Line2D([], [], marker="o", ls="", color=C_ALL, ms=4,
+                   label="all charging sessions (published extraction)"),
+        plt.Line2D([], [], marker="o", ls="", color=C_CAP, ms=4,
+                   label="CAP cluster (this method), with trend"),
+        plt.Line2D([], [], color=C_AUT, lw=1.0, ls=(0, (3, 2)),
+                   label="last selected session"),
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=3, fontsize=8,
+               bbox_to_anchor=(0.5, 1.005), handletextpad=0.5)
+    fig.tight_layout(rect=(0, 0, 1, 0.975))
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Field-data figures")
     ap.add_argument("--base-dir", default=DEFAULT_BASE)
@@ -150,6 +229,8 @@ def main() -> None:
     print(timeline(a.base_dir, a.vehicle, our_dir,
                    os.path.join(a.out_dir, "field_timeline.pdf")))
     print(fleet(a.base_dir, our_dir, os.path.join(a.out_dir, "field_fleet.pdf")))
+    print(fleet_timelines(a.base_dir, our_dir,
+                          os.path.join(a.out_dir, "field_fleet_timelines.pdf")))
 
 
 if __name__ == "__main__":
