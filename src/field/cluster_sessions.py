@@ -33,8 +33,8 @@ from sklearn.preprocessing import StandardScaler
 #
 # Clustering on dSOC alone is both non-circular and better. It partitions the
 # excursion axis finely (~50 clusters); pick_cap_cluster then takes the slice
-# with the highest median_V_max above a dSOC floor — "among deep charges, the
-# ones that ended highest". Measured against the previous default, per vehicle:
+# with the highest median_SOC_end above a dSOC floor — "among deep charges, the
+# ones that ended fullest". Measured against the previous default, per vehicle:
 #
 #     variant                      found   med n   resid%   coverage%
 #     previous (has_cv_tail)       20/20     290     1.33          79
@@ -129,6 +129,7 @@ def summarize_clusters(labeled: pd.DataFrame) -> pd.DataFrame:
         "median_I_cv": (g["I_std"].median() / g["I_mean"].median().abs().replace(0, np.nan)).to_numpy(),
         "cv_tail_rate": g["has_cv_tail"].mean().to_numpy(),
         "median_V_max": g["V_max"].median().to_numpy(),
+        "median_SOC_end": g["SOC_end"].median().to_numpy(),
     })
     return out.sort_values("n", ascending=False).reset_index(drop=True)
 
@@ -136,24 +137,36 @@ def summarize_clusters(labeled: pd.DataFrame) -> pd.DataFrame:
 def pick_cap_cluster(
     labeled: pd.DataFrame,
     *,
-    min_median_dsoc: float = 20.0,
+    min_median_dsoc: float = 70.0,
 ) -> int | None:
-    """Pick the cluster best matching 'a charge that ended full'.
+    """Pick the cluster best matching 'a deep charge that ended full'.
 
-    ``median_V_max`` is the completeness signal: a charge that ends high reached
-    the top of charge, whereas a partial top-up stops at a lower peak voltage.
-    Neither duration nor dSOC can stand in for it — both measure how much charge
-    was added, not where the charge ended, so a deep charge starting from empty
-    looks identical to a full one.
+    Two criteria, both about where the charge *ended* rather than how much was
+    added:
 
-    Selection is therefore the cluster with the highest ``median_V_max``, subject
-    to a ``median_dSOC`` floor that rules out shallow top-up slices (a sliver of
-    charge can reach a high voltage without being a usable capacity sample).
+    * ``median_SOC_end`` — the completeness signal. A session that ends at the
+      top of the SOC window reached full charge; a partial top-up stops lower.
+      Selection is the cluster with the highest ``median_SOC_end``.
 
-    The CV-tail rate is deliberately not used here. It was the previous
-    criterion and made the whole stage circular; it is still computed in
-    ``summarize_clusters`` and is useful as an independent check on what was
-    selected.
+      SOC saturates: on all 20 shiyunliu vehicles the top clusters share a
+      median SOC_end of exactly 97.6, so on its own this sort is decided by row
+      order rather than by the criterion. ``median_dSOC`` therefore breaks the
+      tie, descending — among the clusters that end full, the deepest charge.
+      (``median_V_max`` saturates the same way, ~380 V, so the criterion this
+      replaced was equally tie-bound.)
+    * ``median_dSOC >= min_median_dsoc`` (default 70) — the depth floor. A
+      sliver of charge can end at a high SOC without spanning enough of the
+      window to be a usable capacity sample; coulomb-counting a shallow
+      excursion into a full-capacity estimate amplifies the SOC error by the
+      reciprocal of the excursion.
+
+    ``median_V_max`` was the previous completeness criterion and is still
+    computed in ``summarize_clusters``. SOC_end says the same thing in the unit
+    the depth floor is already written in, and is not lifted by the
+    current-dependent IR offset that inflates V_max on fast charges. The CV-tail
+    rate is deliberately unused — it was the criterion before that and made the
+    stage circular (it is also a clustering input). Both remain useful as
+    independent checks on what was selected.
     """
     summary = summarize_clusters(labeled)
     candidates = summary[
@@ -163,8 +176,9 @@ def pick_cap_cluster(
     if candidates.empty:
         return None
     return int(
-        candidates.sort_values("median_V_max", ascending=False)
-        .iloc[0]["cluster_label"]
+        candidates.sort_values(
+            ["median_SOC_end", "median_dSOC"], ascending=[False, False]
+        ).iloc[0]["cluster_label"]
     )
 
 
@@ -198,9 +212,10 @@ if __name__ == "__main__":
         print(summary.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
         cap = pick_cap_cluster(labeled)
         if cap is None:
-            print("  ← no cluster passes min_dsoc=60")
+            print("  ← no cluster passes the dSOC floor")
         else:
             cap_rows = labeled[labeled["cluster_label"] == cap]
             print(f"  ← CAP cluster: {cap}  (n={len(cap_rows)}, "
                   f"median dSOC={cap_rows['dSOC'].median():.1f}, "
+                  f"SOC_end={cap_rows['SOC_end'].median():.1f}, "
                   f"CV-tail rate={cap_rows['has_cv_tail'].mean():.1%})")
