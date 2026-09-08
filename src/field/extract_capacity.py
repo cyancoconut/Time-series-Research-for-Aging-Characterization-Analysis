@@ -3,7 +3,7 @@
 End-to-end pipeline for the shiyunliu field-data track:
 
     load_vehicle  →  split_sessions  →  session_features  →
-        cluster_sessions  →  pick_cap_cluster  →  this module
+        cluster_sessions  →  pick_cap_clusters  →  this module
 
 For each session in the picked CAP cluster, coulomb-count
 ``Capacity_py = ∫|I|dt / (|ΔSOC|/100)``. Cumulative ``Ah_throughput`` is
@@ -57,12 +57,14 @@ def extract_for_vehicle(
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
     labeled = cluster_sessions.cluster_sessions(feats)
-    cap_label = cluster_sessions.pick_cap_cluster(labeled)
-    if cap_label is None:
+    cap_labels = cluster_sessions.pick_cap_clusters(labeled)
+    if not cap_labels:
         logging.warning(f"vehicle #{vehicle}: no CAP cluster found, returning empty table")
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
-    cap_session_ids = set(labeled.loc[labeled["cluster_label"] == cap_label, "session_id"].tolist())
+    cap_session_ids = set(
+        labeled.loc[labeled["cluster_label"].isin(cap_labels), "session_id"].tolist()
+    )
 
     # Walk sessions chronologically to accumulate Ah throughput; integrate ∫|I|dt
     # for every session so the throughput counter reflects real cell use, not

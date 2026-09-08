@@ -11,8 +11,8 @@ Workflow::
     feats = sessions.session_features(split_sessions(load_vehicle(...)), vehicle=v)
     labeled = cluster_sessions(feats)
     summary = summarize_clusters(labeled)
-    cap_label = pick_cap_cluster(labeled)
-    cap_sessions = labeled[labeled["cluster_label"] == cap_label]
+    cap_labels = pick_cap_clusters(labeled)
+    cap_sessions = labeled[labeled["cluster_label"].isin(cap_labels)]
 """
 from __future__ import annotations
 
@@ -32,9 +32,9 @@ from sklearn.preprocessing import StandardScaler
 # the remaining physical features failed on 11 of 20 vehicles.
 #
 # Clustering on dSOC alone is both non-circular and better. It partitions the
-# excursion axis finely (~50 clusters); pick_cap_cluster then takes the slice
-# with the highest median_SOC_end above a dSOC floor — "among deep charges, the
-# ones that ended fullest". Measured against the previous default, per vehicle:
+# excursion axis finely (~50 clusters); pick_cap_clusters then keeps every band
+# that ends at the top of the SOC window and clears a dSOC floor — "the deep
+# charges that ended full". Measured against the previous default, per vehicle:
 #
 #     variant                      found   med n   resid%   coverage%
 #     previous (has_cv_tail)       20/20     290     1.33          79
@@ -134,31 +134,44 @@ def summarize_clusters(labeled: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("n", ascending=False).reset_index(drop=True)
 
 
-def pick_cap_cluster(
+def pick_cap_clusters(
     labeled: pd.DataFrame,
     *,
     min_median_dsoc: float = 70.0,
-) -> int | None:
-    """Pick the cluster best matching 'a deep charge that ended full'.
+    soc_end_tolerance: float = 0.5,
+) -> list[int]:
+    """Every cluster matching 'a deep charge that ended full'.
 
     Two criteria, both about where the charge *ended* rather than how much was
     added:
 
-    * ``median_SOC_end`` — the completeness signal. A session that ends at the
-      top of the SOC window reached full charge; a partial top-up stops lower.
-      Selection is the cluster with the highest ``median_SOC_end``.
-
-      SOC saturates: on all 20 shiyunliu vehicles the top clusters share a
-      median SOC_end of exactly 97.6, so on its own this sort is decided by row
-      order rather than by the criterion. ``median_dSOC`` therefore breaks the
-      tie, descending — among the clusters that end full, the deepest charge.
-      (``median_V_max`` saturates the same way, ~380 V, so the criterion this
-      replaced was equally tie-bound.)
+    * ``median_SOC_end`` within ``soc_end_tolerance`` of the best — the
+      completeness signal. A session that ends at the top of the SOC window
+      reached full charge; a partial top-up stops lower.
     * ``median_dSOC >= min_median_dsoc`` (default 70) — the depth floor. A
       sliver of charge can end at a high SOC without spanning enough of the
       window to be a usable capacity sample; coulomb-counting a shallow
       excursion into a full-capacity estimate amplifies the SOC error by the
       reciprocal of the excursion.
+
+    This is a predicate over clusters, not a ranking, so it returns every
+    qualifying cluster. HDBSCAN partitions the dSOC axis finely, so a single
+    physical population — deep charges that ended full — routinely arrives as
+    three or four adjacent bands: vehicle 1 has clusters 0, 2 and 5 at median
+    dSOC 82.0 / 77.6 / 71.6, all ending at 97.6. Returning only the best of them
+    discarded two thirds of the evidence. Over the 20 vehicles, taking the union
+    instead of the top band raises the kept sessions from 1219 to 2019 and the
+    per-vehicle median from 52 to 122.
+
+    Individual estimates are slightly noisier for it — median trend-residual
+    scatter 0.61% against 0.71%, since the union includes the 70-77 dSOC bands
+    alongside the deepest one. The extra samples more than pay for it: on the 10
+    vehicles where the union differs from the top band at all, the standard
+    error of the ageing trend improves on 8 (median 0.079 to 0.065).
+
+    ``soc_end_tolerance`` exists because SOC saturates — on all 20 vehicles the
+    qualifying clusters share a median SOC_end of exactly 97.6 — so an exact
+    float comparison would be brittle for no benefit.
 
     ``median_V_max`` was the previous completeness criterion and is still
     computed in ``summarize_clusters``. SOC_end says the same thing in the unit
@@ -174,12 +187,12 @@ def pick_cap_cluster(
         & (summary["median_dSOC"] >= min_median_dsoc)
     ]
     if candidates.empty:
-        return None
-    return int(
-        candidates.sort_values(
-            ["median_SOC_end", "median_dSOC"], ascending=[False, False]
-        ).iloc[0]["cluster_label"]
-    )
+        return []
+    best_soc_end = candidates["median_SOC_end"].max()
+    qualifying = candidates[
+        candidates["median_SOC_end"] >= best_soc_end - soc_end_tolerance
+    ]
+    return sorted(int(c) for c in qualifying["cluster_label"])
 
 
 if __name__ == "__main__":
@@ -210,12 +223,12 @@ if __name__ == "__main__":
         print(f"  sessions={len(labeled)}  clusters={n_clusters}  noise={n_noise}")
         summary = summarize_clusters(labeled)
         print(summary.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
-        cap = pick_cap_cluster(labeled)
-        if cap is None:
+        cap = pick_cap_clusters(labeled)
+        if not cap:
             print("  ← no cluster passes the dSOC floor")
         else:
-            cap_rows = labeled[labeled["cluster_label"] == cap]
-            print(f"  ← CAP cluster: {cap}  (n={len(cap_rows)}, "
+            cap_rows = labeled[labeled["cluster_label"].isin(cap)]
+            print(f"  ← CAP clusters: {cap}  (n={len(cap_rows)}, "
                   f"median dSOC={cap_rows['dSOC'].median():.1f}, "
                   f"SOC_end={cap_rows['SOC_end'].median():.1f}, "
                   f"CV-tail rate={cap_rows['has_cv_tail'].mean():.1%})")
