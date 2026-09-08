@@ -22,15 +22,34 @@ import hdbscan
 from sklearn.preprocessing import StandardScaler
 
 
-# Per-session features fed to HDBSCAN. duration is log-scaled before standardising
-# because it spans roughly 3 orders of magnitude (~30 s … ~100 ks).
+# Per-session feature fed to HDBSCAN: the state-of-charge excursion, alone.
+#
+# The wider set this replaced — duration, dSOC, I_mean, I_cv, V_max and the
+# has_cv_tail flag — turned out to be circular. Clustering on it reproduced
+# has_cv_tail to 99.7–100% agreement on all 20 vehicles: the flag was one of
+# the inputs, so HDBSCAN was relabelling an answer it had been handed rather
+# than discovering the capacity population. Removing the flag and clustering on
+# the remaining physical features failed on 11 of 20 vehicles.
+#
+# Clustering on dSOC alone is both non-circular and better. It partitions the
+# excursion axis finely (~50 clusters); pick_cap_cluster then takes the slice
+# with the highest median_V_max above a dSOC floor — "among deep charges, the
+# ones that ended highest". Measured against the previous default, per vehicle:
+#
+#     variant                      found   med n   resid%   coverage%
+#     previous (has_cv_tail)       20/20     290     1.33          79
+#     [V_max, SOC_end]             20/20      74     0.93          20
+#     dSOC alone                   20/20      57     0.67          97
+#
+# Better on scatter and on record coverage on 20 of 20 vehicles each, and only
+# ~37% of the sessions it selects carry a CV tail — so it finds a different and
+# cleaner population, not the flag under another name.
+#
+# Two caveats. With one feature the "clustering" is a fine partition of a single
+# axis, so HDBSCAN may add little over quantile binning; and the selected count
+# varies widely between vehicles (28–565).
 DEFAULT_FEATURE_COLUMNS = [
-    "duration_s_log",
     "dSOC",
-    "I_mean",
-    "I_cv",          # std / mean — shape sensitivity, dimensionless
-    "V_max",
-    "has_cv_tail",   # 0/1
 ]
 
 
@@ -108,29 +127,36 @@ def summarize_clusters(labeled: pd.DataFrame) -> pd.DataFrame:
 def pick_cap_cluster(
     labeled: pd.DataFrame,
     *,
-    min_cv_tail_rate: float = 0.5,
-    min_median_dsoc: float = 30.0,
+    min_median_dsoc: float = 20.0,
 ) -> int | None:
-    """Pick the cluster best matching 'full CC-CV charge'.
+    """Pick the cluster best matching 'a charge that ended full'.
 
-    CV tail is the defining signature — a session that reaches CV has completed
-    its CC ramp and is suitable for coulomb-counting. Clusters with
-    ``cv_tail_rate < min_cv_tail_rate`` are excluded as 'mostly partial top-ups'.
-    Among the remainder, rank by ``median_dSOC * cv_tail_rate``. A floor on
-    ``median_dSOC`` prevents picking a tiny end-of-charge top-up cluster that
-    happens to have many CV-tail samples.
+    ``median_V_max`` is the completeness signal: a charge that ends high reached
+    the top of charge, whereas a partial top-up stops at a lower peak voltage.
+    Neither duration nor dSOC can stand in for it — both measure how much charge
+    was added, not where the charge ended, so a deep charge starting from empty
+    looks identical to a full one.
+
+    Selection is therefore the cluster with the highest ``median_V_max``, subject
+    to a ``median_dSOC`` floor that rules out shallow top-up slices (a sliver of
+    charge can reach a high voltage without being a usable capacity sample).
+
+    The CV-tail rate is deliberately not used here. It was the previous
+    criterion and made the whole stage circular; it is still computed in
+    ``summarize_clusters`` and is useful as an independent check on what was
+    selected.
     """
     summary = summarize_clusters(labeled)
     candidates = summary[
         (summary["cluster_label"] != -1)
-        & (summary["cv_tail_rate"] >= min_cv_tail_rate)
         & (summary["median_dSOC"] >= min_median_dsoc)
     ]
     if candidates.empty:
         return None
-    candidates = candidates.copy()
-    candidates["score"] = candidates["median_dSOC"] * candidates["cv_tail_rate"]
-    return int(candidates.sort_values("score", ascending=False).iloc[0]["cluster_label"])
+    return int(
+        candidates.sort_values("median_V_max", ascending=False)
+        .iloc[0]["cluster_label"]
+    )
 
 
 if __name__ == "__main__":
