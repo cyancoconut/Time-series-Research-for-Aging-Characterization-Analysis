@@ -65,12 +65,21 @@ def _build_feature_matrix(feats: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# HDBSCAN's cluster_selection_epsilon merges clusters separated by less than this
+# distance in the standardised feature space. It matters here because dSOC is
+# quantised to 0.4-point steps: at epsilon 0 every discrete value with enough
+# members becomes its own cluster, giving ~50 clusters that are bins rather than
+# structure. 0.03 merges those into ~7 real bands at no cost - measured over the
+# 20 vehicles, median residual scatter 0.65% against 0.67%, coverage unchanged
+# at 97%, and the same sessions selected (55 against 57). Above ~0.05 the bands
+# merge too far: the selected population broadens to 114 then 478 sessions and
+# scatter degrades to 0.71% and 1.02%.
 def cluster_sessions(
     feats: pd.DataFrame,
     *,
     min_cluster_size: int | None = None,
     min_samples: int | None = None,
-    cluster_selection_epsilon: float = 0.0,
+    cluster_selection_epsilon: float = 0.03,
     feature_columns: list[str] = DEFAULT_FEATURE_COLUMNS,
 ) -> pd.DataFrame:
     """Add a ``cluster_label`` column (-1 = noise) to the per-session features.
