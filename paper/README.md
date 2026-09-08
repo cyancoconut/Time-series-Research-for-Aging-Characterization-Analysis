@@ -48,6 +48,12 @@ source below; anything not yet measured is a TODO box, not a placeholder value.
 | 5.4 | Detection recall + fixed-threshold baseline | `evaluation.detection_recall` → `50_evaluation/detection_recall_fleet_*.csv` |
 | 5.5 | Label space vs features | `evaluation.feature_ablation` → `50_evaluation/feature_ablation_*.csv` |
 | 5.7 | Field data (20 on-road EVs) | `field.extract_capacity` then `field.benchmark_shiyunliu --our-dir <dir>`. Needs the metric fix on branch `fix/field-benchmark-trend-residual` |
+
+The three `figures/field_*.pdf` are checked in as build artifacts. Their
+generator, `field/plot_field.py`, lives on the **`field-data`** branch, not
+here — field code is kept off `main`. To regenerate:
+`git checkout field-data -- src/field/plot_field.py` then
+`python -m field.plot_field --out-dir ../paper/figures --vehicle 3`.
 | 5.6 | Cross-laboratory (ISU-ILCC, UConn-ILCC) | `evaluation.external_validation` → `50_evaluation/external_validation_*.csv`. Needs the layer-2 fix on branch `fix/layer2-capacity-cluster-selection` |
 
 Regenerate 5.4 and 5.5:
