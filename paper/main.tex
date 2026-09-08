@@ -978,6 +978,37 @@ noise. Detrended, the scatter falls from \SI{1.67}{\percent} to
 \SI{1.33}{\percent} of median capacity --- a factor of \num{1.27} (IQR
 \numrange{1.20}{1.36}), and an improvement on \num{20} of \num{20} vehicles.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/field_timeline.pdf}
+\caption{Capacity estimates for one vehicle over its record, every charging
+session against the sessions the CAP cluster selects, each with its own
+rolling-median ageing trend. Selection removes most of the scatter, and the
+selected estimates sit systematically higher --- a partial charge under-reports
+capacity. The selected series also stops short of the record, which is discussed
+in the text.}
+\label{fig:field-timeline}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.62\linewidth]{figures/field_fleet.pdf}
+\caption{Scatter about the ageing trend for all \num{20} vehicles, the published
+extraction over all sessions against the CAP cluster. Sorted by the former.}
+\label{fig:field-fleet}
+\end{figure}
+
+\paragraph{Coverage is incomplete, and systematically so.} The selected sessions
+do not span each record evenly. On \num{17} of \num{20} vehicles the last CAP
+session falls well before the end of the record --- median coverage
+\SI{79}{\percent} of the span, minimum \SI{69}{\percent} --- and consecutive
+selected sessions are separated by a median of \num{64} days, at worst
+\num{178}. Figure~\ref{fig:field-timeline} shows both effects. A field SOH
+timeline built this way is therefore sparse and truncated rather than
+continuous, which is a property of when drivers happen to charge to full and not
+something the estimator can fix. Any use of it downstream has to tolerate
+multi-month gaps.
+
 \paragraph{What this does and does not show.} It is a generality result, not a
 portability one. Field charging contains no pulses and no quasi-OCV sweep, so
 only the capacity branch of the taxonomy is exercised. More importantly, the
