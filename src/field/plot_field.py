@@ -195,8 +195,31 @@ def fleet(base_dir: str, our_dir: str, out_path: str) -> str:
     return out_path
 
 
+def _sparse_months(days: np.ndarray, span_days: float, min_support: int,
+                   bin_days: float = 30.0):
+    """30-day bins holding fewer than ``min_support`` selected sessions.
+
+    Yields (start, end) in days. Bins with no sessions at all count as sparse,
+    so the range is built from the record span rather than from the sessions
+    present — a month the CAP cluster never reaches is exactly the case worth
+    marking.
+    """
+    n_bins = int(np.ceil(span_days / bin_days)) if span_days > 0 else 0
+    counts = np.bincount((np.asarray(days) // bin_days).astype(int),
+                         minlength=max(n_bins, 1))
+    out = []
+    for i in range(n_bins):
+        if counts[i] < min_support:
+            if out and out[-1][1] == i * bin_days:      # merge adjacent runs
+                out[-1] = (out[-1][0], (i + 1) * bin_days)
+            else:
+                out.append((i * bin_days, (i + 1) * bin_days))
+    return out
+
+
 def fleet_timelines(base_dir: str, our_dir: str, out_path: str,
-                    ncols: int = 5, show_sessions: bool = False) -> str:
+                    ncols: int = 5, show_sessions: bool = False,
+                    min_support: int = 5) -> str:
     """All 20 vehicles: ageing trend from all sessions vs from the CAP cluster.
 
     One line per method per panel: the author's monthly median against the CAP
@@ -242,6 +265,10 @@ def fleet_timelines(base_dir: str, our_dir: str, out_path: str,
                              sharex=True, sharey=True)
     axes = np.atleast_1d(axes).ravel()
     for ax, d in zip(axes, data):
+        # Mark where the CAP curve is thinly supported before drawing it, so the
+        # bands sit behind the lines rather than over them.
+        for x0, x1 in _sparse_months(d["do"], d["span"], min_support):
+            ax.axvspan(x0, x1, color=GRID, alpha=0.75, lw=0, zorder=0)
         if show_sessions:
             ax.scatter(d["da"], d["ya"], s=1.4, c=C_ALL, alpha=0.22, linewidths=0,
                        rasterized=True)
@@ -274,8 +301,10 @@ def fleet_timelines(base_dir: str, our_dir: str, out_path: str,
         plt.Line2D([], [], color=C_CAP, lw=1.6, label="CAP cluster (this method)"),
         plt.Line2D([], [], color=MUTED, lw=0.9, ls=(0, (3, 2)),
                    label="last selected session"),
+        plt.Rectangle((0, 0), 1, 1, color=GRID, alpha=0.75, lw=0,
+                      label=f"month with $<${min_support} selected sessions"),
     ]
-    fig.legend(handles=handles, loc="upper center", ncol=3, fontsize=8,
+    fig.legend(handles=handles, loc="upper center", ncol=4, fontsize=8,
                bbox_to_anchor=(0.5, 1.005), handletextpad=0.5)
     fig.tight_layout(rect=(0, 0, 1, 0.975))
     fig.savefig(out_path, bbox_inches="tight")
