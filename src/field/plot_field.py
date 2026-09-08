@@ -1,7 +1,7 @@
 """Figures for the field-data section: what the CAP cluster selects, and what
 selecting it buys.
 
-Two figures, both print-oriented (vector PDF, no interactivity, legible in
+Four figures, all print-oriented (vector PDF, no interactivity, legible in
 greyscale by position and marker as well as by hue):
 
 ``timeline``  one vehicle's capacity estimates over its record, every session
@@ -9,6 +9,9 @@ greyscale by position and marker as well as by hue):
               ageing trend. Shows directly what the scatter numbers mean.
 ``fleet``     residual scatter about the ageing trend for all 20 vehicles,
               author's extraction against ours, as a paired plot.
+``medians``     per-vehicle median capacity, all charging sessions against the CAP
+              cluster, as paired dumbbells - the comparison against doing no
+              selection at all.
 ``fleet_timelines``
               all 20 vehicles as small multiples: the published per-session
               capacities against the CAP cluster this method selects, each
@@ -244,6 +247,71 @@ def fleet_timelines(base_dir: str, our_dir: str, out_path: str,
     return out_path
 
 
+def medians(base_dir: str, out_path: str) -> str:
+    """All vehicles: median capacity from every session vs from the CAP cluster.
+
+    The comparison against doing no selection at all. Unfiltered sessions are
+    mostly shallow mid-range top-ups (median dSOC ~22 points), and a point of
+    SOC costs fewer Ah in the middle of the window than at its ends, so their
+    median sits low. Paired dumbbells rather than two sorted series: the
+    quantity of interest is the gap within a vehicle, not the fleet ranking.
+    """
+    from field import cluster_sessions as cs, sessions as fs
+    from field.extract_capacity import _trapz_abs_Ah
+
+    rows = []
+    for v in io_shiyunliu.list_vehicles(base_dir):
+        df = fs.split_sessions(io_shiyunliu.load_vehicle(io_shiyunliu.vehicle_path(base_dir, v)))
+        feats = fs.session_features(df, vehicle=v)
+        if feats.empty:
+            continue
+        labeled = cs.cluster_sessions(feats)
+        cap_label = cs.pick_cap_cluster(labeled)
+        cap_ids = set(labeled.loc[labeled["cluster_label"] == cap_label, "session_id"]) \
+            if cap_label is not None else set()
+        caps = []
+        for sid, sub in df.groupby("session_id"):
+            sf = labeled[labeled["session_id"] == sid]
+            if sf.empty:
+                continue
+            dsoc = float(sf["dSOC"].iloc[0])
+            ah = _trapz_abs_Ah(sub["Time"], sub["Current"])
+            if not (np.isfinite(dsoc) and abs(dsoc) > 1e-6 and np.isfinite(ah)):
+                continue
+            caps.append((abs(ah) / (abs(dsoc) / 100.0), sid in cap_ids))
+        c = pd.DataFrame(caps, columns=["cap", "is_cap"])
+        if c.empty or not c["is_cap"].any():
+            continue
+        rows.append({"vehicle": int(v),
+                     "all": c["cap"].median(),
+                     "ours": c.loc[c["is_cap"], "cap"].median()})
+
+    df = pd.DataFrame(rows).sort_values("vehicle").reset_index(drop=True)
+    y = np.arange(len(df))
+
+    _style()
+    fig, ax = plt.subplots(figsize=(4.6, 4.6))
+    ax.hlines(y, df["all"], df["ours"], color=GRID, lw=1.6, zorder=1)
+    ax.scatter(df["all"], y, s=26, c=C_AUT, zorder=3, linewidths=0,
+               label="all charging sessions")
+    ax.scatter(df["ours"], y, s=26, c=C_CAP, zorder=3, linewidths=0,
+               label="CAP cluster (this method)")
+    ax.set_yticks(y)
+    ax.set_yticklabels([f"#{v}" for v in df["vehicle"]], fontsize=7)
+    ax.set_xlabel("median capacity estimate (Ah)")
+    ax.set_ylabel("vehicle")
+    ax.set_ylim(-0.8, len(df) + 1.4)   # blank row up top so the legend clears the marks
+    gap = 100 * (df["all"] - df["ours"]) / df["ours"]
+    ax.set_title(f"All sessions read {abs(gap.median()):.1f}% low "
+                 f"({int((gap < 0).sum())}/{len(df)} vehicles)", loc="left", fontsize=9)
+    ax.grid(axis="y", visible=False)
+    ax.legend(loc="upper right", fontsize=7.5, handletextpad=0.4)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Field-data figures")
     ap.add_argument("--base-dir", default=DEFAULT_BASE)
@@ -259,6 +327,7 @@ def main() -> None:
     print(fleet(a.base_dir, our_dir, os.path.join(a.out_dir, "field_fleet.pdf")))
     print(fleet_timelines(a.base_dir, our_dir,
                           os.path.join(a.out_dir, "field_fleet_timelines.pdf")))
+    print(medians(a.base_dir, os.path.join(a.out_dir, "field_medians.pdf")))
 
 
 if __name__ == "__main__":
