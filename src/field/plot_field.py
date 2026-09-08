@@ -51,6 +51,34 @@ def _style() -> None:
     })
 
 
+def _residual_scatter(times, values, frac: float = 0.15):
+    """Scatter of capacity estimates about their own ageing trend, in percent.
+
+    Defined here rather than imported so these figures stay independent of the
+    benchmark module, which carries the same measure on its own branch. A field
+    cell fades over the record, so the spread of a capacity timeline mixes
+    degradation with estimator noise; detrending with a centred rolling median
+    leaves the noise, summarised by its median absolute deviation and normalised
+    by median capacity.
+    """
+    t = pd.to_datetime(pd.Series(times), errors="coerce", utc=True)
+    y = pd.Series(values, dtype=float).to_numpy()
+    ok = t.notna().to_numpy() & np.isfinite(y)
+    if ok.sum() < 8:
+        return None
+    order = np.argsort(t[ok].astype("int64").to_numpy())
+    y = y[ok][order]
+    window = max(5, int(len(y) * frac)) | 1
+    trend = pd.Series(y).rolling(window, center=True, min_periods=3).median().to_numpy()
+    resid = y - trend
+    resid = resid[np.isfinite(resid)]
+    med = np.median(y)
+    if resid.size == 0 or not np.isfinite(med) or med == 0:
+        return None
+    mad = np.median(np.abs(resid - np.median(resid)))
+    return float(1.4826 * mad / med * 100)
+
+
 def _trend(t: np.ndarray, y: np.ndarray, frac: float = 0.15):
     """Centred rolling-median ageing trend, same estimator the benchmark uses."""
     order = np.argsort(t)
@@ -83,8 +111,8 @@ def timeline(base_dir: str, vehicle: str, our_dir: str, out_path: str) -> str:
         ts, _, tr = _trend(d, y)
         ax.plot(ts, tr, color=c, lw=lw, solid_capstyle="round", zorder=3)
 
-    ra = bs.trend_residual_scatter(author["start_time"], author["Capacity_py_author"])
-    ro = bs.trend_residual_scatter(ours["CAP_start_time"], ours["Capacity_py"])
+    ra = _residual_scatter(author["start_time"], author["Capacity_py_author"])
+    ro = _residual_scatter(ours["CAP_start_time"], ours["Capacity_py"])
     ax.set_xlabel("days since first session")
     ax.set_ylabel("capacity estimate (Ah)")
     ax.set_title(f"Vehicle {vehicle}: scatter about the ageing trend "
@@ -113,8 +141,8 @@ def fleet(base_dir: str, our_dir: str, out_path: str) -> str:
             continue
         rows.append({
             "vehicle": int(v),
-            "author": bs.trend_residual_scatter(a["start_time"], a["Capacity_py_author"]),
-            "ours": bs.trend_residual_scatter(o["CAP_start_time"], o["Capacity_py"]),
+            "author": _residual_scatter(a["start_time"], a["Capacity_py_author"]),
+            "ours": _residual_scatter(o["CAP_start_time"], o["Capacity_py"]),
         })
     df = pd.DataFrame(rows).dropna().sort_values("author").reset_index(drop=True)
     y = np.arange(len(df))
