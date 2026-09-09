@@ -165,7 +165,7 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
 ├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
 └── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>_<T>degreeC.png
             eis_{2zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>_<T>degreeC.png
-            eis_drt_{gamma,overlay,map}_<stem>_<direction>_<T>degreeC.png
+            eis_drt_overlay_<stem>_<direction>_<T>degreeC.png
             qocv_<T>degreeC.png
 ```
 
@@ -267,7 +267,8 @@ narrow the HF window's top instead of adding an element.
 
 **DRT** (`analysis/eis_drt.py`) — model-free companion, **run by default
 alongside every EIS fit** (`eis_drt`, default true). `fit_eis` runs it per
-bundle on the same raw spectra, writing `plots/eis_drt_{gamma,overlay,map}_<stem>_<dir>.png`
+bundle on the same raw spectra, writing **one** figure —
+`plots/eis_drt_overlay_<stem>_<dir>.png` —
 and `<cell>_eis_drt_peaks.csv` (one row per peak: `tau_peak`, `gamma_peak`,
 `R_peak`, `width_decades`), plus an `eis.drt` block in `parameters.json`. It
 answers the one question an ECM cannot ask of itself — how many relaxation
@@ -276,10 +277,16 @@ processes are in the spectrum at all — and the γ plot overlays the fitted τ,
 blanketing a region with more structure than it has parameters for (which is
 what `tau1_z` does on NFPP_01; see the bandwidth note). Adds ~0.5 s per bundle.
 
-The **`overlay`** plot puts every spectrum of a sweep on *one* γ(τ) axis
-coloured by SOC, which is the only one of the three that shows how far a peak
-*walks* along τ (the `gamma` panels are separate axes; the `map` renders a peak
-as a smear of colour). Three panels: γ absolute, γ self-normalised — necessary
+The overlay puts every spectrum of a sweep on *one* γ(τ) axis coloured by SOC,
+and is the **only** DRT figure the characterization path writes. It is a
+superset of the two it replaced: `plot_drt`'s per-SOC panels are these same γ
+curves on separate axes (and only four of them), and `plot_drt_map` is this
+same γ(τ, SOC) surface as colour, where a peak is a smear rather than a
+position you can read — neither shows how far a peak *walks* along τ. Both
+functions are kept and still run on the **standalone CLI**
+(`python -m analysis.eis_drt`), which is where you go to interrogate one
+spectrum; the pipeline wants the sweep-level view it can put in a report.
+Three panels: γ absolute, γ self-normalised — necessary
 because γ grows >10× toward the empty end and would otherwise flatten every
 mid-sweep curve — and a **peak track**, `tau_peak` vs SOC with marker area ∝
 `R_peak`, where a process that walks is a slanted track, one that merely grows
