@@ -329,6 +329,14 @@ def plot_drt_overlay(curves, meta, peaks=None, out_png=None, ecm=None):
     fig, axes = plt.subplots(1, ncol, figsize=(5.6 * ncol, 4.8), squeeze=False)
     ax_abs, ax_nrm = axes[0][0], axes[0][1]
 
+    # Constrained band: the τ grid runs TAU_PAD_DECADES past the measured
+    # sweep at both ends (see `tau_grid`), and γ out there is fixed by no
+    # measured point.
+    all_tau = pd.to_numeric(curves["tau"], errors="coerce").dropna()
+    pad = 10 ** TAU_PAD_DECADES
+    band = ((all_tau.min() * pad, all_tau.max() / pad) if not all_tau.empty
+            else (-np.inf, np.inf))
+
     for i, (_, row) in enumerate(m.iterrows()):
         g = curves[curves["eis_number"] == row["eis_number"]].sort_values("tau")
         if g.empty:
@@ -339,13 +347,20 @@ def plot_drt_overlay(curves, meta, peaks=None, out_png=None, ecm=None):
         colour = (cmap(norm(soc)) if have_soc and np.isfinite(soc)
                   else cmap(i / max(len(m) - 1, 1)))
         ax_abs.semilogx(tau, gam, "-", lw=1.3, color=colour, alpha=0.85)
-        peak = gam.max()
+        # Normalise on the **constrained band only**. Dividing by the global
+        # max lets unidentifiable mass parked in the padding set the scale, and
+        # it does: on NFPP_02 BM22 the SOC 99.6 % spectrum peaks at τ = 50 s,
+        # in the pad, so that one curve was being normalised against a
+        # different feature from every other curve — which is exactly the
+        # cross-curve comparison this panel exists to make.
+        inb = (tau >= band[0]) & (tau <= band[1])
+        peak = gam[inb].max() if inb.any() and gam[inb].max() > 0 else gam.max()
         if peak > 0:
             ax_nrm.semilogx(tau, gam / peak, "-", lw=1.3, color=colour, alpha=0.85)
 
     for ax, ylab, title in (
         (ax_abs, "γ(ln τ)  (mΩ)", "absolute — amplitude"),
-        (ax_nrm, "γ / max(γ)", "self-normalised — position"),
+        (ax_nrm, "γ / max(γ) in band", "self-normalised — position"),
     ):
         ax.set_xlabel("τ (s)")
         ax.set_ylabel(ylab)
@@ -387,16 +402,12 @@ def plot_drt_overlay(curves, meta, peaks=None, out_png=None, ecm=None):
         ax_pk.set_title("peak track — marker area ∝ R_peak", fontsize=10)
         ax_pk.grid(alpha=0.3, which="both")
 
-    # The τ grid runs TAU_PAD_DECADES past the measured band at both ends, and
-    # γ out there is not constrained by any measured point — the solver simply
-    # parks unidentifiable mass in it. On a single-spectrum panel that is easy
-    # to remember; with 21 curves overlaid the resulting edge ramp reads as a
-    # peak walking off the axis, which is exactly the misreading this figure is
-    # for. Grey it out on every panel instead of relying on the docstring.
-    all_tau = pd.to_numeric(curves["tau"], errors="coerce").dropna()
+    # Grey out the padding on every panel rather than relying on the docstring:
+    # on a single-spectrum panel it is easy to remember that γ there is
+    # unconstrained, but with 21 curves overlaid the resulting edge ramp reads
+    # as a peak walking off the axis — exactly the misreading this figure is
+    # for.
     if not all_tau.empty:
-        pad = 10 ** TAU_PAD_DECADES
-        band = (all_tau.min() * pad, all_tau.max() / pad)
         for ax in axes[0]:
             ax.axvspan(all_tau.min(), band[0], color="0.5", alpha=0.13, lw=0)
             ax.axvspan(band[1], all_tau.max(), color="0.5", alpha=0.13, lw=0)

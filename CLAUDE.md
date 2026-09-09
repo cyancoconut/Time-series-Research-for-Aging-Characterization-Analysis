@@ -287,10 +287,20 @@ functions are kept and still run on the **standalone CLI**
 (`python -m analysis.eis_drt`), which is where you go to interrogate one
 spectrum; the pipeline wants the sweep-level view it can put in a report.
 Three panels: γ absolute, γ self-normalised — necessary
-because γ grows >10× toward the empty end and would otherwise flatten every
+because γ grows ~7× toward the empty end and would otherwise flatten every
 mid-sweep curve — and a **peak track**, `tau_peak` vs SOC with marker area ∝
 `R_peak`, where a process that walks is a slanted track, one that merely grows
 is a vertical one, and a branch appearing mid-sweep is a track that starts.
+The self-normalised panel divides each curve by its max **within the
+constrained band, not its global max** — dividing by the global max lets
+unidentifiable mass parked in the padding set the scale, and it does: on
+NFPP_02 BM22 the SOC 99.6 % spectrum's largest γ is at τ = 50 s, in the pad, so
+that one curve was normalised against a different feature from every other,
+defeating the cross-curve comparison the panel exists for. Curves may therefore
+exceed 1.0 out in the grey, which is the honest rendering. Read *position*
+here and *size* on the left panel: a curve peaking at 1.0 says nothing about
+how large it is.
+
 Fitted `tau1_z`/`tau2_z`/`tau_d_z` are drawn as the **band** they span over the
 sweep with the median as a line, never a single vertical line — each is itself
 SOC-dependent. The τ grid's `TAU_PAD_DECADES` padding is **greyed out** on all
