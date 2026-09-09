@@ -29,7 +29,7 @@ The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` still 
 - Tab 4 → `python -m monitor.aging_status <battery_cfg> [-o …]`
 - Tab 5 → a checklist of evaluation outputs run in sequence by one "Run evaluation" button: **Fleet-wide capacity aggregation** → `python -m evaluation.export_cap_pulse <battery_cfg>`; **Capacity evaluation (Alterungsmatrix)** → `python -m evaluation.aging_matrix <battery_cfg>`. Pulse / qOCV evaluations are placeholder checkboxes (disabled) for future stages. The "Run all 1→2→3→4→5" chain runs stages 1–4 then every ticked Tab 5 evaluation.
 - Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …] [--labels …]`. A **Labels** toggle (Config / target / llm) maps to `--labels`; `Config` omits it so the config's `classifier_label_source` (default `target`) decides.
-- Tab 7 → `download/build_bronze_para.py` → `python -m characterize.main_para` → `python -m characterize.fit_characterization`, each gated by its checkbox and run in sequence. The fit stage has **one checkbox per block** (pulse / EIS / qOCV) → `--only`; all three ticked passes no flag, none ticked skips the stage. Outside the chain (one-off BOL step).
+- Tab 7 → `download/build_bronze_para.py` → `python -m characterize.main_para` → `python -m characterize.fit_characterization`, each gated by its checkbox and run in sequence. The fit stage has **one checkbox per block** (pulse / EIS / qOCV) → `--only`; all three ticked passes no flag, none ticked skips the stage. The **EIS ZARC branches** control (`Auto (DRT vote)` / `1` / `2`) passes `--n-zarc N` when a number is picked, pinning the branch count for that run over `eis_n_zarc`. Outside the chain (one-off BOL step).
 
 The Download tab's "Save JSON" matches `download/get_user_input.py`; full-pipeline runs auto-write it to `.metabatt_ui_download.json` (gitignored).
 
@@ -567,7 +567,13 @@ turns inductive and −Z_imag dives to −5.9 mΩ (~14× the arc), which would
 flatten the semicircle to a line. Missing SOC (no qOCV) draws grey instead of
 a colormap artefact.
 
-**UI**: Tab 7 runs the three stages as a checklist. Like Tab 6 it is **outside**
+**UI**: Tab 7 runs the three stages as a checklist, with an **EIS ZARC
+branches** control beside the clustering one — `Auto (DRT vote)` (the default,
+which also honours `eis_n_zarc` when the config sets it) or `1` / `2` to pin N
+for that run. Picking a number passes `--n-zarc N` to
+`characterize.fit_characterization`, which outranks the config key; the params
+file records it as `zarc_branches_source: "pinned (eis_n_zarc / --n-zarc)"`.
+Like Tab 6 it is **outside**
 the "Run all 1→2→3→4→5" chain.
 
 ## Aging-status monitor

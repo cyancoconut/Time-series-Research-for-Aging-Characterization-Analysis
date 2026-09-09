@@ -875,7 +875,10 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     # fitted at different orders cannot be compared, which is the whole reason
     # the fits exist.
     n_branches, vote = int(n_zarc) if n_zarc is not None else None, None
-    branch_source = "config (eis_n_zarc)" if n_branches else None
+    # One label for both ways of pinning: `--n-zarc` (and the UI control
+    # behind it) reaches `fit_eis` by being written into the cfg key, so the
+    # params file cannot tell them apart and should not pretend to.
+    branch_source = "pinned (eis_n_zarc / --n-zarc)" if n_branches else None
     if n_branches is None and solved_by_source:
         vote = eis_drt.branch_count_vote(
             [s for sols in solved_by_source.values() for s in sols],
@@ -1290,8 +1293,15 @@ def write_fit_csvs(cell_dir: str, stem: str, payload: dict) -> list:
     return written
 
 
-def run(cfg: dict, target_cells: list = None, parts: list = None) -> None:
+def run(cfg: dict, target_cells: list = None, parts: list = None,
+        n_zarc: int = None) -> None:
     parts = normalize_parts(parts)
+    if n_zarc is not None:
+        # A caller-supplied branch count outranks the config's own
+        # `eis_n_zarc`, so a one-off run can pin N without editing the battery
+        # config (the UI's ZARC-branches control, `--n-zarc` on the CLI).
+        cfg = {**cfg, "eis_n_zarc": int(n_zarc)}
+        logging.info("EIS branch count pinned to %d by --n-zarc", int(n_zarc))
     working_path = cfg.get("working_path")
     if not working_path:
         raise ValueError("working_path required in the battery config")
@@ -1356,8 +1366,20 @@ def main() -> None:
             % "/".join(FIT_PARTS)
         ),
     )
+    parser.add_argument(
+        "--n-zarc", type=int, choices=range(1, eis_vs_soc.ZARC_COLUMN_SLOTS + 1),
+        metavar="N",
+        help=(
+            "Pin the EIS ZARC branch count for this run (1..%d), overriding "
+            "eis_n_zarc in the config. Omit to let the DRT vote it — see the "
+            "branch-count section in CLAUDE.md, including the cells where the "
+            "vote and the ECM disagree."
+            % eis_vs_soc.ZARC_COLUMN_SLOTS
+        ),
+    )
     args = parser.parse_args()
-    run(load_config(args.config), target_cells=args.cells, parts=args.only)
+    run(load_config(args.config), target_cells=args.cells, parts=args.only,
+        n_zarc=args.n_zarc)
 
 
 if __name__ == "__main__":
