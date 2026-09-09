@@ -211,6 +211,84 @@ def solve_bundle(df: pd.DataFrame, lam=None):
     return solved, lcurves
 
 
+#: Minimum share of the largest in-box peak's γ height for a peak to count as
+#: a process in the branch vote. :func:`drt_peaks` already drops anything under
+#: 5 % of the *global* γ max, but on these spectra the global max sits in the
+#: diffusion ramp, so that threshold passes ripples in the kinetic region that
+#: no ECM branch should be spent on. Re-thresholding against the in-box maximum
+#: is what makes the count a count of arcs.
+VOTE_PEAK_HEIGHT_FRACTION = 0.25
+
+
+def count_zarc_peaks(sol: dict) -> int:
+    """Peaks of one solved spectrum that a ZARC branch could actually take.
+
+    Counts only peaks whose τ falls inside the **ZARC τ box** for this
+    spectrum's own frequency band (:func:`analysis.eis_vs_soc.zarc_tau_box`).
+    That box already excludes the unconstrained τ padding at both ends and is
+    held clear of the pinned diffusion τ, so the count is of kinetic arcs the
+    ECM has somewhere to put — not of the diffusion ramp, which is the largest
+    feature in γ on every cell measured so far and would otherwise vote for a
+    branch that the Warburg is already modelling.
+
+    Note what this does **not** fix: a dispersive Warburg (φ < 0.5) deposits γ
+    mass *inside* the box too — 13–36 % of the in-band peak area on the LFP
+    sweep — and it is narrower there than a real arc, so no width or area test
+    separates the two. The count is therefore biased **high**, which is why it
+    is averaged over the whole run and rounded rather than trusted per
+    spectrum, and why the vote is logged for inspection.
+    """
+    from analysis.eis_vs_soc import zarc_tau_box
+
+    pk = sol.get("peaks")
+    if pk is None or pk.empty:
+        return 0
+    lo, hi = zarc_tau_box(sol["f_min"], sol["f_max"])
+    inbox = pk[(pk["tau_peak"] >= lo) & (pk["tau_peak"] <= hi)]
+    if inbox.empty:
+        return 0
+    tallest = float(inbox["gamma_peak"].max())
+    if not np.isfinite(tallest) or tallest <= 0:
+        return 0
+    return int((inbox["gamma_peak"] >= VOTE_PEAK_HEIGHT_FRACTION * tallest).sum())
+
+
+def branch_count_vote(solved, n_min: int = 1, n_max: int = 2) -> dict:
+    """One ZARC branch count for a whole run, averaged over its spectra.
+
+    ``solved`` is the concatenation of every :func:`solve_bundle` result in the
+    run — every check-up, not one bundle — because the branch count has to be
+    the same everywhere for the fitted parameters to be comparable across
+    check-ups as well as across SOC.
+
+    Each spectrum contributes its in-box peak count (:func:`count_zarc_peaks`);
+    the mean is rounded and clamped to ``[n_min, n_max]``. Averaging is the
+    point: an individual spectrum's count moves with λ and with noise in the
+    kinetic region, and a per-spectrum order was measured to put a step into
+    the vs-SOC curves that was a model change rather than a measurement.
+
+    Returns the vote and the evidence for it: ``{n_zarc, mean_peaks,
+    median_peaks, counts, n_spectra, n_zero, clamped}``.
+    """
+    counts = [count_zarc_peaks(s) for s in solved]
+    voting = [c for c in counts if c > 0]
+    if not voting:
+        # Every spectrum came back with no peak inside the box (a failed solve,
+        # or a spectrum that is all diffusion). Nothing to vote with — leave
+        # the choice to the caller's default rather than inventing one.
+        return {"n_zarc": None, "mean_peaks": float("nan"),
+                "median_peaks": float("nan"), "counts": counts,
+                "n_spectra": len(counts), "n_zero": len(counts),
+                "clamped": False}
+    mean = float(np.mean(voting))
+    raw = int(np.rint(mean))
+    n = int(min(max(raw, n_min), n_max))
+    return {"n_zarc": n, "mean_peaks": round(mean, 3),
+            "median_peaks": float(np.median(voting)), "counts": counts,
+            "n_spectra": len(counts), "n_zero": len(counts) - len(voting),
+            "clamped": raw != n}
+
+
 def label_bundle(solved, soc_by_eid=None, soc_source="unknown", direction=None,
                  step=None):
     """Attach SOC to a :func:`solve_bundle` result → ``(curves, peaks, meta)``.

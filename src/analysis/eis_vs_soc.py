@@ -536,19 +536,26 @@ def fit_hf_r0(spec: pd.DataFrame, f_min: float = None) -> dict:
     }
 
 
-#: Branch slots the ``*_z`` column set always carries, whatever ``n_zarc`` the
-#: DRT asked for. A 1-ZARC fit leaves slot 2 NaN rather than dropping the
-#: columns, so one cell fitted with one arc and another fitted with two still
-#: concatenate into one table and one CSV schema.
+#: Branch slots the ``*_z`` column set always carries, whatever ``n_zarc`` a
+#: given run was fitted at. A 1-ZARC run leaves slot 2 NaN rather than dropping
+#: the columns, so one cell fitted with one arc and another fitted with two
+#: still concatenate into one table and one CSV schema.
 ZARC_COLUMN_SLOTS = 2
+
+#: Branch count used when nobody supplies one — no DRT vote, no ``eis_n_zarc``.
+#: Two is the ladder the module was built around and what
+#: :func:`fit_zarc_warburg_eis` and ``eis_compare_impedancepy`` still assume.
+ZARC_BRANCHES_DEFAULT = 2
 
 
 def _tau_starts(n: int, tau_seeds, lo: float, hi: float) -> list:
     """Multistart τ vectors for ``n`` ZARC branches, clipped into ``[lo, hi]``.
 
-    The first start is the DRT's own peak τ when it supplied any — the whole
-    point of asking the DRT for the model order is that it also knows *where*
-    the processes are, so the fit should not then start from a generic spread.
+    The first start is the DRT's own peak τ when a caller supplied any — the
+    DRT knows *where* the processes are, not only how many, so a fit seeded
+    from it need not start from a generic spread. Nothing in the pipeline
+    passes them today (measured to make no difference; see ``tau_seeds`` on
+    :func:`fit_nzarc_warburg_eis`).
     The remaining starts are fixed log-spaced spreads across the resolvable
     band: a single start lands in a different local minimum from spectrum to
     spectrum, which is half of why the vs-SOC curves used to jump.
@@ -577,11 +584,13 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     Each branch is a **ZARC** (depressed arc): a CPE exponent ``α ∈ (0,1]`` lets
     a real, flattened Nyquist semicircle be captured without inflating R/τ.
 
-    ``n_zarc`` is not fixed by the caller in normal use: :func:`build_eis_table`
-    starts every spectrum at :data:`ZARC_COLUMN_SLOTS` and
-    :func:`fit_zarc_with_parsimony` drops a branch that comes back degenerate,
-    so a cell whose spectrum is a single merged arc (LFP) lands on one branch
-    and one with two resolved processes (NFPP) keeps two.
+    ``n_zarc`` is **fixed for a whole run** and the caller supplies it: every
+    spectrum of every bundle is fitted at the same branch count, so the
+    parameters are comparable across the SOC sweep and across check-ups. The
+    number itself is chosen once per cell from the DRT — see
+    :func:`analysis.eis_drt.branch_count_vote` — or pinned by the ``eis_n_zarc``
+    config key. A spectrum the count does not suit comes back with
+    ``zarc_degenerate`` true; that is reported, never silently repaired.
 
     ``tau_seeds`` optionally supplies the first multistart's τ. Measured to make
     no difference on either chemistry — the fixed spreads find the same minima —
@@ -783,78 +792,16 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
 
     Kept because :mod:`analysis.eis_compare_impedancepy` exists specifically to
     benchmark the fixed 2RC → 2RC+W → 2×ZARC ladder against ``impedance.py``,
-    so it must keep getting a hard-coded two-branch fit. The pipeline calls
-    ``fit_nzarc_warburg_eis`` with the DRT's model order instead.
+    so it must keep getting a hard-coded two-branch fit whatever branch count
+    the pipeline runs at.
     """
     return fit_nzarc_warburg_eis(spec, n_zarc=2, seed=seed, r_tot0=r_tot0,
                                  element=element, pin_r0=pin_r0)
 
 
-#: How much worse (fractionally) a one-branch-simpler fit's RMSE may be and
-#: still be preferred, when the richer fit came back **degenerate**. A
-#: degenerate branch is by definition one the data does not constrain — it has
-#: pinned α to a bound, run its τ to the edge of the box, or split one arc into
-#: two near-identical ones — so a small RMSE gain bought that way is fitting
-#: noise, not structure. 25 % is loose enough that a branch which genuinely
-#: helps still survives.
-ZARC_PARSIMONY_RMSE_TOLERANCE = 0.25
-
-
-def fit_zarc_with_parsimony(spec: pd.DataFrame, n_zarc: int = 2,
-                            tau_seeds=None, **kw) -> dict:
-    """:func:`fit_nzarc_warburg_eis`, dropping a branch that earns nothing.
-
-    **This is the model-order selector.** Fit at ``n_zarc``; if that comes back
-    degenerate and ``n_zarc > 1``, fit again one branch simpler and keep the
-    simpler result unless the richer one is materially better on RMSE
-    (:data:`ZARC_PARSIMONY_RMSE_TOLERANCE`). Adds one solve only on the spectra
-    that actually hit the degenerate path.
-
-    Counting the DRT's peaks was tried first and dropped. It cannot do the job:
-    a dispersive Warburg (φ < 0.5) deposits γ mass *inside* the ZARC τ box that
-    is both large (41 % of the in-band peak area on a synthetic single-arc
-    spectrum, 13–36 % on the LFP sweep) and **narrower** than the real arc, so
-    neither an area threshold nor a width test separates it from a genuine
-    second process. Measured against this guard on real data it added nothing
-    on the LFP cell (identical fit) and made the NFPP cell *worse*, wrongly
-    dropping one spectrum to a single branch (mean rmse 0.0233 → 0.0320).
-
-    What does work is asking the ECM itself: given a branch it does not need,
-    the fit comes back **degenerate** — α pinned to a bound, τ on the edge of
-    its box, or one arc split into two near-identical ones. That test is a
-    property of the fit rather than of a regularisation parameter, so unlike a
-    DRT peak count it carries no dependence on λ.
-
-    ``n_zarc_requested`` records what was asked for, ``n_zarc`` what was kept.
-    """
-    out = fit_nzarc_warburg_eis(spec, n_zarc=n_zarc, tau_seeds=tau_seeds, **kw)
-    out["n_zarc_requested"] = int(n_zarc)
-    if n_zarc <= 1 or not out.get("zarc_degenerate"):
-        return out
-
-    simpler = fit_nzarc_warburg_eis(spec, n_zarc=n_zarc - 1,
-                                    tau_seeds=(tau_seeds or [])[: n_zarc - 1],
-                                    **kw)
-    simpler["n_zarc_requested"] = int(n_zarc)
-    r_full, r_simple = out.get("zarc_rmse"), simpler.get("zarc_rmse")
-    if not np.isfinite(r_simple):
-        return out
-    # Keep the richer fit only if the extra branch bought a real improvement;
-    # it is degenerate either way, so it has to earn its place on residual.
-    if np.isfinite(r_full) and r_full < r_simple / (1 + ZARC_PARSIMONY_RMSE_TOLERANCE):
-        return out
-    logging.info(
-        "ZARC fit: %d branches came back degenerate (rmse %.4g) — keeping %d "
-        "(rmse %.4g, degenerate=%s)",
-        n_zarc, r_full if np.isfinite(r_full) else float("nan"),
-        n_zarc - 1, r_simple, simpler.get("zarc_degenerate"),
-    )
-    return simpler
-
-
 def build_eis_table(df: pd.DataFrame, direction=None, step=None,
                     fit_zarc=True, two_stage_r0=True, hf_f_min=None,
-                    n_zarc: int = ZARC_COLUMN_SLOTS) -> pd.DataFrame:
+                    n_zarc: int = ZARC_BRANCHES_DEFAULT) -> pd.DataFrame:
     """Per-measurement feature table with a time-ordered sweep SOC.
 
     ``two_stage_r0`` measures R0 on the high-frequency window first
@@ -863,11 +810,13 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
     it is the standard path; pass ``False`` to reproduce a pre-#70 fit.
     ``hf_f_min`` overrides :data:`HF_R0_MIN_FREQ_HZ` for that first stage.
 
-    ``n_zarc`` is the number of ZARC branches to *start* from; each spectrum
-    then keeps that many or fewer, because :func:`fit_zarc_with_parsimony`
-    drops a branch that comes back degenerate. The default of two is the right
-    starting point for both chemistries measured so far — a cell whose spectrum
-    is a single merged arc (LFP) lands on one branch on its own.
+    ``n_zarc`` is the number of ZARC branches, and **every spectrum in the
+    table is fitted at it** — the branch count is a property of the run, not of
+    the spectrum. Letting it vary per spectrum was tried and removed: R1/τ1 of
+    a one-branch fit and of a two-branch fit are different quantities, so a
+    sweep that changed order mid-way produced vs-SOC curves with a step in them
+    that was a model change, not a measurement. ``fit_eis`` picks the number
+    once per cell from the DRT (:func:`analysis.eis_drt.branch_count_vote`).
 
     One row per ``eis_number`` (measurement), ordered by ``Time``.
     """
@@ -887,9 +836,9 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
             feat.update(hf)
             pin = hf["R0_hf"]
         # The plain 2RC and the 2RC+Warburg stages are **out of the chain**.
-        # They existed to seed the ZARC fit, which now seeds itself from the
-        # DRT peaks (a better guess than an ideal-RC fit of a depressed arc)
-        # and from the spectrum's own high-frequency point. Their outputs were
+        # They existed to seed the ZARC fit, which now seeds itself from fixed
+        # log-spaced spreads across the resolvable band (`_tau_starts`) and
+        # from the spectrum's own high-frequency point. Their outputs were
         # never a result — the ZARC fit superseded both — so running them cost
         # two extra least-squares solves per spectrum to produce columns
         # nothing downstream read. The functions themselves are kept for
@@ -900,7 +849,7 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
         #     wfit = fit_warburg_eis(spec, seed=fit, r_tot0=feat["R_tot"])
         #     feat.update(wfit)
         if fit_zarc:
-            feat.update(fit_zarc_with_parsimony(
+            feat.update(fit_nzarc_warburg_eis(
                 spec, n_zarc=n_zarc, r_tot0=feat["R_tot"], pin_r0=pin))
         # No order-based SOC ladder: `100 - step * i` assumes every step moved
         # the same charge, which the measured voltages contradict (the first
