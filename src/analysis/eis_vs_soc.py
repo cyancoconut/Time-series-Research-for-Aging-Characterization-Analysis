@@ -1418,6 +1418,38 @@ def add_hf_zoom_panels(ax, panels, df: pd.DataFrame, table: pd.DataFrame,
     return tuple(out)
 
 
+#: Width of the Nyquist plane's own column, in inches, and the bounds the
+#: figure height is allowed to take to give that width an equal-aspect plane.
+#: The plane is equal-aspect, so its *shape* is the data's: the NFPP sweep runs
+#: 23 mOhm wide by 8 tall and wants a short wide box, an LFP sweep 33 by 76 and
+#: wants a tall narrow one. A fixed canvas fits one of them and leaves half the
+#: column empty on the other, which is what `_nyquist_figsize` avoids.
+NYQUIST_MAIN_WIDTH_IN = 7.0
+NYQUIST_MAIN_HEIGHT_BOUNDS_IN = (3.6, 8.5)
+
+
+def _nyquist_figsize(xlim, ylim, extra_width_in: float = 1.9,
+                     extra_height_in: float = 1.4,
+                     height_bounds=NYQUIST_MAIN_HEIGHT_BOUNDS_IN) -> tuple:
+    """Figure size that gives the equal-aspect Nyquist plane a full column.
+
+    Height follows the data's own aspect ratio so the plane fills the width it
+    is given instead of shrinking to a strip in the middle of it. The bounds
+    stop a very elongated sweep from producing an unusable canvas; the zoom
+    column needs a floor of its own to stack two readable panels.
+    """
+    w_main = NYQUIST_MAIN_WIDTH_IN
+    x_span = float(xlim[1] - xlim[0]) if xlim else 1.0
+    y_span = float(ylim[1] - ylim[0]) if ylim else 1.0
+    if not (np.isfinite(x_span) and np.isfinite(y_span)) or x_span <= 0:
+        aspect = 0.8
+    else:
+        aspect = max(y_span, 1e-9) / x_span
+    h_main = min(max(w_main * aspect, height_bounds[0]), height_bounds[1])
+    w_zooms = w_main * NYQUIST_PANEL_WIDTH_RATIOS[1] / NYQUIST_PANEL_WIDTH_RATIOS[0]
+    return (w_main + w_zooms + extra_width_in, h_main + extra_height_in)
+
+
 def nyquist_with_zooms(fig, spec):
     """``(ax_main, (ax_r0, ax_mf))`` laid out in ``spec``: plane left, zooms right.
 
@@ -1479,10 +1511,11 @@ def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, tit
     norm = colors.Normalize(vmin=0, vmax=100)
     cmap = cm.viridis
 
-    # Wide enough that the zoom column is additional room rather than room
-    # taken from the plane: the main axes keeps roughly the width it had when
-    # the zooms were drawn on top of it.
-    fig = plt.figure(figsize=(13.0, 6.8))
+    # The zoom column is additional room rather than room taken from the
+    # plane, and the canvas is shaped to the sweep — see `_nyquist_figsize`.
+    xlim = _padded_limits(df["Z_real"])
+    ylim = _padded_limits(-df["Z_imag"])
+    fig = plt.figure(figsize=_nyquist_figsize(xlim, ylim))
     gs = GridSpec(1, 1, figure=fig)
     ax, panels = nyquist_with_zooms(fig, gs[0, 0])
     for eid, g in _spectra_by_soc(df, soc):
@@ -1534,8 +1567,15 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     # Three groups across: the Nyquist plane, its two zooms, then the Bode
     # pair stacked. The zooms have their own column here too — drawn inside
     # the Nyquist axes they covered the diffusion tail of every spectrum.
-    fig = plt.figure(figsize=(20.0, 7.6))
-    gs = GridSpec(2, 2, figure=fig, width_ratios=[2.35, 1.0],
+    xlim = _padded_limits(df["Z_real"])
+    ylim = _padded_limits(-df["Z_imag"])
+    # The Bode column adds its own width, and needs two stacked panels' worth
+    # of height whatever shape the Nyquist plane wants.
+    nyq_w, fig_h = _nyquist_figsize(xlim, ylim, extra_width_in=0.9,
+                                    extra_height_in=1.5,
+                                    height_bounds=(4.6, 8.5))
+    fig = plt.figure(figsize=(nyq_w + 6.6, fig_h))
+    gs = GridSpec(2, 2, figure=fig, width_ratios=[nyq_w, 6.0],
                   wspace=0.22, hspace=0.42)
     ax_nyq, panels = nyquist_with_zooms(fig, gs[:, 0])
     ax_mag = fig.add_subplot(gs[0, 1])
