@@ -278,37 +278,33 @@ blanketing a region with more structure than it has parameters for (which is
 what `tau1_z` does on NFPP_01; see the bandwidth note). Adds ~0.5 s per bundle.
 
 The overlay puts every spectrum of a sweep on *one* γ(τ) axis coloured by SOC,
-and is the **only** DRT figure the characterization path writes. It is a
-superset of the two it replaced: `plot_drt`'s per-SOC panels are these same γ
-curves on separate axes (and only four of them), and `plot_drt_map` is this
-same γ(τ, SOC) surface as colour, where a peak is a smear rather than a
-position you can read — neither shows how far a peak *walks* along τ. Both
-functions are kept and still run on the **standalone CLI**
-(`python -m analysis.eis_drt`), which is where you go to interrogate one
-spectrum; the pipeline wants the sweep-level view it can put in a report.
-Three panels: γ absolute, γ self-normalised — necessary
-because γ grows ~7× toward the empty end and would otherwise flatten every
-mid-sweep curve — and a **peak track**, `tau_peak` vs SOC with marker area ∝
-`R_peak`, where a process that walks is a slanted track, one that merely grows
-is a vertical one, and a branch appearing mid-sweep is a track that starts.
-The self-normalised panel divides each curve by its max **within the
-constrained band, not its global max** — dividing by the global max lets
-unidentifiable mass parked in the padding set the scale, and it does: on
-NFPP_02 BM22 the SOC 99.6 % spectrum's largest γ is at τ = 50 s, in the pad, so
-that one curve was normalised against a different feature from every other,
-defeating the cross-curve comparison the panel exists for. Curves may therefore
-exceed 1.0 out in the grey, which is the honest rendering. Read *position*
-here and *size* on the left panel: a curve peaking at 1.0 says nothing about
-how large it is.
+and is the **only** DRT figure the characterization path writes. It shows what
+the two it replaced could not: how far a peak *walks* along τ between two SOC
+(`plot_drt` puts a handful of SOC on separate axes; `plot_drt_map` renders a
+peak as a smear of colour). Both of those functions are kept and still run on
+the **standalone CLI** (`python -m analysis.eis_drt`), which is where you go to
+interrogate one spectrum.
+
+**One panel, γ absolute in mΩ.** Note the cost: γ grows ~7× toward the empty
+end over the NFPP_02 BM22 sweep, so the lowest-SOC curve owns the y-range and
+the mid-sweep curves are compressed near zero — their peak *positions* are in
+`<cell>_eis_drt_peaks.csv` when the plot cannot resolve them. A
+self-normalised panel and a `tau_peak`-vs-SOC track were both built and then
+dropped as surplus; if you reinstate either, normalise on the **constrained
+band, not the global max** — the SOC 99.6 % spectrum's largest γ sits at
+τ = 50 s, inside the padding, so a global-max normalisation scales that one
+curve against an unconstrained artefact while every other is scaled against a
+real peak.
 
 Fitted `tau1_z`/`tau2_z`/`tau_d_z` are drawn as the **band** they span over the
 sweep with the median as a line, never a single vertical line — each is itself
-SOC-dependent. The τ grid's `TAU_PAD_DECADES` padding is **greyed out** on all
-three panels: γ out there is constrained by no measured point, and with 21
-curves overlaid the resulting edge ramp otherwise reads as a peak walking off
-the axis. On NFPP_02 BM22 it reads at a glance: four tracks, stationary in τ
-above ~25 % SOC, and below it the two slowest walk right by more than a decade
-while growing — which is the same structure the parsimony guard is reacting to.
+SOC-dependent. The τ grid's `TAU_PAD_DECADES` padding is **greyed out**: γ out
+there is constrained by no measured point, and with 21 curves overlaid the
+resulting edge ramp otherwise reads as a peak walking off the axis. On NFPP_02
+BM22 it reads at a glance: the curves lie on top of one another above ~25 %
+SOC, and below it the mid-frequency structure walks right by more than a decade
+(τ at the dominant peak 0.0096 s → 0.357 s, monotone) while growing ~7× — the
+same structure the parsimony guard is reacting to.
 
 **λ is fixed** (`eis_drt_lambda`, default `1e-3`), *not* the L-curve corner.
 The corner is better for a one-off investigation but is not reproducible enough

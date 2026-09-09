@@ -278,7 +278,7 @@ def plot_drt(curves, meta, ecm, out_png, n_show=4):
     logging.info("DRT plot -> %s", out_png)
 
 
-def plot_drt_overlay(curves, meta, peaks=None, out_png=None, ecm=None):
+def plot_drt_overlay(curves, meta, out_png=None, ecm=None):
     """Every spectrum's γ(τ) on **one** axis, coloured by SOC.
 
     :func:`plot_drt` shows a handful of SOC side by side and
@@ -287,27 +287,16 @@ def plot_drt_overlay(curves, meta, peaks=None, out_png=None, ecm=None):
     sit on separate axes and in the other a peak is a smear of colour. Here
     they share an axis.
 
-    Three panels, because one is not enough:
-
-    ``absolute``
-        γ in mΩ. Honest about amplitude — which is most of the story at the
-        empty end, where γ grows by more than an order of magnitude — but for
-        that same reason the mid-sweep curves are pressed flat against zero.
-    ``self-normalised``
-        each curve divided by its own maximum, so **position** is comparable
-        across the whole sweep. Read peak *movement* here and peak *size* on
-        the left; a shift visible only after normalisation is still a real
-        shift.
-    ``peak τ vs SOC``
-        the peak table plotted directly: τ on x, SOC on y, marker area ∝
-        ``R_peak``. A process that walks shows as a slanted track, one that
-        merely grows as a vertical one, and a branch appearing or vanishing
-        mid-sweep as a track that starts or stops.
+    γ is plotted **absolute, in mΩ** — position and amplitude on the one axis.
+    Note what that costs: γ grows several-fold toward the empty end (7.1× over
+    the NFPP_02 BM22 sweep), so the lowest-SOC curve owns the y-range and the
+    mid-sweep curves are compressed near zero. Their peak *positions* are in
+    ``<cell>_eis_drt_peaks.csv`` when the plot cannot resolve them.
 
     ``ecm`` optionally marks the fitted ZARC/diffusion τ (the same frame
-    :func:`plot_drt` takes) on the γ panels. Each τ is itself SOC-dependent, so
-    it is drawn as the **band** it spans over the sweep with its median as a
-    line, never as one vertical line.
+    :func:`plot_drt` takes). Each τ is itself SOC-dependent, so it is drawn as
+    the **band** it spans over the sweep with its median as a line, never as
+    one vertical line.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -324,48 +313,21 @@ def plot_drt_overlay(curves, meta, peaks=None, out_png=None, ecm=None):
     norm = Normalize(vmin=finite.min(), vmax=finite.max()) if have_soc else None
     cmap = plt.get_cmap("viridis")
 
-    has_peaks = peaks is not None and not peaks.empty
-    ncol = 3 if has_peaks else 2
-    fig, axes = plt.subplots(1, ncol, figsize=(5.6 * ncol, 4.8), squeeze=False)
-    ax_abs, ax_nrm = axes[0][0], axes[0][1]
-
-    # Constrained band: the τ grid runs TAU_PAD_DECADES past the measured
-    # sweep at both ends (see `tau_grid`), and γ out there is fixed by no
-    # measured point.
-    all_tau = pd.to_numeric(curves["tau"], errors="coerce").dropna()
-    pad = 10 ** TAU_PAD_DECADES
-    band = ((all_tau.min() * pad, all_tau.max() / pad) if not all_tau.empty
-            else (-np.inf, np.inf))
+    fig, ax = plt.subplots(figsize=(8.6, 5.4))
 
     for i, (_, row) in enumerate(m.iterrows()):
         g = curves[curves["eis_number"] == row["eis_number"]].sort_values("tau")
         if g.empty:
             continue
-        tau = g["tau"].to_numpy(float)
-        gam = g["gamma"].to_numpy(float)
         soc = row["SOC_pct"]
         colour = (cmap(norm(soc)) if have_soc and np.isfinite(soc)
                   else cmap(i / max(len(m) - 1, 1)))
-        ax_abs.semilogx(tau, gam, "-", lw=1.3, color=colour, alpha=0.85)
-        # Normalise on the **constrained band only**. Dividing by the global
-        # max lets unidentifiable mass parked in the padding set the scale, and
-        # it does: on NFPP_02 BM22 the SOC 99.6 % spectrum peaks at τ = 50 s,
-        # in the pad, so that one curve was being normalised against a
-        # different feature from every other curve — which is exactly the
-        # cross-curve comparison this panel exists to make.
-        inb = (tau >= band[0]) & (tau <= band[1])
-        peak = gam[inb].max() if inb.any() and gam[inb].max() > 0 else gam.max()
-        if peak > 0:
-            ax_nrm.semilogx(tau, gam / peak, "-", lw=1.3, color=colour, alpha=0.85)
+        ax.semilogx(g["tau"].to_numpy(float), g["gamma"].to_numpy(float),
+                    "-", lw=1.3, color=colour, alpha=0.85)
 
-    for ax, ylab, title in (
-        (ax_abs, "γ(ln τ)  (mΩ)", "absolute — amplitude"),
-        (ax_nrm, "γ / max(γ) in band", "self-normalised — position"),
-    ):
-        ax.set_xlabel("τ (s)")
-        ax.set_ylabel(ylab)
-        ax.set_title(title, fontsize=10)
-        ax.grid(alpha=0.3, which="both")
+    ax.set_xlabel("τ (s)")
+    ax.set_ylabel("γ(ln τ)  (mΩ)")
+    ax.grid(alpha=0.3, which="both")
 
     if ecm is not None and not getattr(ecm, "empty", True):
         for col, colr, lab in (("tau1_z", "#c0392b", "ZARC τ1"),
@@ -377,46 +339,28 @@ def plot_drt_overlay(curves, meta, peaks=None, out_png=None, ecm=None):
             v = v[v > 0]
             if v.empty:
                 continue
-            for ax in (ax_abs, ax_nrm):
-                ax.axvspan(v.min(), v.max(), color=colr, alpha=0.10)
-                ax.axvline(v.median(), ls="--", lw=1.1, color=colr,
-                           label=f"{lab} (median)")
-        ax_abs.legend(fontsize=7)
+            ax.axvspan(v.min(), v.max(), color=colr, alpha=0.10)
+            ax.axvline(v.median(), ls="--", lw=1.1, color=colr,
+                       label=f"{lab} (median)")
+        ax.legend(fontsize=8)
 
-    if has_peaks:
-        ax_pk = axes[0][2]
-        p = peaks.copy()
-        for c in ("tau_peak", "SOC_pct", "R_peak"):
-            p[c] = pd.to_numeric(p.get(c), errors="coerce")
-        p = p[p["tau_peak"] > 0]
-        r = p["R_peak"].to_numpy(float)
-        rmax = np.nanmax(r) if r.size and np.isfinite(r).any() else 1.0
-        size = 20 + 260 * np.nan_to_num(r / (rmax or 1.0), nan=0.0)
-        ax_pk.scatter(p["tau_peak"], p["SOC_pct"], s=size,
-                      c=(p["SOC_pct"] if have_soc else "#16a085"),
-                      cmap="viridis", norm=norm, edgecolor="k",
-                      linewidth=0.4, alpha=0.9)
-        ax_pk.set_xscale("log")
-        ax_pk.set_xlabel("τ of peak (s)")
-        ax_pk.set_ylabel("SOC (%)")
-        ax_pk.set_title("peak track — marker area ∝ R_peak", fontsize=10)
-        ax_pk.grid(alpha=0.3, which="both")
-
-    # Grey out the padding on every panel rather than relying on the docstring:
-    # on a single-spectrum panel it is easy to remember that γ there is
-    # unconstrained, but with 21 curves overlaid the resulting edge ramp reads
-    # as a peak walking off the axis — exactly the misreading this figure is
-    # for.
+    # Grey out the τ-grid padding rather than relying on the docstring: γ there
+    # is constrained by no measured point (the solver simply parks
+    # unidentifiable mass in it), and with 21 curves overlaid the resulting edge
+    # ramp reads as a peak walking off the axis — exactly the misreading this
+    # figure invites.
+    all_tau = pd.to_numeric(curves["tau"], errors="coerce").dropna()
     if not all_tau.empty:
-        for ax in axes[0]:
-            ax.axvspan(all_tau.min(), band[0], color="0.5", alpha=0.13, lw=0)
-            ax.axvspan(band[1], all_tau.max(), color="0.5", alpha=0.13, lw=0)
-            ax.set_xlim(all_tau.min(), all_tau.max())
+        pad = 10 ** TAU_PAD_DECADES
+        band = (all_tau.min() * pad, all_tau.max() / pad)
+        ax.axvspan(all_tau.min(), band[0], color="0.5", alpha=0.13, lw=0)
+        ax.axvspan(band[1], all_tau.max(), color="0.5", alpha=0.13, lw=0)
+        ax.set_xlim(all_tau.min(), all_tau.max())
 
     if have_soc:
         sm = ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
-        fig.colorbar(sm, ax=axes[0].tolist(), label="SOC (%)", pad=0.02)
+        fig.colorbar(sm, ax=ax, label="SOC (%)", pad=0.02)
 
     src = ""
     if "soc_source" in m.columns and m["soc_source"].notna().any():
@@ -520,7 +464,7 @@ def main():
     print(peaks.to_string(index=False, float_format=lambda v: f"{v:.4g}"))
 
     plot_drt(curves, meta, ecm, f"{stem}_gamma.png")
-    plot_drt_overlay(curves, meta, peaks, f"{stem}_overlay.png", ecm=ecm)
+    plot_drt_overlay(curves, meta, f"{stem}_overlay.png", ecm=ecm)
     plot_drt_map(curves, f"{stem}_map.png")
     mid = meta.iloc[len(meta) // 2]["eis_number"]
     plot_lambda_sensitivity(df, mid, f"{stem}_lambda.png")
