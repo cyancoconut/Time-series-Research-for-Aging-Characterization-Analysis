@@ -11,8 +11,13 @@ Models are fixed defaults:
   :mod:`analysis.fit_2rc_pulse` kept separate so characterization-only fixes
   — notably SOC-plateau detection — don't touch the shared paper-analysis
   module; see the fork notice at the top of ``characterize/pulse_fit.py``).
-* **EIS** — 2×ZARC + series-L + generalized Warburg
-  (:func:`analysis.eis_vs_soc.fit_zarc_warburg_eis`). φ is fitted; τ_d is
+* **EIS** — N×ZARC + series-L + generalized Warburg
+  (:func:`analysis.eis_vs_soc.fit_nzarc_warburg_eis`). **N is one number per
+  cell**, the same for every spectrum of every check-up so the fitted columns
+  are comparable down their own length. It is voted by the DRT
+  (:func:`analysis.eis_drt.branch_count_vote`: the mean in-box peak count over
+  the run, rounded) or pinned by ``eis_n_zarc``.
+  φ is fitted; τ_d is
   **pinned** by ``DIFFUSION_TAU_BOX``, so ``R_d_z`` is the amplitude at
   ω = 1/τ_d and ``tau_d_z`` is a shape constant, not a result. Those settings
   are recorded in the params file so the numbers stay interpretable. Each
@@ -57,7 +62,11 @@ from util.run_context import CHARACTERIZATION
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 PULSE_MODEL = "2rc"
-EIS_MODEL = "2zarc_warburg"
+#: The EIS branch count is decided per run (DRT vote or ``eis_n_zarc``), so the
+#: model name is completed once it is known — ``EIS_MODEL.format(n=2)`` gives
+#: back the old ``"2zarc_warburg"``. The number is also its own field,
+#: ``settings.zarc_branches``, and the ``n_zarc`` column of every fit row.
+EIS_MODEL = "{n}zarc_warburg"
 
 #: Fixed DRT regularisation used by the pipeline. See the note in ``fit_eis``
 #: for why this is not the L-curve corner.
@@ -102,6 +111,12 @@ EIS_COLS = [
     # visible from the CSV alone rather than having to be inferred.
     "R_cross", "f_cross_Hz", "R0_z", "L_z",
     "R0_hf", "R0_hf_sigma", "hf_rmse", "hf_n", "r0_pinned",
+    # Branch slots are fixed (eis_vs_soc.ZARC_COLUMN_SLOTS) whatever N the run
+    # was fitted at, so a one-branch cell and a two-branch cell still share a
+    # CSV schema (the unused slot is NaN). `n_zarc` is constant down the
+    # column — it is carried per row so a row stays interpretable on its own,
+    # away from the params file.
+    "n_zarc",
     "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
     "zarc_rmse", "zarc_degenerate",
@@ -718,8 +733,9 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             soc_step_pct: float = None, ir_ohm: float = None,
             two_stage_r0: bool = True, hf_f_min: float = None,
             drt: bool = True, drt_lambda: float = None,
-            steps: pd.DataFrame = None, nom_capacity: float = None) -> dict:
-    """2×ZARC + generalized-Warburg fit of every spectrum in every bundle.
+            steps: pd.DataFrame = None, nom_capacity: float = None,
+            n_zarc: int = None) -> dict:
+    """N×ZARC + generalized-Warburg fit of every spectrum in every bundle.
 
     Direction is **detected per bundle** from its own per-measurement terminal
     voltage ``U`` (rising -> charge, falling -> discharge) rather than declared
@@ -740,6 +756,15 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     ``steps`` is the GOLD step table from :func:`load_step_table`; with it, SOC
     is counted from the charge each SOC-adjust step moved, and the qOCV mapping
     is the fallback. Pass ``None`` to use the qOCV mapping alone.
+
+    ``n_zarc`` (config ``eis_n_zarc``) pins the ZARC branch count. Left
+    ``None`` it is **voted once for the whole cell** by the DRT
+    (:func:`analysis.eis_drt.branch_count_vote`) and then used for every
+    spectrum of every bundle: R1/τ1 of a one-branch fit and of a two-branch fit
+    are not the same quantity, so a count that varied by spectrum or by
+    check-up would make the columns of ``eis_fits.csv`` incomparable down their
+    own length. With the DRT off and no config value, the module default
+    (:data:`analysis.eis_vs_soc.ZARC_BRANCHES_DEFAULT`) applies.
     """
     override = _normalize_sweep_direction(soc_direction) if soc_direction is not None else None
     step = float(soc_step_pct) if soc_step_pct is not None else eis_vs_soc.SOC_SWEEP_STEP_PCT
@@ -757,7 +782,9 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
 
     files = sorted(glob.glob(os.path.join(data_dir, "*_eis_BM*.parquet")))
     block = {
-        "model": EIS_MODEL,
+        # Completed once the branch count is known, below. A run that returns
+        # before that fitted nothing, so the default names an empty block.
+        "model": EIS_MODEL.format(n=eis_vs_soc.ZARC_BRANCHES_DEFAULT),
         "settings": {
             "element": eis_vs_soc.ZARC_DIFFUSION_ELEMENT,
             "tau_d_pinned_s": list(eis_vs_soc.DIFFUSION_TAU_BOX)[0],
@@ -769,6 +796,14 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             "hf_r0_f_min_hz": hf_f_min if two_stage_r0 else None,
             "drt": drt,
             "drt_lambda": drt_lambda if drt else None,
+            # Branch count. Filled in below, once, for the whole cell — see
+            # the vote block after the bundles are read. Every spectrum of
+            # every bundle is fitted at `zarc_branches`; nothing varies it.
+            "zarc_branches": None,
+            "zarc_branches_source": None,
+            "zarc_branch_vote": None,
+            "zarc_tau_margin_decades": eis_vs_soc.ZARC_DIFFUSION_MARGIN_DECADES,
+            "zarc_column_slots": eis_vs_soc.ZARC_COLUMN_SLOTS,
             "soc_step_pct": step,
             "soc_direction_source": direction_source,
             "soc_direction_override": override,
@@ -807,19 +842,84 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     # programme.
     pulse_temps, cell_temp = _pulse_temperatures(data_dir)
 
-    tables, bundle_diag = [], []
-    raw_by_source = {}  # source -> raw measured-spectra df
+    # Pass 1 — read every bundle, then solve the DRT of all of them before
+    # anything is fitted. The solve is SOC-free (`solve_bundle`), so it can run
+    # this early; the SOC labels are attached in the plotting pass below from
+    # the same cached solve, which is why the DRT still costs one solve per
+    # spectrum despite now being consulted before the fit as well as plotted
+    # after it.
+    raw_by_source = {}     # source -> raw measured-spectra df
+    solved_by_source = {}  # source -> analysis.eis_drt.solve_bundle() result
     for path in files:
         name = os.path.basename(path)
         try:
-            bundle_df = pd.read_parquet(path)
+            raw_by_source[name] = pd.read_parquet(path)
+        except Exception as exc:
+            logging.warning("EIS read failed for %s: %s", name, exc)
+            block.setdefault("errors", []).append(
+                {"source": name, "error": f"{type(exc).__name__}: {exc}"}
+            )
+    if drt:
+        for name, bundle_df in raw_by_source.items():
+            try:
+                solved_by_source[name], _ = eis_drt.solve_bundle(
+                    bundle_df, lam=drt_lambda)
+            except Exception as exc:
+                logging.warning("DRT solve failed for %s: %s", name, exc)
+                block.setdefault("errors", []).append(
+                    {"source": name, "error": f"DRT {type(exc).__name__}: {exc}"}
+                )
+
+    # The branch count, decided once for the cell. The vote pools every
+    # spectrum of every check-up rather than deciding per bundle: two check-ups
+    # fitted at different orders cannot be compared, which is the whole reason
+    # the fits exist.
+    n_branches, vote = int(n_zarc) if n_zarc is not None else None, None
+    # One label for both ways of pinning: `--n-zarc` (and the UI control
+    # behind it) reaches `fit_eis` by being written into the cfg key, so the
+    # params file cannot tell them apart and should not pretend to.
+    branch_source = "pinned (eis_n_zarc / --n-zarc)" if n_branches else None
+    if n_branches is None and solved_by_source:
+        vote = eis_drt.branch_count_vote(
+            [s for sols in solved_by_source.values() for s in sols],
+            n_max=eis_vs_soc.ZARC_COLUMN_SLOTS,
+        )
+        if vote["n_zarc"]:
+            n_branches, branch_source = vote["n_zarc"], "DRT peak-count vote"
+            logging.info(
+                "EIS branch count: %d ZARC (DRT vote — mean %.2f in-box peaks "
+                "over %d spectra, median %.1f%s)",
+                n_branches, vote["mean_peaks"], vote["n_spectra"],
+                vote["median_peaks"],
+                ", clamped" if vote["clamped"] else "",
+            )
+    if n_branches is None:
+        n_branches = eis_vs_soc.ZARC_BRANCHES_DEFAULT
+        branch_source = branch_source or "module default (no DRT vote)"
+        logging.info("EIS branch count: %d ZARC (%s)", n_branches, branch_source)
+    block["model"] = EIS_MODEL.format(n=n_branches)
+    block["settings"]["zarc_branches"] = n_branches
+    block["settings"]["zarc_branches_source"] = branch_source
+    if vote is not None:
+        block["settings"]["zarc_branch_vote"] = {
+            k: _jsonable(v) for k, v in vote.items() if k != "counts"
+        }
+
+    tables, bundle_diag = [], []
+    for path in files:
+        name = os.path.basename(path)
+        try:
+            bundle_df = raw_by_source.get(name)
+            if bundle_df is None:
+                continue
             direction, diag = _bundle_direction(bundle_df, override, name)
             if direction is None:
                 logging.warning("%s: no EIS measurements — skipping", name)
                 continue
             table = eis_vs_soc.build_eis_table(
                 bundle_df, direction=direction, step=step,
-                two_stage_r0=two_stage_r0, hf_f_min=hf_f_min)
+                two_stage_r0=two_stage_r0, hf_f_min=hf_f_min,
+                n_zarc=n_branches)
             table["sweep_direction"] = direction
             table["sweep_direction_source"] = diag["sweep_direction_source"]
             table["source"] = name
@@ -864,7 +964,6 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
                     t_ref=table["Time"].min() if "Time" in table.columns else None,
                     label=f"EIS {name}", ir_ohm=ir_ohm,
                 ))
-            raw_by_source[name] = bundle_df
             tables.append(table)
             bundle_diag.append(diag)
         except Exception as exc:
@@ -947,7 +1046,11 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             title += f" @ {temp:.1f} °C"
         raw_df = raw_by_source.get(source)
 
-        out_png = os.path.join(plots_dir, f"eis_2zarc_warburg_{stem}_{tag}.png")
+        # The branch count is in the filename because it is a property of the
+        # whole run: every plot of a given cell carries the same N, and two
+        # cells fitted at different N are not directly comparable.
+        out_png = os.path.join(
+            plots_dir, f"eis_{n_branches}zarc_warburg_{stem}_{tag}.png")
         _try_plot("zarc_params_vs_soc", eis_vs_soc.plot_zarc_vs_soc, out_png,
                   group, title=title)
 
@@ -985,13 +1088,19 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         # one axis: an ECM τ sitting in a DRT *valley* (rather than on a peak)
         # is the signature of one element blanketing a region with more
         # structure than it has parameters for.
-        if not drt:
+        #
+        # The solve itself already happened, before the fits, because its peak
+        # count is what set the branch count (`branch_count_vote`). All that is
+        # left here is to label it with the SOC the fits ended up using.
+        if not drt or source not in solved_by_source:
             continue
         try:
-            curves, peaks, meta, _ = eis_drt.run_bundle(
-                raw_df, lam=drt_lambda, data_dir=data_dir, ir_ohm=ir_ohm,
+            curves, peaks, meta = eis_drt.label_bundle(
+                solved_by_source[source],
                 soc_by_eid=dict(zip(group["eis_number"], group["SOC_pct"])),
-                soc_source=diag_by_source.get(source, {}).get("soc_source"),
+                soc_source=diag_by_source.get(source, {}).get("soc_source")
+                           or "unknown",
+                direction=direction, step=step,
             )
         except Exception as exc:
             logging.warning("DRT failed for %s: %s", source, exc)
@@ -1001,10 +1110,17 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         else:
             if not peaks.empty:
                 drt_peaks.append(peaks.assign(source=source))
-            gam_png = os.path.join(plots_dir, f"eis_drt_gamma_{stem}_{tag}.png")
-            _try_plot("drt_gamma", eis_drt.plot_drt, gam_png, curves, meta, group)
-            map_png = os.path.join(plots_dir, f"eis_drt_map_{stem}_{tag}.png")
-            _try_plot("drt_map", eis_drt.plot_drt_map, map_png, curves)
+            # One DRT figure per bundle, deliberately. The overlay is a
+            # superset of what the other two showed: `plot_drt`'s per-SOC
+            # panels are its γ curves on separate axes (and only four of the
+            # 21), and `plot_drt_map` is the same γ(τ, SOC) surface rendered as
+            # colour, where a peak is a smear rather than a position you can
+            # read. Both remain on the standalone CLI, which is where you go to
+            # interrogate one spectrum; the characterization run wants the
+            # sweep-level view it can put in a report.
+            ovl_png = os.path.join(plots_dir, f"eis_drt_overlay_{stem}_{tag}.png")
+            _try_plot("drt_overlay", eis_drt.plot_drt_overlay, ovl_png,
+                      curves, meta, ecm=group)
 
     if plots:
         block["plots"] = plots
@@ -1126,6 +1242,7 @@ def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
             hf_f_min=cfg.get("eis_hf_r0_f_min_hz"),
             drt=cfg.get("eis_drt", True),
             drt_lambda=cfg.get("eis_drt_lambda"),
+            n_zarc=cfg.get("eis_n_zarc"),
             steps=steps, nom_capacity=nom_capacity,
         )
     if "qocv" in parts:
@@ -1176,8 +1293,15 @@ def write_fit_csvs(cell_dir: str, stem: str, payload: dict) -> list:
     return written
 
 
-def run(cfg: dict, target_cells: list = None, parts: list = None) -> None:
+def run(cfg: dict, target_cells: list = None, parts: list = None,
+        n_zarc: int = None) -> None:
     parts = normalize_parts(parts)
+    if n_zarc is not None:
+        # A caller-supplied branch count outranks the config's own
+        # `eis_n_zarc`, so a one-off run can pin N without editing the battery
+        # config (the UI's ZARC-branches control, `--n-zarc` on the CLI).
+        cfg = {**cfg, "eis_n_zarc": int(n_zarc)}
+        logging.info("EIS branch count pinned to %d by --n-zarc", int(n_zarc))
     working_path = cfg.get("working_path")
     if not working_path:
         raise ValueError("working_path required in the battery config")
@@ -1242,8 +1366,20 @@ def main() -> None:
             % "/".join(FIT_PARTS)
         ),
     )
+    parser.add_argument(
+        "--n-zarc", type=int, choices=range(1, eis_vs_soc.ZARC_COLUMN_SLOTS + 1),
+        metavar="N",
+        help=(
+            "Pin the EIS ZARC branch count for this run (1..%d), overriding "
+            "eis_n_zarc in the config. Omit to let the DRT vote it — see the "
+            "branch-count section in CLAUDE.md, including the cells where the "
+            "vote and the ECM disagree."
+            % eis_vs_soc.ZARC_COLUMN_SLOTS
+        ),
+    )
     args = parser.parse_args()
-    run(load_config(args.config), target_cells=args.cells, parts=args.only)
+    run(load_config(args.config), target_cells=args.cells, parts=args.only,
+        n_zarc=args.n_zarc)
 
 
 if __name__ == "__main__":

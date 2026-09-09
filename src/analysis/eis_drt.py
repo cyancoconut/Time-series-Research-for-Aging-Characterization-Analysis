@@ -159,6 +159,177 @@ def drt_peaks(tau, gamma, rel_height=0.05):
     return pd.DataFrame(rows)
 
 
+def solve_bundle(df: pd.DataFrame, lam=None):
+    """DRT solve for every spectrum in a bundle — **no SOC**.
+
+    Split from the SOC labelling (:func:`label_bundle`, with
+    :func:`run_bundle` a wrapper over both) because γ(τ) does not depend on SOC
+    — SOC is only a label on the result — so a caller that wants the peaks
+    before it has an SOC to attach can solve here and label later, without
+    paying for a second solve and without the DRT panel and the
+    ``eis_fits.csv`` row beside it ever disagreeing about which SOC a spectrum
+    was measured at.
+
+    Returns ``(solved, lcurves)`` where ``solved`` is a list of per-measurement
+    dicts in bundle time order, each carrying ``eis_number``, the ``tau``/
+    ``gamma`` arrays, the ``peaks`` frame, the frequency band and the fit
+    diagnostics. Pass it to :func:`label_bundle` to get the plot-ready frames.
+    """
+    order = df.groupby("eis_number")["Time"].min().sort_values().index.tolist()
+    solved, lcurves = [], {}
+    for eid in order:
+        s = df[df["eis_number"] == eid].sort_values("frequency")
+        f = s["frequency"].to_numpy(float)
+        zd = s["Z_real"].to_numpy(float) + 1j * s["Z_imag"].to_numpy(float)
+        tau = tau_grid(f)
+        M = len(tau)
+
+        if lam is None:
+            lam_i, lc = lcurve_lambda(f, zd, tau)
+            lcurves[eid] = lc
+        else:
+            lam_i = lam
+        x, _, _ = solve_drt(f, zd, tau, lam_i)
+        gamma, r_inf, L, invC = x[:M], x[M], x[M + 1], x[M + 2]
+
+        zf = reconstruct(f, tau, x)
+        rmse = float(np.sqrt(np.mean(np.abs(zf - zd) ** 2)))
+        solved.append({
+            "eis_number": eid,
+            "tau": tau,
+            "gamma": gamma,
+            "peaks": drt_peaks(tau, gamma),
+            "f_min": float(f.min()),
+            "f_max": float(f.max()),
+            "lam": lam_i,
+            "rmse": rmse,
+            "R_inf": r_inf,
+            "L": L,
+            "C_blk": (1.0 / invC) if invC > 0 else np.inf,
+            "R_drt_total": float(np.sum(gamma) * np.mean(np.diff(np.log(tau)))),
+        })
+    return solved, lcurves
+
+
+#: Minimum share of the largest in-box peak's γ height for a peak to count as
+#: a process in the branch vote. :func:`drt_peaks` already drops anything under
+#: 5 % of the *global* γ max, but on these spectra the global max sits in the
+#: diffusion ramp, so that threshold passes ripples in the kinetic region that
+#: no ECM branch should be spent on. Re-thresholding against the in-box maximum
+#: is what makes the count a count of arcs.
+VOTE_PEAK_HEIGHT_FRACTION = 0.25
+
+
+def count_zarc_peaks(sol: dict) -> int:
+    """Peaks of one solved spectrum that a ZARC branch could actually take.
+
+    Counts only peaks whose τ falls inside the **ZARC τ box** for this
+    spectrum's own frequency band (:func:`analysis.eis_vs_soc.zarc_tau_box`).
+    That box already excludes the unconstrained τ padding at both ends and is
+    held clear of the pinned diffusion τ, so the count is of kinetic arcs the
+    ECM has somewhere to put — not of the diffusion ramp, which is the largest
+    feature in γ on every cell measured so far and would otherwise vote for a
+    branch that the Warburg is already modelling.
+
+    Note what this does **not** fix: a dispersive Warburg (φ < 0.5) deposits γ
+    mass *inside* the box too — 13–36 % of the in-band peak area on the LFP
+    sweep — and it is narrower there than a real arc, so no width or area test
+    separates the two. The count is therefore biased **high**, which is why it
+    is averaged over the whole run and rounded rather than trusted per
+    spectrum, and why the vote is logged for inspection.
+    """
+    from analysis.eis_vs_soc import zarc_tau_box
+
+    pk = sol.get("peaks")
+    if pk is None or pk.empty:
+        return 0
+    lo, hi = zarc_tau_box(sol["f_min"], sol["f_max"])
+    inbox = pk[(pk["tau_peak"] >= lo) & (pk["tau_peak"] <= hi)]
+    if inbox.empty:
+        return 0
+    tallest = float(inbox["gamma_peak"].max())
+    if not np.isfinite(tallest) or tallest <= 0:
+        return 0
+    return int((inbox["gamma_peak"] >= VOTE_PEAK_HEIGHT_FRACTION * tallest).sum())
+
+
+def branch_count_vote(solved, n_min: int = 1, n_max: int = 2) -> dict:
+    """One ZARC branch count for a whole run, averaged over its spectra.
+
+    ``solved`` is the concatenation of every :func:`solve_bundle` result in the
+    run — every check-up, not one bundle — because the branch count has to be
+    the same everywhere for the fitted parameters to be comparable across
+    check-ups as well as across SOC.
+
+    Each spectrum contributes its in-box peak count (:func:`count_zarc_peaks`);
+    the mean is rounded and clamped to ``[n_min, n_max]``. Averaging is the
+    point: an individual spectrum's count moves with λ and with noise in the
+    kinetic region, and a per-spectrum order was measured to put a step into
+    the vs-SOC curves that was a model change rather than a measurement.
+
+    Returns the vote and the evidence for it: ``{n_zarc, mean_peaks,
+    median_peaks, counts, n_spectra, n_zero, clamped}``.
+    """
+    counts = [count_zarc_peaks(s) for s in solved]
+    voting = [c for c in counts if c > 0]
+    if not voting:
+        # Every spectrum came back with no peak inside the box (a failed solve,
+        # or a spectrum that is all diffusion). Nothing to vote with — leave
+        # the choice to the caller's default rather than inventing one.
+        return {"n_zarc": None, "mean_peaks": float("nan"),
+                "median_peaks": float("nan"), "counts": counts,
+                "n_spectra": len(counts), "n_zero": len(counts),
+                "clamped": False}
+    mean = float(np.mean(voting))
+    raw = int(np.rint(mean))
+    n = int(min(max(raw, n_min), n_max))
+    return {"n_zarc": n, "mean_peaks": round(mean, 3),
+            "median_peaks": float(np.median(voting)), "counts": counts,
+            "n_spectra": len(counts), "n_zero": len(counts) - len(voting),
+            "clamped": raw != n}
+
+
+def label_bundle(solved, soc_by_eid=None, soc_source="unknown", direction=None,
+                 step=None):
+    """Attach SOC to a :func:`solve_bundle` result → ``(curves, peaks, meta)``.
+
+    ``soc_by_eid`` is the SOC the caller already assigned. Measurements it
+    does not cover fall back to the order-based ladder ``100 - step * i``,
+    which is **wrong whenever the steps moved unequal charge** — it exists only
+    so a CLI run still labels its panels with something. ``meta["soc_source"]``
+    records which was used; check it before quoting a SOC off a DRT plot.
+    """
+    from analysis.eis_vs_soc import SOC_SWEEP_DIRECTION, SOC_SWEEP_STEP_PCT
+
+    direction = direction or SOC_SWEEP_DIRECTION
+    step = SOC_SWEEP_STEP_PCT if step is None else step
+    soc_by_eid = soc_by_eid or {}
+    charging = str(direction).lower().startswith("cha")
+
+    curves, peaks, meta = [], [], []
+    for i, sol in enumerate(solved):
+        eid = sol["eis_number"]
+        ladder = (0.0 + step * i) if charging else (100.0 - step * i)
+        soc = soc_by_eid.get(eid, ladder)
+        tau, gamma = sol["tau"], sol["gamma"]
+
+        for t, g in zip(tau, gamma):
+            curves.append({"eis_number": eid, "SOC_pct": soc, "tau": t, "gamma": g})
+        pk = sol["peaks"].copy()
+        pk.insert(0, "SOC_pct", soc)
+        pk.insert(0, "eis_number", eid)
+        peaks.append(pk)
+        meta.append({"eis_number": eid, "SOC_pct": soc, "lam": sol["lam"],
+                     "rmse": sol["rmse"], "R_inf": sol["R_inf"], "L": sol["L"],
+                     "C_blk": sol["C_blk"], "R_drt_total": sol["R_drt_total"],
+                     "n_peaks": len(pk), "soc_source": soc_source})
+        logging.info("DRT %s (SOC %3.0f%%): lam=%.3g rmse=%.4f peaks=%d",
+                     eid, soc, sol["lam"], sol["rmse"], len(pk))
+
+    return (pd.DataFrame(curves), pd.concat(peaks, ignore_index=True),
+            pd.DataFrame(meta))
+
+
 def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None,
                data_dir=None, ir_ohm=None, soc_by_eid=None, soc_source=None):
     """DRT for every spectrum in a bundle. Returns ``(curves, peaks, meta)``.
@@ -209,46 +380,12 @@ def run_bundle(df: pd.DataFrame, lam=None, direction=None, step=None,
             logging.warning("DRT: qOCV SOC unavailable (%s) — falling back to "
                             "the order-based ladder", diag.get("reason", "?"))
 
-    curves, peaks, meta, lcurves = [], [], [], {}
-    for i, eid in enumerate(order):
-        s = df[df["eis_number"] == eid].sort_values("frequency")
-        f = s["frequency"].to_numpy(float)
-        zd = s["Z_real"].to_numpy(float) + 1j * s["Z_imag"].to_numpy(float)
-        tau = tau_grid(f)
-        M = len(tau)
-
-        if lam is None:
-            lam_i, lc = lcurve_lambda(f, zd, tau)
-            lcurves[eid] = lc
-        else:
-            lam_i = lam
-        x, _, _ = solve_drt(f, zd, tau, lam_i)
-        gamma, r_inf, L, invC = x[:M], x[M], x[M + 1], x[M + 2]
-
-        zf = reconstruct(f, tau, x)
-        rmse = float(np.sqrt(np.mean(np.abs(zf - zd) ** 2)))
-        soc = soc_by_eid.get(
-            eid,
-            (0.0 + step * i) if str(direction).lower().startswith("cha")
-            else (100.0 - step * i),
-        )
-
-        for t, g in zip(tau, gamma):
-            curves.append({"eis_number": eid, "SOC_pct": soc, "tau": t, "gamma": g})
-        pk = drt_peaks(tau, gamma)
-        pk.insert(0, "SOC_pct", soc)
-        pk.insert(0, "eis_number", eid)
-        peaks.append(pk)
-        meta.append({"eis_number": eid, "SOC_pct": soc, "lam": lam_i, "rmse": rmse,
-                     "R_inf": r_inf, "L": L,
-                     "C_blk": (1.0 / invC) if invC > 0 else np.inf,
-                     "R_drt_total": float(np.sum(gamma) * np.mean(np.diff(np.log(tau)))),
-                     "n_peaks": len(pk), "soc_source": soc_source})
-        logging.info("DRT %s (SOC %3.0f%%): lam=%.3g rmse=%.4f peaks=%d",
-                     eid, soc, lam_i, rmse, len(pk))
-
-    return (pd.DataFrame(curves), pd.concat(peaks, ignore_index=True),
-            pd.DataFrame(meta), lcurves)
+    solved, lcurves = solve_bundle(df, lam=lam)
+    curves, peaks, meta = label_bundle(
+        solved, soc_by_eid=soc_by_eid, soc_source=soc_source,
+        direction=direction, step=step,
+    )
+    return curves, peaks, meta, lcurves
 
 
 # --------------------------------------------------------------------------
@@ -287,6 +424,104 @@ def plot_drt(curves, meta, ecm, out_png, n_show=4):
     fig.suptitle("DRT — how many processes, and how broad", fontsize=12)
     fig.tight_layout(); fig.savefig(out_png, dpi=120); plt.close(fig)
     logging.info("DRT plot -> %s", out_png)
+
+
+def plot_drt_overlay(curves, meta, out_png=None, ecm=None):
+    """Every spectrum's γ(τ) on **one** axis, coloured by SOC.
+
+    :func:`plot_drt` shows a handful of SOC side by side and
+    :func:`plot_drt_map` shows all of them as a heat map; neither lets you read
+    *how far* a peak walks along τ between two SOC, because in one the curves
+    sit on separate axes and in the other a peak is a smear of colour. Here
+    they share an axis.
+
+    γ is plotted **absolute, in mΩ** — position and amplitude on the one axis.
+    Note what that costs: γ grows several-fold toward the empty end (7.1× over
+    the NFPP_02 BM22 sweep), so the lowest-SOC curve owns the y-range and the
+    mid-sweep curves are compressed near zero. Their peak *positions* are in
+    ``<cell>_eis_drt_peaks.csv`` when the plot cannot resolve them.
+
+    ``ecm`` optionally marks the fitted ZARC/diffusion τ (the same frame
+    :func:`plot_drt` takes). Each τ is itself SOC-dependent, so it is drawn as
+    the **band** it spans over the sweep with its median as a line, never as
+    one vertical line.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+
+    m = meta.sort_values("SOC_pct")
+    socs = pd.to_numeric(m["SOC_pct"], errors="coerce").to_numpy(float)
+    finite = socs[np.isfinite(socs)]
+    # No SOC at all (no qOCV, < 2 EIS blocks) -> colour by measurement order and
+    # say so in the title, rather than draw a colorbar over fabricated numbers.
+    have_soc = finite.size > 0
+    norm = Normalize(vmin=finite.min(), vmax=finite.max()) if have_soc else None
+    cmap = plt.get_cmap("viridis")
+
+    fig, ax = plt.subplots(figsize=(8.6, 5.4))
+
+    for i, (_, row) in enumerate(m.iterrows()):
+        g = curves[curves["eis_number"] == row["eis_number"]].sort_values("tau")
+        if g.empty:
+            continue
+        soc = row["SOC_pct"]
+        colour = (cmap(norm(soc)) if have_soc and np.isfinite(soc)
+                  else cmap(i / max(len(m) - 1, 1)))
+        ax.semilogx(g["tau"].to_numpy(float), g["gamma"].to_numpy(float),
+                    "-", lw=1.3, color=colour, alpha=0.85)
+
+    ax.set_xlabel("τ (s)")
+    ax.set_ylabel("γ(ln τ)  (mΩ)")
+    ax.grid(alpha=0.3, which="both")
+
+    if ecm is not None and not getattr(ecm, "empty", True):
+        for col, colr, lab in (("tau1_z", "#c0392b", "ZARC τ1"),
+                               ("tau2_z", "#8e44ad", "ZARC τ2"),
+                               ("tau_d_z", "#e67e22", "τ_d")):
+            if col not in getattr(ecm, "columns", []):
+                continue
+            v = pd.to_numeric(ecm[col], errors="coerce").dropna()
+            v = v[v > 0]
+            if v.empty:
+                continue
+            ax.axvspan(v.min(), v.max(), color=colr, alpha=0.10)
+            ax.axvline(v.median(), ls="--", lw=1.1, color=colr,
+                       label=f"{lab} (median)")
+        ax.legend(fontsize=8)
+
+    # Grey out the τ-grid padding rather than relying on the docstring: γ there
+    # is constrained by no measured point (the solver simply parks
+    # unidentifiable mass in it), and with 21 curves overlaid the resulting edge
+    # ramp reads as a peak walking off the axis — exactly the misreading this
+    # figure invites.
+    all_tau = pd.to_numeric(curves["tau"], errors="coerce").dropna()
+    if not all_tau.empty:
+        pad = 10 ** TAU_PAD_DECADES
+        band = (all_tau.min() * pad, all_tau.max() / pad)
+        ax.axvspan(all_tau.min(), band[0], color="0.5", alpha=0.13, lw=0)
+        ax.axvspan(band[1], all_tau.max(), color="0.5", alpha=0.13, lw=0)
+        ax.set_xlim(all_tau.min(), all_tau.max())
+
+    if have_soc:
+        sm = ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label="SOC (%)", pad=0.02)
+
+    src = ""
+    if "soc_source" in m.columns and m["soc_source"].notna().any():
+        src = f"   SOC: {m['soc_source'].dropna().iloc[0]}"
+    lam = float(m["lam"].iloc[0]) if "lam" in m.columns and len(m) else float("nan")
+    fig.suptitle(
+        f"DRT across the SOC sweep — {len(m)} spectra, λ={lam:.3g}{src}"
+        + ("" if have_soc else "   [no SOC — coloured by measurement order]"),
+        fontsize=12,
+    )
+    fig.savefig(out_png, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    logging.info("DRT overlay -> %s", out_png)
 
 
 def plot_lambda_sensitivity(df, eis_number, out_png, lams=(1e-4, 1e-3, 1e-2, 1e-1)):
@@ -377,6 +612,7 @@ def main():
     print(peaks.to_string(index=False, float_format=lambda v: f"{v:.4g}"))
 
     plot_drt(curves, meta, ecm, f"{stem}_gamma.png")
+    plot_drt_overlay(curves, meta, f"{stem}_overlay.png", ecm=ecm)
     plot_drt_map(curves, f"{stem}_map.png")
     mid = meta.iloc[len(meta) // 2]["eis_number"]
     plot_lambda_sensitivity(df, mid, f"{stem}_lambda.png")

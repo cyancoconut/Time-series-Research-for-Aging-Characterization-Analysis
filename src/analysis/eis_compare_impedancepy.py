@@ -231,8 +231,10 @@ def _order(p: dict) -> dict:
 
 def compare(df: pd.DataFrame, direction=None, step=None) -> pd.DataFrame:
     """One row per (spectrum, variant) with canonical params + scores."""
-    socs = build_eis_table(df, direction=direction, step=step,
-                           fit_2rc=False, fit_warburg=False, fit_zarc=False)
+    # Features/SOC only — this module runs each variant itself below. The
+    # `fit_2rc` / `fit_warburg` switches are gone: those stages are no longer
+    # in `build_eis_table`'s chain at all (see the comment there).
+    socs = build_eis_table(df, direction=direction, step=step, fit_zarc=False)
     soc_of = dict(zip(socs["eis_number"], socs["SOC_pct"]))
 
     rows = []
