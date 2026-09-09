@@ -348,6 +348,104 @@ def plot_drt(curves, meta, ecm, out_png, n_show=4):
     logging.info("DRT plot -> %s", out_png)
 
 
+def plot_drt_overlay(curves, meta, out_png=None, ecm=None):
+    """Every spectrum's γ(τ) on **one** axis, coloured by SOC.
+
+    :func:`plot_drt` shows a handful of SOC side by side and
+    :func:`plot_drt_map` shows all of them as a heat map; neither lets you read
+    *how far* a peak walks along τ between two SOC, because in one the curves
+    sit on separate axes and in the other a peak is a smear of colour. Here
+    they share an axis.
+
+    γ is plotted **absolute, in mΩ** — position and amplitude on the one axis.
+    Note what that costs: γ grows several-fold toward the empty end (7.1× over
+    the NFPP_02 BM22 sweep), so the lowest-SOC curve owns the y-range and the
+    mid-sweep curves are compressed near zero. Their peak *positions* are in
+    ``<cell>_eis_drt_peaks.csv`` when the plot cannot resolve them.
+
+    ``ecm`` optionally marks the fitted ZARC/diffusion τ (the same frame
+    :func:`plot_drt` takes). Each τ is itself SOC-dependent, so it is drawn as
+    the **band** it spans over the sweep with its median as a line, never as
+    one vertical line.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+
+    m = meta.sort_values("SOC_pct")
+    socs = pd.to_numeric(m["SOC_pct"], errors="coerce").to_numpy(float)
+    finite = socs[np.isfinite(socs)]
+    # No SOC at all (no qOCV, < 2 EIS blocks) -> colour by measurement order and
+    # say so in the title, rather than draw a colorbar over fabricated numbers.
+    have_soc = finite.size > 0
+    norm = Normalize(vmin=finite.min(), vmax=finite.max()) if have_soc else None
+    cmap = plt.get_cmap("viridis")
+
+    fig, ax = plt.subplots(figsize=(8.6, 5.4))
+
+    for i, (_, row) in enumerate(m.iterrows()):
+        g = curves[curves["eis_number"] == row["eis_number"]].sort_values("tau")
+        if g.empty:
+            continue
+        soc = row["SOC_pct"]
+        colour = (cmap(norm(soc)) if have_soc and np.isfinite(soc)
+                  else cmap(i / max(len(m) - 1, 1)))
+        ax.semilogx(g["tau"].to_numpy(float), g["gamma"].to_numpy(float),
+                    "-", lw=1.3, color=colour, alpha=0.85)
+
+    ax.set_xlabel("τ (s)")
+    ax.set_ylabel("γ(ln τ)  (mΩ)")
+    ax.grid(alpha=0.3, which="both")
+
+    if ecm is not None and not getattr(ecm, "empty", True):
+        for col, colr, lab in (("tau1_z", "#c0392b", "ZARC τ1"),
+                               ("tau2_z", "#8e44ad", "ZARC τ2"),
+                               ("tau_d_z", "#e67e22", "τ_d")):
+            if col not in getattr(ecm, "columns", []):
+                continue
+            v = pd.to_numeric(ecm[col], errors="coerce").dropna()
+            v = v[v > 0]
+            if v.empty:
+                continue
+            ax.axvspan(v.min(), v.max(), color=colr, alpha=0.10)
+            ax.axvline(v.median(), ls="--", lw=1.1, color=colr,
+                       label=f"{lab} (median)")
+        ax.legend(fontsize=8)
+
+    # Grey out the τ-grid padding rather than relying on the docstring: γ there
+    # is constrained by no measured point (the solver simply parks
+    # unidentifiable mass in it), and with 21 curves overlaid the resulting edge
+    # ramp reads as a peak walking off the axis — exactly the misreading this
+    # figure invites.
+    all_tau = pd.to_numeric(curves["tau"], errors="coerce").dropna()
+    if not all_tau.empty:
+        pad = 10 ** TAU_PAD_DECADES
+        band = (all_tau.min() * pad, all_tau.max() / pad)
+        ax.axvspan(all_tau.min(), band[0], color="0.5", alpha=0.13, lw=0)
+        ax.axvspan(band[1], all_tau.max(), color="0.5", alpha=0.13, lw=0)
+        ax.set_xlim(all_tau.min(), all_tau.max())
+
+    if have_soc:
+        sm = ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label="SOC (%)", pad=0.02)
+
+    src = ""
+    if "soc_source" in m.columns and m["soc_source"].notna().any():
+        src = f"   SOC: {m['soc_source'].dropna().iloc[0]}"
+    lam = float(m["lam"].iloc[0]) if "lam" in m.columns and len(m) else float("nan")
+    fig.suptitle(
+        f"DRT across the SOC sweep — {len(m)} spectra, λ={lam:.3g}{src}"
+        + ("" if have_soc else "   [no SOC — coloured by measurement order]"),
+        fontsize=12,
+    )
+    fig.savefig(out_png, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    logging.info("DRT overlay -> %s", out_png)
+
+
 def plot_lambda_sensitivity(df, eis_number, out_png, lams=(1e-4, 1e-3, 1e-2, 1e-1)):
     """Same spectrum at several λ — separates data features from smoothing."""
     import matplotlib
@@ -436,6 +534,7 @@ def main():
     print(peaks.to_string(index=False, float_format=lambda v: f"{v:.4g}"))
 
     plot_drt(curves, meta, ecm, f"{stem}_gamma.png")
+    plot_drt_overlay(curves, meta, f"{stem}_overlay.png", ecm=ecm)
     plot_drt_map(curves, f"{stem}_map.png")
     mid = meta.iloc[len(meta) // 2]["eis_number"]
     plot_lambda_sensitivity(df, mid, f"{stem}_lambda.png")

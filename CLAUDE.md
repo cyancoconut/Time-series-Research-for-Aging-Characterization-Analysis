@@ -164,8 +164,8 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
 ├── <cell>_capacity.csv
 ├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
 └── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>_<T>degreeC.png
-            eis_{zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>_<T>degreeC.png
-            eis_drt_{gamma,map}_<stem>_<direction>_<T>degreeC.png
+            eis_{<N>zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>_<T>degreeC.png
+            eis_drt_overlay_<stem>_<direction>_<T>degreeC.png
             qocv_<T>degreeC.png
 ```
 
@@ -364,11 +364,11 @@ that damages R0 most. **R0 stays monotone in SOC under all three**, so the
 two-stage fix is robust to this; left unmodelled deliberately. Untested idea:
 narrow the HF window's top instead of adding an element.
 
-**DRT** (`analysis/eis_drt.py`) — model-free companion diagnostic, run by
-default alongside every EIS fit (`eis_drt`, default true). It does **not**
-choose the ECM branch count — that was tried and dropped, see the branch-count
-note above. `fit_eis` runs it per
-bundle on the same raw spectra, writing `plots/eis_drt_{gamma,map}_<stem>_<dir>.png`
+**DRT** (`analysis/eis_drt.py`) — model-free companion, **run by default
+alongside every EIS fit** (`eis_drt`, default true). It also casts the vote
+that sets the run's ZARC branch count — see the branch-count note above.
+`fit_eis` runs it per bundle on the same raw spectra, writing **one** figure —
+`plots/eis_drt_overlay_<stem>_<dir>.png` —
 and `<cell>_eis_drt_peaks.csv` (one row per peak: `tau_peak`, `gamma_peak`,
 `R_peak`, `width_decades`), plus an `eis.drt` block in `parameters.json`. It
 answers the one question an ECM cannot ask of itself — how many relaxation
@@ -381,6 +381,35 @@ with `run_bundle` a wrapper over both, which is what `fit_eis` calls) because
 γ(τ) does not depend on SOC — SOC is only a label on the result. A caller that
 needs the peaks before it has an SOC to attach can therefore solve first and
 label later without paying for a second solve.
+
+The overlay puts every spectrum of a sweep on *one* γ(τ) axis coloured by SOC,
+and is the **only** DRT figure the characterization path writes. It shows what
+the two it replaced could not: how far a peak *walks* along τ between two SOC
+(`plot_drt` puts a handful of SOC on separate axes; `plot_drt_map` renders a
+peak as a smear of colour). Both of those functions are kept and still run on
+the **standalone CLI** (`python -m analysis.eis_drt`), which is where you go to
+interrogate one spectrum.
+
+**One panel, γ absolute in mΩ.** Note the cost: γ grows ~7× toward the empty
+end over the NFPP_02 BM22 sweep, so the lowest-SOC curve owns the y-range and
+the mid-sweep curves are compressed near zero — their peak *positions* are in
+`<cell>_eis_drt_peaks.csv` when the plot cannot resolve them. A
+self-normalised panel and a `tau_peak`-vs-SOC track were both built and then
+dropped as surplus; if you reinstate either, normalise on the **constrained
+band, not the global max** — the SOC 99.6 % spectrum's largest γ sits at
+τ = 50 s, inside the padding, so a global-max normalisation scales that one
+curve against an unconstrained artefact while every other is scaled against a
+real peak.
+
+Fitted `tau1_z`/`tau2_z`/`tau_d_z` are drawn as the **band** they span over the
+sweep with the median as a line, never a single vertical line — each is itself
+SOC-dependent. The τ grid's `TAU_PAD_DECADES` padding is **greyed out**: γ out
+there is constrained by no measured point, and with 21 curves overlaid the
+resulting edge ramp otherwise reads as a peak walking off the axis. On NFPP_02
+BM22 it reads at a glance: the curves lie on top of one another above ~25 %
+SOC, and below it the mid-frequency structure walks right by more than a decade
+(τ at the dominant peak 0.0096 s → 0.357 s, monotone) while growing ~7× — the
+same structure the parsimony guard is reacting to.
 
 **λ is fixed** (`eis_drt_lambda`, default `1e-3`), *not* the L-curve corner.
 The corner is better for a one-off investigation but is not reproducible enough

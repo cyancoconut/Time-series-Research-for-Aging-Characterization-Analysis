@@ -1032,10 +1032,17 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
         else:
             if not peaks.empty:
                 drt_peaks.append(peaks.assign(source=source))
-            gam_png = os.path.join(plots_dir, f"eis_drt_gamma_{stem}_{tag}.png")
-            _try_plot("drt_gamma", eis_drt.plot_drt, gam_png, curves, meta, group)
-            map_png = os.path.join(plots_dir, f"eis_drt_map_{stem}_{tag}.png")
-            _try_plot("drt_map", eis_drt.plot_drt_map, map_png, curves)
+            # One DRT figure per bundle, deliberately. The overlay is a
+            # superset of what the other two showed: `plot_drt`'s per-SOC
+            # panels are its γ curves on separate axes (and only four of the
+            # 21), and `plot_drt_map` is the same γ(τ, SOC) surface rendered as
+            # colour, where a peak is a smear rather than a position you can
+            # read. Both remain on the standalone CLI, which is where you go to
+            # interrogate one spectrum; the characterization run wants the
+            # sweep-level view it can put in a report.
+            ovl_png = os.path.join(plots_dir, f"eis_drt_overlay_{stem}_{tag}.png")
+            _try_plot("drt_overlay", eis_drt.plot_drt_overlay, ovl_png,
+                      curves, meta, ecm=group)
 
     if plots:
         block["plots"] = plots
