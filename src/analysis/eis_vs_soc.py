@@ -1266,11 +1266,14 @@ def plot_fit_overlay(df: pd.DataFrame, table: pd.DataFrame, out_png: str,
     logging.info("EIS fit overlay -> %s", out_png)
 
 
-#: Inset geometry on the parent Nyquist axes: [left, bottom, width, height] in
-#: axes fractions. Two side by side along the bottom-right, clear of the arcs
-#: which rise to the left: the narrow R0 zoom then the wider MF-arc zoom.
-R0_INSET_RECT = (0.34, 0.08, 0.29, 0.29)
-MF_INSET_RECT = (0.68, 0.08, 0.29, 0.29)
+#: Width ratio between the full Nyquist plane and the column of zoom panels
+#: beside it. The zooms used to be drawn *inside* the parent axes
+#: (``ax.inset_axes``), which put them on top of the very curves they zoom into
+#: — on a sweep whose diffusion tail rises to the right, the two boxes covered
+#: the low-frequency end of every spectrum. They are their own axes in their
+#: own column now: the main plot keeps its whole plane, the zooms keep their
+#: whole area, and neither has to be sized to avoid the other.
+NYQUIST_PANEL_WIDTH_RATIOS = (1.9, 1.0)
 
 #: MF zoom width, as a multiple of the fitted arc diameter. The mid-frequency
 #: arc is *both* ZARCs — on the NFPP bundle ``R1_z`` alone is 0.41 mOhm while
@@ -1343,10 +1346,15 @@ def _hf_zoom_window(df: pd.DataFrame, table: pd.DataFrame,
     return x_lo, x_hi, y_lo, y_hi
 
 
-def _draw_zoom_inset(ax, df, soc, cmap, norm, rect, window, title, marker):
-    """One zoomed copy of the spectra on ``ax``, framed by ``window``."""
+def _draw_zoom_panel(axin, parent, df, soc, cmap, norm, window, title, marker):
+    """Draw the spectra on ``axin``, framed by ``window``, and mark the region.
+
+    ``axin`` is an ordinary axes beside ``parent``, not an inset inside it.
+    The region it covers is still outlined on ``parent`` with connector lines,
+    so the relationship between the two is visible without the zoom having to
+    sit on top of the data.
+    """
     x_lo, x_hi, y_lo, y_hi = window
-    axin = ax.inset_axes(rect)
     for eid, g in _spectra_by_soc(df, soc):
         g = g.sort_values("frequency")
         axin.plot(g["Z_real"], -g["Z_imag"], marker, ms=2.5, lw=0.9,
@@ -1354,22 +1362,28 @@ def _draw_zoom_inset(ax, df, soc, cmap, norm, rect, window, title, marker):
     axin.axhline(0.0, color="0.35", lw=0.8, zorder=1)
     axin.set_xlim(x_lo, x_hi)
     axin.set_ylim(y_lo, y_hi)
+    # Equal aspect, box-adjusted, on the zooms as well as the main plane: a
+    # Nyquist arc read off unequal axes is the wrong shape, and a depressed
+    # arc is exactly what these panels exist to show.
     axin.set_aspect("equal", adjustable="box")
-    axin.tick_params(labelsize=6.5, length=2)
+    axin.tick_params(labelsize=7, length=2.5)
     axin.grid(alpha=0.25)
-    axin.set_title(title, fontsize=8, pad=2)
+    axin.set_title(title, fontsize=8.5, pad=3)
     for spine in axin.spines.values():
         spine.set_edgecolor("0.4")
     try:
-        ax.indicate_inset_zoom(axin, edgecolor="0.4", alpha=0.45)
+        parent.indicate_inset(
+            (x_lo, y_lo, x_hi - x_lo, y_hi - y_lo), inset_ax=axin,
+            edgecolor="0.4", alpha=0.45,
+        )
     except Exception:            # older matplotlib without the connector API
         pass
     return axin
 
 
-def add_hf_inset(ax, df: pd.DataFrame, table: pd.DataFrame, soc: dict,
-                 cmap, norm, marker: str = "o-"):
-    """Draw two zoomed copies of the high-frequency corner as insets on ``ax``.
+def add_hf_zoom_panels(ax, panels, df: pd.DataFrame, table: pd.DataFrame,
+                       soc: dict, cmap, norm, marker: str = "o-"):
+    """Fill ``panels`` with zoomed copies of the high-frequency corner.
 
     The full Nyquist view is dominated by the low-frequency diffusion tail, so
     everything that carries the kinetics collapses into a few pixels near the
@@ -1378,26 +1392,48 @@ def add_hf_inset(ax, df: pd.DataFrame, table: pd.DataFrame, soc: dict,
     * **R0 region** — tight on the real-axis intercept, where the series
       resistance is read off. Narrow enough that the individual SOC curves
       separate at their crossing of -Z_imag = 0.
-    * **MF arc** — the whole mid-frequency semicircle (both ZARCs), wide
+    * **MF arc** — the whole mid-frequency semicircle (every ZARC), wide
       enough that the arc closes instead of running off the top.
 
-    Returns ``(ax_r0, ax_mf)``; either may be ``None`` if its window couldn't
-    be built.
+    ``panels`` is the ``(ax_r0, ax_mf)`` pair of axes to draw into — see
+    :func:`nyquist_with_zooms` for the layout that creates them. A panel whose
+    window cannot be built is hidden rather than left as an empty frame.
+
+    Returns ``(ax_r0, ax_mf)``; either may be ``None``.
     """
     out = []
-    for rect, arc_cols, span, frac, title in (
-        (R0_INSET_RECT, ("R1_z",), R0_INSET_SPAN_ARCS, 0.08, "R0 region"),
-        (MF_INSET_RECT, ("R1_z", "R2_z"), MF_INSET_SPAN_ARCS, 0.25, "MF arc"),
+    for axin, arc_cols, span, frac, title in (
+        (panels[0], ("R1_z",), R0_INSET_SPAN_ARCS, 0.08, "R0 region"),
+        (panels[1], ("R1_z", "R2_z"), MF_INSET_SPAN_ARCS, 0.25, "MF arc"),
     ):
         window = _hf_zoom_window(df, table, arc_cols=arc_cols, span=span,
                                  fallback_frac=frac)
         if window is None:
-            logging.info("Nyquist %s inset: no usable window, skipping", title)
+            logging.info("Nyquist %s zoom: no usable window, skipping", title)
+            axin.set_visible(False)
             out.append(None)
             continue
-        out.append(_draw_zoom_inset(ax, df, soc, cmap, norm, rect, window,
+        out.append(_draw_zoom_panel(axin, ax, df, soc, cmap, norm, window,
                                     title, marker))
     return tuple(out)
+
+
+def nyquist_with_zooms(fig, spec):
+    """``(ax_main, (ax_r0, ax_mf))`` laid out in ``spec``: plane left, zooms right.
+
+    ``spec`` is a :class:`~matplotlib.gridspec.SubplotSpec` — the region of the
+    figure the group gets. It is split into two columns
+    (:data:`NYQUIST_PANEL_WIDTH_RATIOS`): the full plane spanning both rows on
+    the left, the two zooms stacked on the right.
+    """
+    from matplotlib.gridspec import GridSpecFromSubplotSpec
+
+    gs = GridSpecFromSubplotSpec(
+        2, 2, subplot_spec=spec, width_ratios=list(NYQUIST_PANEL_WIDTH_RATIOS),
+        wspace=0.32, hspace=0.38,
+    )
+    ax_main = fig.add_subplot(gs[:, 0])
+    return ax_main, (fig.add_subplot(gs[0, 1]), fig.add_subplot(gs[1, 1]))
 
 
 def _spectra_by_soc(df: pd.DataFrame, soc: dict):
@@ -1429,20 +1465,26 @@ def _soc_color(value, cmap, norm):
 def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title: str = ""):
     """All spectra on one Nyquist plane, coloured by SOC (context companion).
 
-    Carries a bottom-right inset zoomed on the high-frequency arc — see
-    :func:`add_hf_inset`.
+    The full plane sits on the left with the R0-region and MF-arc zooms in
+    their own column beside it — see :func:`add_hf_zoom_panels`.
     """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib import cm, colors
+    from matplotlib.gridspec import GridSpec
 
     soc = dict(zip(table["eis_number"], table["SOC_pct"]))
     norm = colors.Normalize(vmin=0, vmax=100)
     cmap = cm.viridis
 
-    fig, ax = plt.subplots(figsize=(7.5, 6.5))
+    # Wide enough that the zoom column is additional room rather than room
+    # taken from the plane: the main axes keeps roughly the width it had when
+    # the zooms were drawn on top of it.
+    fig = plt.figure(figsize=(13.0, 6.8))
+    gs = GridSpec(1, 1, figure=fig)
+    ax, panels = nyquist_with_zooms(fig, gs[0, 0])
     for eid, g in _spectra_by_soc(df, soc):
         g = g.sort_values("frequency")
         ax.plot(g["Z_real"], -g["Z_imag"], "-", lw=1,
@@ -1451,13 +1493,13 @@ def plot_nyquist_by_soc(df: pd.DataFrame, table: pd.DataFrame, out_png: str, tit
     ax.set_ylabel("-Z_imag (mΩ)")
     ax.grid(alpha=0.3)
     _frame_nyquist(ax, (df["Z_real"], -df["Z_imag"]))
-    add_hf_inset(ax, df, table, soc, cmap, norm, marker="-")
-    fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="SOC (%)")
-    # Bundle filenames are long and this figure is narrow, so wrap rather than
-    # letting the title run off both edges.
-    fig.suptitle("\n".join(textwrap.wrap(f"EIS Nyquist by SOC — {title}", 62)),
+    add_hf_zoom_panels(ax, panels, df, table, soc, cmap, norm, marker="-")
+    fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=[ax, *panels],
+                 label="SOC (%)", shrink=0.85, pad=0.02)
+    # Bundle filenames are long, so wrap rather than letting the title run off
+    # both edges.
+    fig.suptitle("\n".join(textwrap.wrap(f"EIS Nyquist by SOC — {title}", 90)),
                  fontsize=9)
-    fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     plt.close(fig)
     logging.info("EIS Nyquist plot -> %s", out_png)
@@ -1476,6 +1518,7 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib import cm, colors
+    from matplotlib.gridspec import GridSpec
 
     if df.empty:
         logging.info("raw spectra plot: empty bundle, skipping")
@@ -1488,7 +1531,15 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     norm = colors.Normalize(vmin=vmin, vmax=vmax)
     cmap = cm.viridis
 
-    fig, (ax_nyq, ax_mag, ax_ph) = plt.subplots(1, 3, figsize=(18, 5.5))
+    # Three groups across: the Nyquist plane, its two zooms, then the Bode
+    # pair stacked. The zooms have their own column here too — drawn inside
+    # the Nyquist axes they covered the diffusion tail of every spectrum.
+    fig = plt.figure(figsize=(20.0, 7.6))
+    gs = GridSpec(2, 2, figure=fig, width_ratios=[2.35, 1.0],
+                  wspace=0.22, hspace=0.42)
+    ax_nyq, panels = nyquist_with_zooms(fig, gs[:, 0])
+    ax_mag = fig.add_subplot(gs[0, 1])
+    ax_ph = fig.add_subplot(gs[1, 1])
     for eid, g in _spectra_by_soc(df, soc):
         g = g.sort_values("frequency")
         color = _soc_color(soc.get(eid), cmap, norm)
@@ -1501,7 +1552,7 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     ax_nyq.grid(alpha=0.3)
     ax_nyq.set_title("Nyquist (measured)")
     _frame_nyquist(ax_nyq, (df["Z_real"], -df["Z_imag"]))
-    add_hf_inset(ax_nyq, df, table, soc, cmap, norm)
+    add_hf_zoom_panels(ax_nyq, panels, df, table, soc, cmap, norm)
 
     # Bode: the frequency axis is log (pad it there, not in linear space), the
     # value axes are linear and get framed on the measured range — the phase
@@ -1517,7 +1568,8 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     ax_ph.set_title("Bode — phase")
     _autoscale(ax_ph, y=df["phase"])
 
-    fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=[ax_nyq, ax_mag, ax_ph],
+    fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap),
+                 ax=[ax_nyq, *panels, ax_mag, ax_ph],
                  label="SOC (%)", shrink=0.85, pad=0.02)
     fig.suptitle(f"Raw EIS spectra (measured) — {title}", fontsize=11)
     fig.savefig(out_png, dpi=120)
