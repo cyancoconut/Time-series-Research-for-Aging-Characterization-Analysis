@@ -165,7 +165,7 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
 ├── data/   <cell>_{pulse,eis,qocv_dch,qocv_cha}_BM<n>_<SOH>SOH.parquet
 └── plots/  pulse_2rc_<cell>_BM<n>_<SOH>SOH_<direction>_<T>degreeC.png
             eis_{2zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>_<T>degreeC.png
-            eis_drt_{gamma,map}_<stem>_<direction>_<T>degreeC.png
+            eis_drt_{gamma,overlay,map}_<stem>_<direction>_<T>degreeC.png
             qocv_<T>degreeC.png
 ```
 
@@ -267,7 +267,7 @@ narrow the HF window's top instead of adding an element.
 
 **DRT** (`analysis/eis_drt.py`) — model-free companion, **run by default
 alongside every EIS fit** (`eis_drt`, default true). `fit_eis` runs it per
-bundle on the same raw spectra, writing `plots/eis_drt_{gamma,map}_<stem>_<dir>.png`
+bundle on the same raw spectra, writing `plots/eis_drt_{gamma,overlay,map}_<stem>_<dir>.png`
 and `<cell>_eis_drt_peaks.csv` (one row per peak: `tau_peak`, `gamma_peak`,
 `R_peak`, `width_decades`), plus an `eis.drt` block in `parameters.json`. It
 answers the one question an ECM cannot ask of itself — how many relaxation
@@ -275,6 +275,23 @@ processes are in the spectrum at all — and the γ plot overlays the fitted τ,
 **an ECM τ landing in a DRT *valley* rather than on a peak** flags one element
 blanketing a region with more structure than it has parameters for (which is
 what `tau1_z` does on NFPP_01; see the bandwidth note). Adds ~0.5 s per bundle.
+
+The **`overlay`** plot puts every spectrum of a sweep on *one* γ(τ) axis
+coloured by SOC, which is the only one of the three that shows how far a peak
+*walks* along τ (the `gamma` panels are separate axes; the `map` renders a peak
+as a smear of colour). Three panels: γ absolute, γ self-normalised — necessary
+because γ grows >10× toward the empty end and would otherwise flatten every
+mid-sweep curve — and a **peak track**, `tau_peak` vs SOC with marker area ∝
+`R_peak`, where a process that walks is a slanted track, one that merely grows
+is a vertical one, and a branch appearing mid-sweep is a track that starts.
+Fitted `tau1_z`/`tau2_z`/`tau_d_z` are drawn as the **band** they span over the
+sweep with the median as a line, never a single vertical line — each is itself
+SOC-dependent. The τ grid's `TAU_PAD_DECADES` padding is **greyed out** on all
+three panels: γ out there is constrained by no measured point, and with 21
+curves overlaid the resulting edge ramp otherwise reads as a peak walking off
+the axis. On NFPP_02 BM22 it reads at a glance: four tracks, stationary in τ
+above ~25 % SOC, and below it the two slowest walk right by more than a decade
+while growing — which is the same structure the parsimony guard is reacting to.
 
 **λ is fixed** (`eis_drt_lambda`, default `1e-3`), *not* the L-curve corner.
 The corner is better for a one-off investigation but is not reproducible enough
