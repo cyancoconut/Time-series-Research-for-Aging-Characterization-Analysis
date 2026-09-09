@@ -198,36 +198,49 @@ axis is scaled to the SOC 10–95 % interior because dV/dQ diverges into both
 voltage rails and would otherwise flatten the staging structure; the SOC axis
 is normalised against the full sweep so both panels line up.
 
-**EIS branch count is decided by the fit, per spectrum** — `N` in `N×ZARC` is
-not fixed. Every spectrum starts at `ZARC_COLUMN_SLOTS` (2) and
-`fit_zarc_with_parsimony` refits at N−1 whenever the richer fit comes back
-**degenerate**, keeping the simpler result unless the richer one is better on
-RMSE by more than `ZARC_PARSIMONY_RMSE_TOLERANCE` (25 %). So one sweep can hold
-both 1- and 2-arc fits, and a second branch is never fitted against structure
-that isn't there (which is how α pins to a bound and two branches swap roles
-between adjacent SOC points). `n_zarc` is what was kept, `n_zarc_requested`
-what it started from. Column slots are fixed at 2 whatever N is, so a one-arc
-spectrum leaves `R2_z`/`tau2_z`/`alpha2_z` NaN rather than changing the CSV
-schema.
+**EIS branch count is one number per run, voted by the DRT.** `N` in `N×ZARC`
+is fixed for a whole cell: every spectrum of every check-up is fitted at the
+same N, because `R1_z`/`tau1_z` of a one-branch fit and of a two-branch fit are
+not the same quantity — a count that varied by spectrum put a step into the
+vs-SOC curves that was a model change rather than a measurement, and a count
+that varied by check-up would do the same to an ageing trend.
 
-Measured on two chemistries: **LFP** (A123 APR18650M1B, one merged arc) lands
-on N=1 on all 21 spectra with 0 degenerate; **NFPP** keeps N=2 on all 21 with 1
-degenerate, reproducing the pre-change committed fit to ~1e-5 relative on every
-parameter.
+The number comes from `eis_drt.branch_count_vote`: `fit_eis` solves the DRT of
+every bundle **before** fitting (`solve_bundle` is SOC-free, so it can run that
+early), counts the γ peaks inside each spectrum's ZARC τ box, averages over the
+whole cell and rounds, clamped to `[1, ZARC_COLUMN_SLOTS]`. The same solve is
+labelled afterwards with the SOC the fits used (`label_bundle`) and plotted, so
+the DRT still costs one solve per spectrum. `eis_n_zarc` in the battery config
+pins N and skips the vote. `settings.zarc_branches` /
+`zarc_branches_source` / `zarc_branch_vote` record what happened;
+`zarc_degenerate` is reported per row and no longer changes the model.
 
-**Counting DRT peaks was tried for this and dropped** (it was the first design).
-It cannot do the job: a dispersive Warburg deposits γ mass *inside* the ZARC τ
-box that is both large (41 % of the in-band peak area on a synthetic
-single-arc spectrum; 13–36 % on the LFP sweep) and **narrower** than the real
-arc — 0.10–0.42 decades against the true arc's 1.07–1.36 — so neither an area
-threshold nor a width test separates it from a genuine second process. Measured
-head-to-head against the parsimony guard on real data it added nothing on LFP
-(identical fit) and made NFPP **worse**, wrongly dropping one spectrum to a
-single branch (mean rmse 0.0233 → 0.0320). The DRT's τ as fit seeds likewise
-changed nothing (identical rmse on both cells). The degeneracy test is also a
-property of the fit rather than of a regularisation parameter, so unlike a peak
-count it carries no λ dependence. The DRT remains a companion diagnostic (γ/map
-plots, peak CSV) — its original purpose.
+Counting only peaks **inside the τ box** is what makes the average mean
+anything — the largest feature in γ on every cell measured so far is the
+diffusion ramp, which the Warburg already models. Peaks are then re-thresholded
+against the tallest in-box peak (`VOTE_PEAK_HEIGHT_FRACTION`, 25 %), since
+`drt_peaks`' own 5 % floor is relative to the global γ max out in that ramp.
+
+**The vote disagrees with the ECM on two of the three cells measured** (λ=1e-3,
+in-box counts):
+
+| cell | mean in-box peaks | vote | what the ECM says |
+|---|---|---|---|
+| NFPP `Namey_NFPP_28Ah_02` BM22 | 2.52 | **2** (clamped from 3) | 2 — agrees |
+| LFP `A123 APR18650M1B` BM2 | 1.52 | **2** | 1 — at N=2 all 21 spectra come back degenerate |
+| NCA `VTC6` | 1.21 | **1** | 2 — 1 ZARC is 3.7× worse on RMSE |
+
+Both disagreements are near-ties that the rounding decides (1.52, 1.21). The
+cause is known and is not fixable by tuning the threshold: a dispersive Warburg
+(φ < 0.5) deposits γ mass *inside* the ZARC τ box — 41 % of the in-band peak
+area on a synthetic single-arc spectrum, 13–36 % on the LFP sweep — so it is
+counted as a process. On LFP that spurious peak sits at τ ≈ 0.3 s against a box
+top of 1.0 s and is 0.24–0.42 decades wide against the real arc's 1.07–1.36,
+but **a width filter does not rescue it**: measured across all three cells a
+≥0.5-decade cut collapses NFPP to N=1 on all 21 spectra too, because NFPP's two
+genuine arcs are themselves narrow (median in-box width 0.28 decades). Area and
+width both fail for the same reason. **Use `eis_n_zarc` on a cell whose vote you
+have checked and disagree with**; the vote is the default, not an oracle.
 
 **The ZARC and diffusion τ boxes must not touch.** `tz_hi` used to be
 `min(3/(2πf_min), DIFFUSION_TAU_BOX[0])`, i.e. capped at τ_d **exactly** — so
@@ -337,8 +350,9 @@ comes out biased by **−0.098 mΩ** (matching that number almost exactly). The
 ZARC branches must then make up the missing 0.098 mΩ: one branch cannot without
 wrecking the arc (rmse 0.0135), so two split into a fake near-identical pair
 (τ 2.2e-4 / 3.4e-4 s) and score 4× better (0.0034) — RMSE genuinely *prefers*
-the degenerate fit, which is why the parsimony guard cannot override it. With
-R0 unpinned the same spectrum fits perfectly at either N and is not degenerate.
+the degenerate fit, so no residual-based check can catch it; it shows up only
+as `zarc_degenerate`. With R0 unpinned the same spectrum fits perfectly at
+either N and is not degenerate.
 **Prototyped fix**: carry the diffusion branch in the HF stage (τ_d pinned,
 `R_d`/φ free) — R0 recovers to 1.0000 exactly, HF rmse → 0, degeneracy gone.
 Not applied: it shifts the validated #70 two-stage R0 on real data, and note
@@ -409,7 +423,8 @@ resulting edge ramp otherwise reads as a peak walking off the axis. On NFPP_02
 BM22 it reads at a glance: the curves lie on top of one another above ~25 %
 SOC, and below it the mid-frequency structure walks right by more than a decade
 (τ at the dominant peak 0.0096 s → 0.357 s, monotone) while growing ~7× — the
-same structure the parsimony guard is reacting to.
+same structure that makes the low-SOC spectra the ones most likely to come
+back `zarc_degenerate`.
 
 **λ is fixed** (`eis_drt_lambda`, default `1e-3`), *not* the L-curve corner.
 The corner is better for a one-off investigation but is not reproducible enough
@@ -533,11 +548,17 @@ corrected. Falls back to the scalar `qocv_ir_ohm` (`V ∓ I·R`, `I` read from t
 sweep) when only one branch was exported, and to no correction when neither is
 available.
 
-**Nyquist zoom insets** (`eis_vs_soc.add_hf_inset`) — the full Nyquist view is
-dominated by the low-frequency diffusion tail, collapsing the kinetics into a
-few pixels at the origin. Both Nyquist axes (`plot_nyquist_by_soc` and the
-Nyquist panel of `plot_raw_spectra`) carry two zoom insets along the
-bottom-right: **R0 region** (tight on the real-axis intercept, so each SOC
+**Nyquist zoom panels** (`eis_vs_soc.add_hf_zoom_panels`) — the full Nyquist
+view is dominated by the low-frequency diffusion tail, collapsing the kinetics
+into a few pixels at the origin. Both Nyquist axes (`plot_nyquist_by_soc` and
+the Nyquist panel of `plot_raw_spectra`) are laid out by
+`eis_vs_soc.nyquist_with_zooms`: the plane on the left of a 2×2 gridspec, two
+zooms stacked in **their own column** on the right, the region each covers
+outlined on the plane with connector lines. They were `ax.inset_axes` drawn on
+top of the plane until they were measured against a sweep whose diffusion tail
+rises right — the boxes covered the low-frequency end of every spectrum. Equal
+aspect (`adjustable="box"`) on the plane and both panels. The two are:
+**R0 region** (tight on the real-axis intercept, so each SOC
 curve's crossing of −Z_imag = 0 is readable) and **MF arc** (the whole
 mid-frequency semicircle). Widths come from the fitted ZARC diameters — R0
 from `R1_z` alone, MF from `R1_z + R2_z`, since the visible arc is both. The
@@ -585,6 +606,7 @@ the "Run all 1→2→3→4→5" chain.
 | `eis_hf_r0_f_min_hz` | Lower frequency bound of the two-stage R0 window (default 100). Needs ≥10 points above it or the stage is skipped and R0 is fitted as before. |
 | `eis_drt` | Run the DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block. Diagnostic only — it does not set the ZARC branch count. ~0.5 s per bundle. |
 | `eis_drt_lambda` | Fixed DRT regularisation (default `1e-3`). Deliberately not the L-curve corner — see the DRT section. |
+| `eis_n_zarc` | Pin the ZARC branch count for the whole run (1 or 2). Unset (default), the DRT votes it — see the branch-count section, including the two cells where the vote and the ECM disagree. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |
 | `ah_gap_threshold_s` | Optional. BRONZE Ah counter: intervals with Δt above this (seconds) are dead time between test files and book no `Ah_throughput`. Omit (default) to auto-derive the cut as `50 × median Δt` (the cell's sampling cadence) — adapts per cell, no tuning. |
