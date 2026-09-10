@@ -10,11 +10,12 @@ import logging
 import os
 
 from util import io_router
+from util.run_context import CU, RunContext
 
 _TARGET_TO_SUFFIX = {"qOCV_DCH": "qocv_dch", "qOCV_CHA": "qocv_cha"}
 
 
-def export_qocv(df_export, soh, cell, cfg, paths, minio_client):
+def export_qocv(df_export, soh, cell, cfg, paths, minio_client, run_ctx: RunContext = CU):
     stem = cell.split(".")[0]
     df_qocv = df_export[df_export["target"].isin(_TARGET_TO_SUFFIX)]
     if df_qocv.empty:
@@ -42,5 +43,7 @@ def export_qocv(df_export, soh, cell, cfg, paths, minio_client):
             group.to_parquet(local_path, index=False)
             logging.info(f"{cell}: export_qocv -> {local_path}")
         if write_minio:
-            key = io_router.export_qocv_object_key(cell, filename)
+            key = io_router.export_qocv_object_key(
+                cell, filename, root=run_ctx.export_root(cell)
+            )
             io_router.upload_parquet(minio_client, cfg, group, key, include_tag=False)

@@ -27,6 +27,8 @@ if result:
         minio_prefix,
         export_type,
         export_path,
+        test_type_filter,
+        test_name_filter,
     ) = result
     minio_prefix = (minio_prefix or "").strip().strip("/")
     if export_type in ("minio", "both", "server") and not minio_prefix:
@@ -78,6 +80,8 @@ for specimen in target_subset:
             prefix=f"{minio_prefix}/",
             include_unfinished=include_unfinished,
             update_unfinished=update_unfinished,
+            test_type_filter=test_type_filter,
+            test_name_filter=test_name_filter,
         )
 
     except Exception as e:

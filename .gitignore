@@ -1,6 +1,12 @@
 __pycache__
 /config.json
 /config_SE.json
+# Real battery configs carry MinIO credentials (minio_access_key /
+# minio_secret_key) and machine-local working_paths. Only the placeholder
+# battery_config_example.json is tracked.
+/battery_config_*_linux.json
+/battery_config_VTC*.json
+!/battery_config_example.json
 dig2mat.log
 /dist
 /env
@@ -12,3 +18,22 @@ dig2mat.log
 /ahjo-dl
 /.metabatt_ui_download.json
 /.claude/
+/src/debug_monitor.py
+# Trained classifier artifacts live under the data folder
+# (<working_path>/60_classifier/models/); the repo /models/ is only the
+# fallback when working_path is unset and must not be committed.
+/models/
+# Generated analysis plots
+/plots/
+
+# LaTeX build artifacts
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.out
+paper/main.pdf
+paper/*.spl
+paper/build*.log

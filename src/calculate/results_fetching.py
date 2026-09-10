@@ -22,6 +22,8 @@ class calculation:
         qocv_current_tolerance=0.01,
         restore_current_tolerance=0.05,
         pulse_duration_tolerance=1.08,
+        qocv_std_tolerance=0.002,
+        features=None,
     ):
 
         self.qOCV_CRate = qOCV_CRate
@@ -36,6 +38,28 @@ class calculation:
         self.qocv_current_tolerance = qocv_current_tolerance
         self.restore_current_tolerance = restore_current_tolerance
         self.pulse_duration_tolerance = pulse_duration_tolerance
+        # Max current std for a qOCV, as a C-rate (fraction of Nom_Capacity).
+        # The absolute 0.001 A cap it replaces did not scale with cell size: on
+        # a ~11 Ah cell even a clean C/20 sweep has std ~0.0014 A and a harmless
+        # interior low-current dip lifts it further. As a C-rate this passes a
+        # constant-current sweep on any cell while still rejecting a varying
+        # load (a pulse train's std is ~its mean current, far above this).
+        self.qocv_std_tolerance = qocv_std_tolerance
+        # Per-ID lookup of the precomputed segment features (trimmed [2:-1] +
+        # normalized ÷ Nom_Capacity in create_features). The qOCV current guard
+        # reads from here so it sees the same statistics as the rest of the
+        # pipeline instead of recomputing on the untrimmed segment, where
+        # stationary edge rows inflate the std past the cap and silently drop a
+        # valid qOCV (see _qocv_current_amps).
+        self.feature_lookup = None
+        if features is not None and "ID" in getattr(features, "columns", []):
+            cols = [
+                c
+                for c in ("Current_mean", "Current_std", "abs_Current_mean")
+                if c in features.columns
+            ]
+            if cols:
+                self.feature_lookup = features.set_index("ID")[cols].to_dict("index")
 
     def get_duration(self, df):
         # in seconds
@@ -55,37 +79,74 @@ class calculation:
         AhThroughput = AhThroughput - min(AhThroughput)
         return AhThroughput[-1]
 
-    def fetch_qOCV(self, group, ID):
-        # when current mean is smaller than C/15, and the std is small, this must be a attempted qOCV measurement
-        if (
-            abs(group["Current"].mean()) < (self.qOCV_CRate * self.Nom_Capacity) + self.qocv_current_tolerance
-        ) & (abs(group["Current"].std()) < 1 / 1000):
-            calculated_capacity = self.Ah_calculation(group)
-            if (
-                calculated_capacity < self.Nom_Capacity * 0.5
-                or calculated_capacity > self.Nom_Capacity * 1.05
-            ):
-                print("Outlier found at ID: ", ID, "Ah:", calculated_capacity)
-                group["target"] = "-1"
-            else:
+    def _qocv_current_amps(self, group, ID):
+        """Return ``(|mean|, std)`` of the segment current in **Amps** for the
+        qOCV guard.
 
-                if np.sign(group["Current"].iloc[-1]) == 1:
-                    if group["target"].iloc[-1] == "qOCV_CHA":
-                        print("qOCV already added at ID: ", ID)
-                    else:
-                        group["target"] = "qOCV_CHA"
-                        print("Added qOCV with Capacity: ", calculated_capacity)
+        Prefers the precomputed feature table: ``create_features`` computes the
+        current statistics on the trimmed ``[2:-1]`` window (dropping the
+        "faulty stationary values" at the segment edges) and normalizes them by
+        ``Nom_Capacity``. Multiplying back by ``Nom_Capacity`` recovers Amps, so
+        the guard is fed the same trimmed statistics the rest of the pipeline
+        uses — keeping qOCV DCH/CHA symmetric. Falls back to recomputing on the
+        same trimmed window when no feature row is available (legacy/notebook
+        callers without ``features``).
+        """
+        feats = self.feature_lookup.get(ID) if self.feature_lookup else None
+        if feats is not None:
+            abs_mean = feats.get("abs_Current_mean")
+            if abs_mean is None or pd.isna(abs_mean):
+                cm = feats.get("Current_mean")
+                abs_mean = abs(cm) if cm is not None and pd.notna(cm) else None
+            std = feats.get("Current_std")
+            if (
+                abs_mean is not None
+                and pd.notna(abs_mean)
+                and std is not None
+                and pd.notna(std)
+            ):
+                return abs_mean * self.Nom_Capacity, std * self.Nom_Capacity
+
+        # Fallback: recompute on the trimmed window (mirror create_features).
+        current = group["Current"]
+        trimmed = current.iloc[2:-1]
+        if len(trimmed) == 0:
+            trimmed = current
+        return abs(trimmed.mean()), trimmed.std()
+
+    def fetch_qOCV(self, group, ID):
+        # A qOCV is a steady sweep at the configured rate: its mean current sits
+        # in a two-sided band around qOCV_CRate x Nom_Capacity, and its std is
+        # small. The band is two-sided because the upper bound alone admits
+        # anything *below* the rate — including a segment at exactly 0 A. Rest
+        # / EIS-dwell segments mislabelled QOCV* pass an upper-bound-only test
+        # trivially (0 < i_nom, std 0 < cap) and then fall through the
+        # sign(0) != 1 branch to "qOCV_DCH", producing a bundle with zero
+        # current, zero integrated capacity and no sweep at all.
+        i_nom = self.qOCV_CRate * self.Nom_Capacity
+        abs_current_mean, current_std = self._qocv_current_amps(group, ID)
+        if (
+            (abs_current_mean > i_nom - self.qocv_current_tolerance)
+            & (abs_current_mean < i_nom + self.qocv_current_tolerance)
+        ) & (abs(current_std) < self.qocv_std_tolerance * self.Nom_Capacity):
+            calculated_capacity = self.Ah_calculation(group)
+            if np.sign(group["Current"].mean()) == 1:
+                if group["target"].iloc[-1] == "qOCV_CHA":
+                    print("qOCV already added at ID: ", ID)
                 else:
-                    if group["target"].iloc[-1] == "qOCV_DCH":
-                        print("qOCV already added at ID: ", ID)
-                    else:
-                        group["target"] = "qOCV_DCH"
-                        print(
-                            "Added qOCV at ID ",
-                            ID,
-                            " with Capacity: ",
-                            calculated_capacity,
-                        )
+                    group["target"] = "qOCV_CHA"
+                    print("Added qOCV with Capacity: ", calculated_capacity)
+            else:
+                if group["target"].iloc[-1] == "qOCV_DCH":
+                    print("qOCV already added at ID: ", ID)
+                else:
+                    group["target"] = "qOCV_DCH"
+                    print(
+                        "Added qOCV at ID ",
+                        ID,
+                        " with Capacity: ",
+                        calculated_capacity,
+                    )
         else:
             group["target"] = "-1"
         return group
@@ -102,29 +163,13 @@ class calculation:
     def fetch_capacity(self, group, ID):
         calculated_capacity = self.Ah_calculation(group)
         print("Calculating Capacity at ID: ", ID, calculated_capacity)
-        if (
-            calculated_capacity < self.Nom_Capacity * 0.5
-            or calculated_capacity > self.Nom_Capacity * 1.05
-        ):
-            group["Capacity_py"] = np.nan
-            print("Outlier found at ID: ", ID, "Ah:", calculated_capacity)
-            group["target"] = "-1"
-
-        else:
-            group["Capacity_py"] = calculated_capacity
-            group["target"] = "CAP"
+        group["Capacity_py"] = calculated_capacity
+        group["target"] = "CAP"
         return group
 
     def fetch_pulse(self, group, ID):
-        duration = calculation.get_duration(self, group)
-        if (
-            duration < (self.pulse_type * self.target_pulse_duration) * self.pulse_duration_tolerance
-        ):
-            print("Pulse labeled at ID: ", ID)
-            group["target"] = "PUL"
-        else:
-            print("Outlier found at ID: ", ID, duration)
-            group["target"] = "-1"
+        print("Pulse labeled at ID: ", ID)
+        group["target"] = "PUL"
         return group
 
     def update_qOCV(self):

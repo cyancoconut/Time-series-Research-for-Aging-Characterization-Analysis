@@ -1,21 +1,28 @@
 import os
+import re
 import glob
 import json
 import logging
+import tempfile
 import traceback
 from contextlib import nullcontext
 
 import pandas as pd
 
 from dismember.dismember_raw_cell import dismember_raw_cell, processing_procedure_filter
+from util.procedure_filter import as_filter_list
 from feature_extraction.create_features import create_features
 from cluster import model_and_supervise, post_cluster_filter
 from cluster.post_cluster_filter import ClusterNotFoundException
+from cluster.predict_classifier import predict_targets
+from cluster.train_classifier import bootstrap_leftover_labels
 from calculate import results_fetching
 from output.export_pulse import export_pulse
 from output.export_qocv import export_qocv
+from output.export_eis import export_eis
 from output.export_capacity import export_capacity
 from util import io_router
+from util.run_context import CU, RunContext
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -53,7 +60,12 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = False):
+def run_pipeline(
+    cfg: dict,
+    target_specimen: list = None,
+    overwrite: bool = False,
+    run_ctx: RunContext = CU,
+):
     working_path = cfg.get("working_path")
     download_from = cfg.get("download_from", "local")
     upload_to = cfg.get("upload_to", "local")
@@ -63,11 +75,11 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
     )
 
     if download_from == "minio":
-        cells = io_router.list_bronze_cells(minio_client, cfg)
+        cells = io_router.list_bronze_cells(minio_client, cfg, layer=run_ctx.bronze_layer)
     else:
         if not working_path:
             raise ValueError("working_path required when download_from='local'")
-        cells = glob.glob1(os.path.join(working_path, "BRONZE_CU"), "*.parquet")
+        cells = glob.glob1(os.path.join(working_path, run_ctx.bronze_layer), "*.parquet")
 
     if target_specimen:
         cells = [c for c in cells if any(t in c for t in target_specimen)]
@@ -81,13 +93,13 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
 
         # Local skip-check only applies when we'd write a local GOLD file
         if io_router.writes_local(cfg) and working_path and not overwrite:
-            gold_path = _build_paths(cell, working_path)["gold"]
+            gold_path = _build_paths(cell, working_path, run_ctx=run_ctx)["gold"]
             if os.path.exists(gold_path):
                 logging.info(f"Skipping {cell} — local GOLD already exists")
                 continue
 
         try:
-            _process_cell(cell, cfg, minio_client, exceptions)
+            _process_cell(cell, cfg, minio_client, exceptions, run_ctx=run_ctx)
             processed += 1
         except Exception as e:
             logging.warning(f"{cell}: {type(e).__name__}: {e}")
@@ -100,21 +112,60 @@ def run_pipeline(cfg: dict, target_specimen: list = None, overwrite: bool = Fals
     return exceptions
 
 
-def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
+def _interpret_x_silver(X_silver, cell, cfg):
+    """Optional LLM cluster interpretation, run inline on the in-memory
+    per-segment table.
+
+    Adds ``llm_label`` / ``llm_confidence`` / ``llm_rationale`` columns in
+    place — augment-only: ``target``, ``cluster_id`` and every numeric column
+    are untouched, so GOLD (built from ``df_silver``, which has no ``llm_*``
+    columns) is unaffected. This is the same labeling as
+    :mod:`cluster.interpret_clusters`, folded into the pipeline so the labels
+    land directly in the ``with_features_post_labeled`` CSV the classifier
+    trains on. Gated by ``cfg['llm_interpret']`` (HDBSCAN path only).
+    """
+    from cluster.interpret_clusters import _add_bootstrap_column, interpret_cell
+    from util.llm_client import make_llm_client
+
+    if "cluster_id" not in X_silver.columns:
+        logging.warning(f"{cell}: no cluster_id — skipping LLM interpretation")
+        return
+    n_clusters = X_silver["cluster_id"].nunique(dropna=False)
+    logging.info(f"{cell}: LLM-interpreting {n_clusters} clusters")
+    client = make_llm_client(cfg)
+    _add_bootstrap_column(X_silver)
+    interpret_cell(X_silver, client, cache={})
+    X_silver.drop(columns=["bootstrap_label"], inplace=True, errors="ignore")
+
+
+def _process_cell(
+    cell: str, cfg: dict, minio_client, exceptions: dict, run_ctx: RunContext = CU
+):
     working_path = cfg.get("working_path")
     download_from = cfg.get("download_from", "local")
 
-    paths = _build_paths(cell, working_path) if working_path else None
+    paths = (
+        _build_paths(
+            cell,
+            working_path,
+            classifier=bool(cfg.get("classifier_model_path")),
+            run_ctx=run_ctx,
+        )
+        if working_path
+        else None
+    )
     if paths and io_router.writes_local(cfg):
         os.makedirs(os.path.dirname(paths["gold"]), exist_ok=True)
 
     # Procedure-filter gate: peek at just the Prozedur column before pulling
     # the full bronze payload. On MinIO this uses an HTTP range-read so a
     # filtered-out cell never triggers fetch_bronze's full-file download.
-    procedure_filter = cfg.get("procedure_filter", None)
+    procedure_filter = cfg.get(run_ctx.procedure_filter_key, None)
     if procedure_filter is not None:
         if download_from == "minio":
-            with io_router.open_bronze_range(minio_client, cfg, cell) as src:
+            with io_router.open_bronze_range(
+                minio_client, cfg, cell, layer=run_ctx.bronze_layer
+            ) as src:
                 matched = processing_procedure_filter(src, procedure_filter)
         else:
             matched = processing_procedure_filter(paths["bronze"], procedure_filter)
@@ -125,21 +176,24 @@ def _process_cell(cell: str, cfg: dict, minio_client, exceptions: dict):
             return
 
     if download_from == "minio":
-        bronze_ctx = io_router.fetch_bronze(minio_client, cfg, cell)
+        bronze_ctx = io_router.fetch_bronze(
+            minio_client, cfg, cell, layer=run_ctx.bronze_layer
+        )
     else:
         bronze_ctx = nullcontext(paths["bronze"])
 
     with bronze_ctx as bronze_path:
         return _process_cell_inner(
-            cell, cfg, bronze_path, paths, minio_client, exceptions
+            cell, cfg, bronze_path, paths, minio_client, exceptions, run_ctx=run_ctx
         )
 
 
-def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions):
-    working_path = cfg.get("working_path")
+def _process_cell_inner(
+    cell, cfg, bronze_path, paths, minio_client, exceptions, run_ctx: RunContext = CU
+):
     # --- preSILVER ---
     logging.info(f"{cell}: dismembering")
-    procedure_filter = cfg.get("procedure_filter", None)
+    procedure_filter = cfg.get(run_ctx.procedure_filter_key, None)
     dismembered_df = dismember_raw_cell(
         cell,
         bronze_path,
@@ -155,10 +209,12 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     _validate(dismembered_df, "preSILVER")
 
     n_progs = 0
-    if procedure_filter is not None:
+    filters = as_filter_list(procedure_filter)
+    if filters is not None:
+        pattern = "|".join(re.escape(f) for f in filters)
         n_progs = int(
             dismembered_df.groupby("BM_Programm")["Prozedur"]
-            .apply(lambda x: x.str.contains(procedure_filter, na=False).any())
+            .apply(lambda x: x.str.contains(pattern, na=False, regex=True).any())
             .sum()
         )
     else:
@@ -171,14 +227,12 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     X_features, count = create_features(
         dismembered_df,
         cell,
-        working_path,
         exceptions,
         cfg["v_max"],
         cfg["v_min"],
         cfg["v_nom"],
         cfg["nom_capacity"],
         cfg["feature_columns"],
-        overwrite=1,
     )
     _validate(X_features, "features")
 
@@ -206,26 +260,58 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         cfg.get("tolerances", {}).get("qocv_duration_tolerance", 1.2),
     )
 
-    try:
-        df_silver, X_silver = _run_clustering(
-            dismembered_df,
+    classifier_path = cfg.get("classifier_model_path")
+    if classifier_path:
+        meta_path = cfg.get(
+            "classifier_meta_path",
+            os.path.splitext(classifier_path)[0] + "_meta.json",
+        )
+        classifier_path, meta_path = _resolve_classifier_paths(
+            cfg, minio_client, classifier_path, meta_path, cell
+        )
+        logging.info(f"{cell}: classifying segments via {classifier_path}")
+        X_silver = predict_targets(
             X_features,
-            cell,
-            exceptions,
-            count,
-            hdbscan_l1,
-            cfg["hdbscan_para_layer_2"],
-            post_filter,
+            classifier_path,
+            meta_path,
+            cap_rate=cfg.get("cap_rate"),
+            qocv_rate=cfg.get("qocv_crate"),
         )
-    except ClusterNotFoundException as e:
-        logging.warning(
-            f"{cell}: no proper checkup detected (no CAP cluster: {e}) — skipping GOLD"
-        )
-        return
+        df_silver = model_and_supervise.merge_target(dismembered_df, X_silver)
+        for col in df_silver.columns:
+            if df_silver[col].dtype == "object":
+                df_silver[col] = df_silver[col].astype(str)
+    else:
+        try:
+            df_silver, X_silver = _run_clustering(
+                dismembered_df,
+                X_features,
+                cell,
+                exceptions,
+                count,
+                hdbscan_l1,
+                cfg["hdbscan_para_layer_2"],
+                post_filter,
+            )
+        except ClusterNotFoundException as e:
+            logging.warning(
+                f"{cell}: no proper checkup detected (no CAP cluster: {e}) — skipping GOLD"
+            )
+            return
 
     _validate(df_silver, "silver")
 
-    _write_x_silver(X_silver, cell, cfg, paths, minio_client)
+    # Label-only LLM interpretation route: add llm_* to the per-segment table,
+    # write the CSV, and stop. No GOLD, no capacity/pulse/qOCV exports — the sole
+    # output is the with_features_post_labeled CSV the classifier trains on.
+    # HDBSCAN path only (the classifier route's CSV is not training data).
+    if cfg.get("llm_interpret") and not classifier_path:
+        _interpret_x_silver(X_silver, cell, cfg)
+        _write_x_silver(X_silver, cell, cfg, paths, minio_client, run_ctx=run_ctx)
+        logging.info(f"{cell}: llm_interpret route — wrote CSV with llm_* only, skipping GOLD/exports")
+        return
+
+    _write_x_silver(X_silver, cell, cfg, paths, minio_client, run_ctx=run_ctx)
 
     # --- GOLD ---
     logging.info(f"{cell}: calculating results")
@@ -248,6 +334,10 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         pulse_duration_tolerance=cfg.get("tolerances", {}).get(
             "pulse_duration_tolerance", 1.08
         ),
+        qocv_std_tolerance=cfg.get("tolerances", {}).get(
+            "qocv_std_tolerance", 0.002
+        ),
+        features=X_silver,
     )
     df_gold = df_silver.copy()
     df_gold.update(calc.update_pulse())
@@ -257,7 +347,23 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
     # Propagate final targets back to X_silver and re-save
     target_map = df_gold.groupby("ID")["target"].first()
     X_silver["target"] = X_silver["ID"].map(target_map).fillna(X_silver["target"])
-    _write_x_silver(X_silver, cell, cfg, paths, minio_client)
+
+    # HDBSCAN path: weak-label the leftover raw clusters (PREP_CHA / SOC_ADJUST /
+    # -1) in place of the stringified cluster ids, so the training CSV and GOLD
+    # carry named labels instead of raw clusters. The classifier path already
+    # emits these directly, so skip it there. cluster_id keeps the raw cluster.
+    if not classifier_path:
+        bootstrap_leftover_labels(X_silver)
+        leftover_map = X_silver.set_index("ID")["target"]
+        df_gold["target"] = df_gold["ID"].map(leftover_map).fillna(df_gold["target"])
+
+    _write_x_silver(X_silver, cell, cfg, paths, minio_client, run_ctx=run_ctx)
+
+    # Both paths continue to GOLD. The classifier is a drop-in for HDBSCAN: its
+    # segment CSV is namespaced under 60_classifier/ (kept out of the training
+    # set), but GOLD + capacity/pulse/qOCV exports land in the shared locations,
+    # so a classifier run produces the same downstream outputs as an HDBSCAN run
+    # (and overwrites them for that cell).
 
     # TODO: consider moving the labeling and schedule preparation steps to a separate visualization module that takes the GOLD output as input, to keep the core pipeline focused on data processing and calculation. For now, we'll include it here for simplicity.
     # try:
@@ -271,17 +377,26 @@ def _process_cell_inner(cell, cfg, bronze_path, paths, minio_client, exceptions)
         if df_gold[col].dtype == "object":
             df_gold[col] = df_gold[col].astype(str)
 
-    _write_gold(df_gold, cell, cfg, paths, minio_client)
+    if cfg.get("export_gold", True):
+        _write_gold(df_gold, cell, cfg, paths, minio_client, run_ctx=run_ctx)
+    else:
+        logging.info(f"{cell}: export_gold=false — skipping GOLD write")
 
     df_export = df_gold[
         df_gold["target"].isin(["CAP", "PUL", "qOCV_DCH", "qOCV_CHA", "PAU"])
     ]
     soh = _build_soh_map(df_export, cfg["nom_capacity"])
-    export_capacity(df_export, soh, cell, cfg, paths, minio_client)
-    if cfg.get("export_pulse"):
-        export_pulse(df_export, soh, cell, cfg, paths, minio_client)
-    if cfg.get("export_qocv"):
-        export_qocv(df_export, soh, cell, cfg, paths, minio_client)
+    export_capacity(df_export, soh, cell, cfg, paths, minio_client, run_ctx=run_ctx)
+    if cfg.get("export_pulse") or run_ctx.force_exports:
+        export_pulse(
+            df_export, soh, cell, cfg, paths, minio_client, bronze_path, run_ctx=run_ctx
+        )
+    if cfg.get("export_qocv") or run_ctx.force_exports:
+        export_qocv(df_export, soh, cell, cfg, paths, minio_client, run_ctx=run_ctx)
+    if cfg.get("export_eis") or run_ctx.force_exports:
+        # df_gold (not df_export): EIS spectra are matched to the cell's EIS-
+        # labelled segments, which df_export filters out.
+        export_eis(df_gold, soh, cell, cfg, paths, minio_client, run_ctx=run_ctx)
 
 
 def _build_soh_map(df_export, nom_capacity):
@@ -293,22 +408,73 @@ def _build_soh_map(df_export, nom_capacity):
     return soh
 
 
-def _write_x_silver(df, cell, cfg, paths, minio_client):
+def _resolve_classifier_paths(cfg, minio_client, model_path, meta_path, cell):
+    """Ensure the classifier model + meta exist locally, fetching them from
+    MinIO (`<prefix>/60_classifier/models/<basename>`) when the given path is
+    absent and `download_from` is minio. Returns local paths (unchanged when the
+    file already exists locally; left as-is — so predict_classifier raises a
+    clear FileNotFoundError — when it is absent and MinIO is not in play)."""
+    download_from = cfg.get("download_from")
+    working_path = cfg.get("working_path")
+    cache_dir = None
+
+    def resolve(path, label):
+        nonlocal cache_dir
+        if os.path.exists(path):
+            return path
+        if download_from != "minio" or minio_client is None:
+            return path
+        if cache_dir is None:
+            cache_dir = (
+                os.path.join(working_path, "60_classifier", "models")
+                if working_path
+                else tempfile.mkdtemp(prefix="metabatt_clf_")
+            )
+            os.makedirs(cache_dir, exist_ok=True)
+        fname = os.path.basename(path)
+        local = os.path.join(cache_dir, fname)
+        if not os.path.exists(local):
+            logging.info(
+                f"{cell}: fetching classifier {label} from MinIO 60_classifier/models/{fname}"
+            )
+            data = io_router.fetch_model_bytes(minio_client, cfg, fname)
+            with open(local, "wb") as f:
+                f.write(data)
+        return local
+
+    return resolve(model_path, "model"), resolve(meta_path, "meta")
+
+
+def _write_x_silver(df, cell, cfg, paths, minio_client, run_ctx: RunContext = CU):
+    classifier = bool(cfg.get("classifier_model_path"))
+    root = run_ctx.export_root(cell)
     if io_router.writes_local(cfg) and paths:
         os.makedirs(os.path.dirname(paths["X_silver"]), exist_ok=True)
         df.to_csv(paths["X_silver"], index=False)
         logging.info(f"{cell}: X_silver -> {paths['X_silver']}")
     if io_router.writes_minio(cfg):
-        io_router.upload_csv(minio_client, cfg, df, io_router.x_silver_object_key(cell))
+        key = io_router.x_silver_object_key(cell, classifier=classifier, root=root)
+        # Rooted runs are untagged: they live beside their own data/ and plots/,
+        # not under the shared TRACY/ layer tree.
+        io_router.upload_csv(
+            minio_client, cfg, df, key, include_tag=not (classifier or root)
+        )
 
 
-def _write_gold(df, cell, cfg, paths, minio_client):
+def _write_gold(df, cell, cfg, paths, minio_client, run_ctx: RunContext = CU):
+    root = run_ctx.export_root(cell)
     if io_router.writes_local(cfg) and paths:
         os.makedirs(os.path.dirname(paths["gold"]), exist_ok=True)
         df.to_parquet(paths["gold"], index=False)
         logging.info(f"{cell}: GOLD -> {paths['gold']}")
     if io_router.writes_minio(cfg):
-        io_router.upload_parquet(minio_client, cfg, df, io_router.gold_object_key(cell))
+        io_router.upload_parquet(
+            minio_client,
+            cfg,
+            df,
+            io_router.gold_object_key(cell, root=root),
+            include_tag=not root,
+        )
 
 
 def _run_clustering(
@@ -369,6 +535,11 @@ def _run_clustering(
         capacity_cluster = df_clustered_filtered
         df_clustered = model_and_supervise.merge_target(df_l1, X_clustered)
 
+    # Snapshot the raw HDBSCAN cluster label per ID before add_pulse_qocv_and_concat
+    # rewrites `target` to CAP*/PUL*/QOCV*. Used downstream as the stable groupby
+    # key for per-cluster feature aggregation.
+    cluster_id_map = X_clustered.set_index("ID")["target"]
+
     X_final = model_and_supervise.add_pulse_qocv_and_concat(
         post_filter,
         cluster_means_l1,
@@ -377,6 +548,19 @@ def _run_clustering(
         X_clustered,
         dismembered_df,
     )
+    X_final["cluster_id"] = X_final["ID"].map(cluster_id_map)
+
+    # Union back the segments that concat_clusters dropped (non-CAP/PUL/QOCV
+    # clusters — prep CHA/DCH, SOC adjusts, off-spec qOCV, etc.) so X_silver
+    # contains every segment. These rows keep their raw HDBSCAN integer as
+    # target; cluster_id matches. Provides the negative-class examples that a
+    # learned cluster/segment classifier needs.
+    dropped_mask = ~X_clustered["ID"].isin(X_final["ID"])
+    if dropped_mask.any():
+        X_dropped = X_clustered.loc[dropped_mask].copy()
+        X_dropped["cluster_id"] = X_dropped["ID"].map(cluster_id_map)
+        X_final = pd.concat([X_final, X_dropped], ignore_index=True)
+
     df_final = model_and_supervise.merge_target(df_clustered, X_final)
 
     # Parquet requires string object columns
@@ -387,17 +571,47 @@ def _run_clustering(
     return df_final, X_final
 
 
-def _build_paths(cell: str, working_path: str) -> dict:
+def _build_paths(
+    cell: str, working_path: str, classifier: bool = False, run_ctx: RunContext = CU
+) -> dict:
     stem = cell.split(".")[0]
+    bronze = os.path.join(working_path, run_ctx.bronze_layer, cell)
+
+    export_root = run_ctx.export_root(cell)
+    if export_root:
+        # Characterization: every artefact under one per-cell root, so a para
+        # run never collides with the CU GOLD / capacity CSV of the same cell.
+        base = os.path.join(working_path, *export_root.split("/"))
+        data = os.path.join(base, "data")
+        return {
+            "bronze": bronze,
+            "X_silver": os.path.join(base, "with_features_post_labeled.csv"),
+            "gold": os.path.join(base, "GOLD.parquet"),
+            "export_pulse_dir": data,
+            "export_eis_dir": data,
+            "export_qocv_dir": data,
+            "export_capacity_dir": base,
+            "root": base,
+        }
+
+    # The classifier path's CSVs are *not* valid training data, so they are
+    # routed to 60_classifier/ (away from the HDBSCAN with_features_post_labeled/
+    # that train_classifier reads) — keeping the two label sets side by side and
+    # the training set uncontaminated.
+    x_silver_dir = (
+        os.path.join("60_classifier", "with_features_post_labeled")
+        if classifier
+        else "with_features_post_labeled"
+    )
     return {
-        "bronze": os.path.join(working_path, "BRONZE_CU", cell),
-        "X_silver": os.path.join(
-            working_path, "with_features_post_labeled", stem + ".csv"
-        ),
+        "bronze": bronze,
+        "X_silver": os.path.join(working_path, x_silver_dir, stem + ".csv"),
         "gold": os.path.join(working_path, "GOLD", cell),
         "export_pulse_dir": os.path.join(working_path, "20_export_pulse", stem),
+        "export_eis_dir": os.path.join(working_path, "25_export_eis", stem),
         "export_qocv_dir": os.path.join(working_path, "30_export_qocv", stem),
         "export_capacity_dir": os.path.join(working_path, "40_capacity_monitore"),
+        "root": None,
     }
 
 
@@ -414,8 +628,35 @@ if __name__ == "__main__":
         action="store_true",
         help="Reprocess cells even if GOLD already exists",
     )
+    parser.add_argument(
+        "--interpret",
+        action="store_true",
+        help="After HDBSCAN, LLM-label each cluster into the per-segment CSV "
+             "(llm_* columns, label-only — skips GOLD/exports). Forces the "
+             "HDBSCAN path and sets config 'llm_interpret'.",
+    )
+    parser.add_argument(
+        "--clustering",
+        choices=["auto", "hdbscan", "classifier"],
+        default="auto",
+        help="Clustering path: 'auto' (config classifier_model_path decides), "
+             "'hdbscan' (force HDBSCAN, ignore classifier_model_path), or "
+             "'classifier' (require classifier_model_path).",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+
+    # Path override: let the CLI/UI force HDBSCAN even when the config names a
+    # classifier model (or require the classifier).
+    if args.clustering == "hdbscan":
+        cfg["classifier_model_path"] = None
+    elif args.clustering == "classifier" and not cfg.get("classifier_model_path"):
+        parser.error("--clustering classifier needs classifier_model_path in the config")
+
+    if args.interpret:
+        # Interpretation names HDBSCAN clusters, so it always runs the HDBSCAN path.
+        cfg["llm_interpret"] = True
+        cfg["classifier_model_path"] = None
 
     run_pipeline(cfg, target_specimen=args.cells, overwrite=args.overwrite)

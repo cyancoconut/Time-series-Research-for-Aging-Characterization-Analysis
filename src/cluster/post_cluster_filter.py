@@ -349,6 +349,16 @@ class cluster_filter:
             df_capacity_filtered, dismembered_df
         )
 
+        # Demote CAP* candidates that failed the temperature / C-rate / previous-
+        # voltage filters back to leftover (-1). The "CAP*" label was written in
+        # place on df_final above, so without this the rejected rows keep "CAP*"
+        # when main.py unions dropped segments back from this same frame — and
+        # update_capacity would then calculate every candidate, not the filtered
+        # subset. cluster_id is snapshotted before this mutation, so provenance
+        # is preserved.
+        rejected_cap = df_capacity.index.difference(df_capacity_filtered.index)
+        df_final.loc[rejected_cap, "target"] = "-1"
+
         df_result_filtered = pd.concat(
             [df_capacity_filtered, df_pulse, df_qocv], axis=0
         )

@@ -1,0 +1,1168 @@
+%% ===================================================================
+%% Signal-based decomposition of battery check-up tests
+%% Target: Journal of Power Sources / Journal of Energy Storage
+%% Class:  elsarticle (Elsevier). Install via TeX Live `elsarticle`,
+%%         or start from the Overleaf "Elsevier article" template.
+%% Build:  latexmk -pdf main.tex
+%% ===================================================================
+\documentclass[preprint,3p,number]{elsarticle}
+
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{url}
+
+\sisetup{detect-all, group-separator={\,}}
+
+%% ---- draft scaffolding -------------------------------------------
+%% Every unrun experiment is wrapped in \todobox so it is impossible to
+%% mistake a placeholder for a result. Set \drafttrue to hide them all
+%% before circulating externally.
+\newif\ifdraft\drafttrue
+\newcommand{\todobox}[2]{%
+  \ifdraft
+  \begin{center}
+  \fcolorbox{red!60!black}{red!4}{%
+    \begin{minipage}{0.94\linewidth}
+    \small\textbf{\textcolor{red!60!black}{TODO --- #1}}\\[2pt]#2
+    \end{minipage}}
+  \end{center}
+  \fi}
+\newcommand{\todo}[1]{\ifdraft\textcolor{red!60!black}{[\textbf{TODO:} #1]}\fi}
+
+\journal{Journal of Power Sources}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Signal-based decomposition of battery check-up tests without a
+step-by-step protocol description: chemistry-portable identification of
+capacity, pulse and quasi-OCV segments across NMC, LFP and sodium-ion cells}
+
+\author[isea]{\todo{author list}}
+\address[isea]{\todo{affiliation}}
+
+\begin{abstract}
+Reference performance tests (RPTs, or check-ups) are the measurements that make
+an ageing dataset interpretable: they contain the capacity test, the resistance
+pulses and the quasi-open-circuit-voltage sweep from which state of health,
+internal resistance and the OCV curve are derived. Yet the software that
+processes public ageing datasets routinely discards them, because locating them
+requires knowing the test protocol. Existing tools resolve this by trusting
+metadata: either the cycler's own cycle index, or an experimenter-authored
+step-index map that assigns a meaning to every step of every protocol. Both tie
+the analysis to one laboratory's bookkeeping.
+%
+We present a method that locates and decomposes check-up tests from the
+measured signal, requiring only a small set of physical cell and test
+parameters --- voltage limits, nominal capacity and the target C-rates --- and
+neither a step-by-step protocol description nor per-source code. The method
+segments a raw time series into procedures, describes each segment with
+scale-normalised features, and assigns capacity (CAP), pulse (PUL) and
+quasi-OCV (qOCV) labels.
+%
+We report four experiments. First, an ablation over the segmentation stage shows
+that the protocol columns it currently reads are not load-bearing: the cycler's
+state column is redundant with the sign of the measured current to
+\SI{0.0008}{\percent} of \num{131442261} samples, and boundary placement driven
+by current alone recovers \SI{100}{\percent} of check-up segments intact --- no
+segment merged or lost --- on nickel-manganese-cobalt (NMC), lithium iron
+phosphate (LFP) and sodium-ion (SIB) cells. Second, a leave-one-chemistry-out
+transfer test shows that a classifier trained on NMC alone recovers every
+capacity test on unseen LFP and sodium-ion cells given only their physical
+parameters, provided its label space is scale-free; a classifier trained on
+absolute C-rates fails completely on LFP.
+%
+Third, on \num{210} check-ups the method detects every one that is not a
+fragmentary or aborted file, with no false detections on any chemistry, while a
+fixed-current detector of the kind used to discard RPTs in existing pipelines
+matches it on the chemistry it was calibrated for and finds nothing at all on
+either unseen one. Under controlled folds the difference is attributable to the
+label space rather than to the features: held-out capacity recall is
+\SI{0}{\percent} when the capacity C-rate must be learned and \SI{100}{\percent}
+when it is supplied as configuration, for every feature set tried. Fourth, on
+\num{177} reference tests from two independent laboratories, given only their
+published cell parameters and no target-laboratory labels, the parameterised
+route recovers every capacity test. That experiment also exposed a latent defect
+in the unsupervised route --- a cluster-selection rule our own protocols can
+never reach, which cost \SI{90}{\percent} of one laboratory's capacity tests
+until corrected --- illustrating that cross-laboratory validation tests the
+implementation as much as the generalisation. Finally, applying the method to the
+opportunistic charging records of \num{20} on-road electric vehicles --- data
+with no protocol at all --- recovers a consistent near-full-charge population
+and reduces the scatter of capacity estimates about their ageing trend by a
+factor of \num{2.47} on every vehicle, which demonstrates the reach of the
+description while marking where the parameterised step stops applying.
+\end{abstract}
+
+\begin{keyword}
+lithium-ion batteries \sep sodium-ion batteries \sep reference performance test
+\sep check-up \sep unsupervised segmentation \sep data pipelines
+\end{keyword}
+
+\end{frontmatter}
+
+%% ===================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Battery ageing studies produce two kinds of data. The bulk of it is cycling:
+long, repetitive load profiles that age the cell. Interleaved with it, at
+intervals of days to months, sits the \emph{check-up} or reference performance
+test (RPT) --- a short, carefully specified sequence that measures the cell
+rather than ageing it. A typical check-up contains a full capacity test at a
+defined C-rate, a series of current pulses for resistance, and a low-rate
+quasi-OCV sweep. Almost every quantity a battery paper reports about degradation
+--- state of health, resistance growth, the shift of the OCV curve, differential
+voltage features --- is extracted from those few hours, not from the cycling
+around them.
+
+Locating the check-up in a raw cycler export is therefore the precondition for
+almost any downstream analysis, and it is exactly the step that current tooling
+externalises to metadata. The recently published BatteryLife benchmark
+\cite{batterylife} unifies sixteen ageing datasets, and does so with one
+preprocessing script per source; the check-ups are not analysed but
+\emph{removed}, in one case by a hard-coded current threshold, in another by
+parsing only the files whose names mark them as cycling. PyProBE
+\cite{pyprobe}, published in a software venue, takes the opposite and more
+principled route --- it models the experiment explicitly --- but requires the
+experimenter to author a step-index map (``steps 9--12 = discharge pulses'')
+for every protocol, including manual reconciliation of cycler quirks.
+
+These are not competing implementations of the same idea; they occupy different
+points on a single axis, namely \emph{how much protocol metadata is needed to
+find structure in the signal}. BatteryLife trusts the cycler's cycle index.
+PyProBE trusts a human-authored step index. Both are reasonable engineering
+choices, and both mean the analysis does not transfer to a source that indexes
+its steps differently, or at all.
+
+This paper asks whether the structure can be recovered from the measurement
+itself. Our contribution is:
+
+\begin{enumerate}
+\item A method that segments a raw check-up time series and labels its capacity,
+pulse and quasi-OCV sections using only the measured current, voltage and time,
+plus a handful of physical scalars that are printed on any cell datasheet or
+fixed by the test plan (Section~\ref{sec:method}).
+\item A measurement of how much of that method's boundary detection actually
+depends on protocol metadata, by ablating the metadata columns and quantifying
+what breaks (Section~\ref{sec:res-metadata}). This is a claim that is easy to
+assert and rarely tested; we test it.
+\item A leave-one-chemistry-out transfer study over NMC, LFP and sodium-ion
+cells (Section~\ref{sec:res-loco}), including a negative result --- a
+conventionally-trained classifier that fails on an unseen chemistry --- and the
+design property that fixes it.
+\item A controlled separation of \emph{which} design property carries that
+transfer (Section~\ref{sec:res-ablation}), and a cross-laboratory test on two
+independent external sources (Section~\ref{sec:res-external}) in which the
+same property decides between recovering all \num{177} of their reference
+tests and recovering one in ten.
+\end{enumerate}
+
+We are explicit about what is \emph{not} claimed. The method is not
+metadata-free: it requires physical cell and test parameters, listed in
+Section~\ref{sec:inputs}. The distinction we defend is between roughly five
+known scalars and a full procedural description of the experiment; we argue in
+Section~\ref{sec:discussion} that this distinction is the one that governs
+portability.
+
+%% ===================================================================
+\section{Related work}
+\label{sec:related}
+
+\todobox{Section to write}{%
+Cover, in this order: (i) public ageing datasets and their RPT content, read
+from the \emph{original} protocol documentation rather than from secondary
+processing scripts --- Pozzato and Onori \cite{pozzato}, HNEI, CALCE, Sandia
+\cite{snl}, Severson et al.\ \cite{severson}; (ii) BatteryLife
+\cite{batterylife} and PyProBE \cite{pyprobe} as the two foils, framed on the
+metadata axis of Section~\ref{sec:intro}, not as competitors on accuracy;
+(iii) prior work on unsupervised segmentation of battery time series and on
+protocol-agnostic feature extraction. Keep the framing on \emph{finding}
+structure --- neither foil is claiming to do what this method does, and saying
+so plainly is stronger than implying a deficiency.}
+
+%% ===================================================================
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem statement}
+\label{sec:inputs}
+
+Let a cell's record be a sampled time series
+\begin{equation}
+\mathcal{S} = \{(t_k,\, I_k,\, V_k,\, T_k)\}_{k=1}^{N},
+\end{equation}
+of time, current (positive on charge), terminal voltage and, where available,
+surface temperature, covering an arbitrary interleaving of ageing and check-up
+activity. Let
+\begin{equation}
+\theta = (V_{\min},\, V_{\max},\, Q_{\mathrm{nom}},\, C_{\mathrm{cap}},\,
+          C_{\mathrm{qocv}})
+\label{eq:theta}
+\end{equation}
+be the cell's physical configuration: its voltage limits and nominal capacity,
+taken from the datasheet, and the C-rates at which the test plan specifies the
+capacity test and the quasi-OCV sweep. The task is to produce a partition of
+$\mathcal{S}$ into contiguous segments $\sigma_1,\dots,\sigma_M$ and a label
+$\ell_j \in \mathcal{L} = \{\mathrm{CAP}, \mathrm{PUL}, \mathrm{qOCV},
+\mathrm{other}\}$ for each.
+
+The method is a composition of four stages,
+\begin{equation}
+\mathcal{S} \;\xrightarrow{\;\text{(i) segment}\;} \{\sigma_j\}
+  \;\xrightarrow{\;\text{(ii) describe}\;} \{\phi_j\}
+  \;\xrightarrow{\;\text{(iii) classify}\;} \{y_j\}
+  \;\xrightarrow{\;\text{(iv) resolve}\;} \{\ell_j\},
+\label{eq:pipeline}
+\end{equation}
+and its central design property is a statement about where $\theta$ is allowed
+to appear:
+
+\begin{quote}
+\emph{The configuration $\theta$ enters only the description (ii) and the
+resolution (iv). The classifier (iii) never sees it, and its label space
+contains no quantity derived from it.}
+\end{quote}
+
+Sections~\ref{sec:res-loco}--\ref{sec:res-external} show that this is what makes
+the method portable: a stage that must \emph{learn} a component of $\theta$
+cannot transfer to a cell where that component differs, whereas a stage that is
+\emph{given} it transfers by construction. The rest of this section defines the
+four stages and marks, at each, whether $\theta$ is consulted.
+
+Two further scalars govern the segmenter: $\tau_{\mathrm{pau}}$, the rest
+duration that separates one procedure from the next, and $n_{\min}$, the
+shortest segment kept. These are properties of the recording rather than of the
+cell. We use $\tau_{\mathrm{pau}} = \SI{9.9}{\minute}$ and $n_{\min} = 20$
+samples throughout, unchanged across all three chemistries and both external
+laboratories of Section~\ref{sec:res-external} (one external source uses
+$n_{\min} = 12$ for its shorter records).
+
+\subsection{Stage (i): segmentation}
+\label{sec:segmentation}
+
+A procedure boundary is placed wherever the cell's electrical \emph{state}
+changes, and wherever a rest is long enough to separate two procedures. The
+state is read from the current alone,
+\begin{equation}
+s_k =
+\begin{cases}
+\textsc{rest} & |I_k| < \varepsilon\,Q_{\mathrm{nom}},\\
+\textsc{cha}  & I_k \ge \varepsilon\,Q_{\mathrm{nom}},\\
+\textsc{dch}  & I_k \le -\varepsilon\,Q_{\mathrm{nom}},
+\end{cases}
+\label{eq:state}
+\end{equation}
+with $\varepsilon$ a dimensionless zero-current tolerance. The boundary set is
+\begin{equation}
+\mathcal{B} = \{k : s_k \neq s_{k-1}\} \;\cup\;
+              \{k : \text{a \textsc{rest} run longer than }
+                    \tau_{\mathrm{pau}}\text{ starts or ends at } k\}.
+\label{eq:boundaries}
+\end{equation}
+Segments shorter than $n_{\min}$ samples are routed to a discard bucket. The
+interior of a long rest is discarded but its first and last samples are kept, so
+that relaxation voltage and rest duration remain available to the pulse
+analysis without carrying the intervening samples.
+
+Equation~\eqref{eq:boundaries} reads no column other than $I$. Cycler exports
+normally carry a procedure name and a state label, and the implementation used
+for the results below does consult them; Section~\ref{sec:res-metadata} measures
+what that is worth and finds it is not load-bearing.
+
+\subsection{Stage (ii): segment description}
+\label{sec:features}
+
+Each segment is reduced to a fixed-length vector chosen so that two segments
+representing the same physical action on cells of different size and chemistry
+map to nearby points. This is where $\theta$ first enters, as a pair of
+normalisations: currents are divided by nominal capacity, making them C-rates,
+and voltages are mapped onto the cell's usable window,
+\begin{equation}
+\hat{I} = \frac{I}{Q_{\mathrm{nom}}},
+\qquad
+\hat{V} = \frac{V - V_{\min}}{V_{\max} - V_{\min}}.
+\label{eq:norm}
+\end{equation}
+
+Over a segment $\sigma$ of duration $\Delta t$ (minutes) the descriptor is
+\begin{equation}
+\phi(\sigma) = \bigl(
+\underbrace{\hat{I}_{\text{mean}}, \hat{I}_{\text{std}}, \hat{I}_{\max},
+            \hat{I}_{\min}, \hat{I}_{\text{range}}, |\hat{I}|_{\text{mean}}}
+           _{\text{current profile}},\;
+\underbrace{\hat{V}_{\max}, \hat{V}_{\min}, \hat{V}_{\text{range}}}
+           _{\text{voltage edges}},\;
+\underbrace{\Delta t, \log(1+\Delta t)}_{\text{duration}},\;
+\underbrace{v_{-}, \rho, q}_{\text{context}}
+\bigr).
+\label{eq:phi}
+\end{equation}
+
+The three context terms are the ones that carry the method's assumptions, and
+each answers a question the segment cannot answer alone.
+
+\paragraph{Predecessor voltage $v_{-}$.} A capacity discharge and a preparatory
+discharge look alike in isolation and differ in what preceded them: the first
+follows a full charge, the second does not. Let $\sigma_{-}$ be the most recent
+non-rest predecessor of $\sigma$, searching back at most four segments. Then
+$v_{-} = \hat{V}$ at the last sample of $\sigma_{-}$, or $-1$ if no such segment
+exists.
+
+\paragraph{Corrected swing $\rho$.} The within-segment voltage range
+understates how much state of charge a segment traversed, because relaxation
+during the preceding rest moves the open-circuit voltage before the segment
+begins. Measuring from the predecessor instead,
+\begin{equation}
+\rho =
+\begin{cases}
+\hat{V}_{\max} - v_{-} & \hat{I}_{\text{mean}} > 0 \ \text{(charge)},\\
+v_{-} - \hat{V}_{\min} & \hat{I}_{\text{mean}} < 0 \ \text{(discharge)},\\
+\hat{V}_{\text{range}} & v_{-} = -1,
+\end{cases}
+\label{eq:rho}
+\end{equation}
+so that $\rho \approx 1$ for a sweep across the full window and $\rho \approx
+\tfrac{1}{2}$ for half of it.
+
+\paragraph{Coulombic swing $q$.} The charge a segment moved, as a fraction of
+nominal capacity,
+\begin{equation}
+q = \frac{|\hat{I}|_{\text{mean}} \, \Delta t}{60},
+\label{eq:q}
+\end{equation}
+dimensionless by construction and independent of the shape of the OCV curve.
+It measures the same quantity as $\rho$ through charge rather than voltage, and
+Section~\ref{sec:res-ablation} shows it is what separates a full discharge from
+a partial one at the same C-rate.
+
+Voltage \emph{shape} descriptors (the mean and standard deviation of $\hat{V}$
+within a segment) and temperature are excluded. Both are strongly
+chemistry- and fixture-dependent, and the decisions the method has to make ---
+how far a segment swept, at what rate, after what --- are carried by the terms
+above.
+
+\subsection{Stage (iii): shape classification}
+\label{sec:labelling}
+
+The classifier maps a descriptor to a statement about what the segment
+\emph{is}, drawn from
+\begin{equation}
+\mathcal{Y} = \{\textsf{full\_charge},\ \textsf{full\_discharge},\
+\textsf{partial\_cha},\ \textsf{partial\_dch},\ \textsf{pulse},\ \textsf{other}\}.
+\label{eq:shapes}
+\end{equation}
+No member of $\mathcal{Y}$ names a rate, a capacity or a chemistry. A full
+discharge is a full discharge whether it takes one hour or two, so the class is
+populated, on any one cell, by segments spanning a range of C-rates --- which is
+precisely why a model fitted on one chemistry can recognise the same shape on
+another.
+
+Ground truth for fitting is derived from the descriptor itself,
+\begin{equation}
+y(\sigma) =
+\begin{cases}
+\textsf{pulse} & \sigma \text{ is a short excursion},\\
+\textsf{full\_charge} / \textsf{full\_discharge}
+  & \rho \ge \rho^{*},\ \operatorname{sign}(\hat{I}_{\text{mean}}) = \pm,\\
+\textsf{partial\_cha} / \textsf{partial\_dch}
+  & \rho < \rho^{*},\ \operatorname{sign}(\hat{I}_{\text{mean}}) = \pm,
+\end{cases}
+\label{eq:shapelabel}
+\end{equation}
+with $\rho^{*} = 0.9$. We fit a random forest; the model class is not the
+contribution and Section~\ref{sec:res-ablation} shows the result is insensitive
+to the feature subset. What matters is that $\mathcal{Y}$ contains nothing that
+would have to be re-learned on a new cell.
+
+We also report an unsupervised route in which this stage is replaced by
+density-based clustering of the descriptors followed by masks in the normalised
+space. It requires no labelled examples at all, which is its appeal, and
+Sections~\ref{sec:res-recall} and~\ref{sec:res-external} report where it holds
+and where it does not.
+
+\subsection{Stage (iv): resolution against the configuration}
+\label{sec:resolution}
+
+A shape becomes a check-up label by comparing the segment's \emph{measured}
+rate with the rates the configuration declares. This is arithmetic, not
+inference:
+\begin{equation}
+\ell(\sigma) =
+\begin{cases}
+\mathrm{PUL}  & y = \textsf{pulse},\\[2pt]
+\mathrm{qOCV} & y \in \{\textsf{full\_charge}, \textsf{full\_discharge}\}
+                \ \text{and}\ |\hat{I}|_{\text{mean}}
+                \le C_{\mathrm{qocv}}(1+\delta_{q}),\\[2pt]
+\mathrm{CAP}  & y = \textsf{full\_discharge}
+                \ \text{and}\
+                \bigl| |\hat{I}|_{\text{mean}} - C_{\mathrm{cap}} \bigr|
+                \le \delta_{c}\, C_{\mathrm{cap}},\\[2pt]
+\text{other}  & \text{otherwise},
+\end{cases}
+\label{eq:resolve}
+\end{equation}
+with $\delta_{c} = 0.05$ and $\delta_{q} = 0.2$. The quasi-OCV test is applied
+first; since $C_{\mathrm{qocv}} \ll C_{\mathrm{cap}}$ in any protocol that
+contains both, the two bands do not overlap.
+
+Equation~\eqref{eq:resolve} is the whole of the method's chemistry dependence
+at labelling time. Porting to a new cell means substituting its
+$C_{\mathrm{cap}}$ and $C_{\mathrm{qocv}}$ here; nothing is refitted, and no
+label from the new cell is required. Figure~\ref{fig:algorithm} states the
+composed procedure.
+
+\begin{figure}[t]
+\centering
+\fbox{\begin{minipage}{0.92\linewidth}
+\small
+\textbf{Input:} series $\mathcal{S}$; configuration $\theta$ of
+Eq.~\eqref{eq:theta}; fitted shape model $g$\\[2pt]
+\textbf{Output:} labelled segments $\{(\sigma_j, \ell_j)\}$\\[4pt]
+1\quad $s \leftarrow$ state of every sample by Eq.~\eqref{eq:state}
+        \hfill \emph{uses $Q_{\mathrm{nom}}$}\\
+2\quad $\mathcal{B} \leftarrow$ boundaries by Eq.~\eqref{eq:boundaries};
+        split $\mathcal{S}$ at $\mathcal{B}$\\
+3\quad discard segments shorter than $n_{\min}$; reduce long rests to their
+        end samples\\
+4\quad \textbf{for each} segment $\sigma_j$:\\
+5\quad\quad $\phi_j \leftarrow$ descriptor by Eqs.~\eqref{eq:norm}--\eqref{eq:q}
+        \hfill \emph{uses $V_{\min}, V_{\max}, Q_{\mathrm{nom}}$}\\
+6\quad\quad $y_j \leftarrow g(\phi_j)$
+        \hfill \emph{$\theta$ not consulted}\\
+7\quad\quad $\ell_j \leftarrow$ resolve $y_j$ by Eq.~\eqref{eq:resolve}
+        \hfill \emph{uses $C_{\mathrm{cap}}, C_{\mathrm{qocv}}$}\\
+8\quad \textbf{return} $\{(\sigma_j, \ell_j)\}$
+\end{minipage}}
+\caption{The composed method. The right-hand notes mark where the cell
+configuration $\theta$ is consulted: in the normalisation and in the
+resolution, never inside the fitted model.}
+\label{fig:algorithm}
+\end{figure}
+
+\subsection{Downstream extraction}
+
+Labelled segments feed the quantities a check-up exists to produce: capacity by
+coulomb counting the CAP segment, pulse resistance from the PUL segments and
+their adjacent rests, and the OCV curve from the qOCV branches. These are
+standard and are not a contribution of this work; they appear below only where
+they are used to validate labels.
+
+
+%% ===================================================================
+\section{Experimental data}
+\label{sec:data}
+
+\begin{table}[t]
+\centering
+\caption{Cells used. All measured at the same institute on the same cycler
+family; see Section~\ref{sec:discussion} for what this does and does not
+support.}
+\label{tab:cells}
+\begin{tabular}{llccc}
+\toprule
+Chemistry & Cell & $Q_{\mathrm{nom}}$ (\si{\ampere\hour}) & $C_{\mathrm{cap}}$ & Cells \\
+\midrule
+NMC & Sony/Murata VTC6 18650 & 3.0 & C/2 & 7 \\
+LFP & A123 APR18650M1B & 1.2 & 1C & 2 \\
+Na-ion & \todo{Hina, model} & 10.5 & C/2 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The three chemistries were chosen for what they stress. Their capacity tests run
+at different C-rates --- C/2 for NMC and sodium-ion, 1C for LFP --- and their
+cells differ in size by nearly an order of magnitude, so a method that has
+absorbed any absolute current or duration from one will fail on the others.
+That turns out to be the decisive variable (Sections~\ref{sec:res-recall}
+and~\ref{sec:res-ablation}). Sodium-ion is included because automated check-up
+decomposition for this chemistry is, to our knowledge, unreported, and because
+its differing voltage window tests whether normalisation by
+$(V_{\max}-V_{\min})$ is doing real work.
+
+We also expected LFP's flat discharge plateau to be the hard case for any
+voltage-based feature. It is not; Section~\ref{sec:res-ablation} reports the
+measurement rather than the expectation.
+
+\todo{The larger fleet (\num{200} LFP, \num{80} sodium-ion cells) exists but was
+not used here. Either bring it in --- it turns per-chemistry $n$ from 1--2 into a
+population and makes the transfer result far harder to dismiss --- or state
+plainly why a subset was used. A reviewer will notice $n=1$ for sodium-ion.}
+
+%% ===================================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{How much does segmentation depend on protocol metadata?}
+\label{sec:res-metadata}
+
+Section~\ref{sec:segmentation} places boundaries from the current alone, but the
+implementation also reads two columns the cycler writes: a procedure name and a
+state label. This section measures what they contribute.
+
+Three configurations were compared over the fleet (\num{10} cells,
+\num{131442261} samples, \num{13025} segments). \textbf{L0} is the implementation
+as shipped. \textbf{L1} removes the procedure-name rule. \textbf{L2} additionally
+replaces the state label with Eq.~\eqref{eq:state} and applies the state-change
+rule everywhere, so that no protocol column is read at all --- Eq.~\eqref{eq:boundaries}
+exactly. The ablation re-implements the segmenter, so its L0 output is verified
+against the shipped implementation sample by sample; all ten cells matched.
+
+\paragraph{The state label is redundant with the current.}
+Against Eq.~\eqref{eq:state}, \num{1100} of \num{131442261} samples disagree
+(\SI{0.0008}{\percent}). Recall of the rest class is \num{1.000} on every cell
+and precision at least \num{0.99986}, flat for $\varepsilon$ between \num{e-4}
+and \num{3e-2}. The residue is cycler bookkeeping states recorded at zero
+current, plus roughly \num{600} samples at a current zero crossing.
+
+\paragraph{The procedure name fires often and decides little.}
+A majority of its boundaries occur where no other rule fires, but
+\SIrange{81}{87}{\percent} of those cut inside a long rest or a sub-threshold
+fragment that is discarded regardless (Table~\ref{tab:rule3}).
+
+\begin{table}[t]
+\centering
+\caption{Procedure-name boundaries. ``Unique'' counts firings where no other
+rule fires; ``discarded'' counts the subset of those that cut only material the
+segmenter throws away.}
+\label{tab:rule3}
+\begin{tabular}{lrrr}
+\toprule
+Chemistry & Firings & Unique & Discarded \\
+\midrule
+NMC    & \num{2177} & \num{1242} (\SI{57.1}{\percent}) & \num{1037} (\SI{83.5}{\percent}) \\
+LFP    & \num{585}  & \num{358} (\SI{61.2}{\percent})  & \num{312} (\SI{87.2}{\percent}) \\
+Na-ion & \num{78}   & \num{16} (\SI{20.5}{\percent})   & \num{13} (\SI{81.2}{\percent}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Check-up segments survive without any protocol column.}
+Table~\ref{tab:checkup} gives the fate of every segment that the pipeline
+ultimately labels CAP, PUL or qOCV. We distinguish a segment that is
+\emph{split} --- still present, cut into pieces --- from one that is
+\emph{merged} into a neighbour or \emph{lost}, which cannot be recovered
+downstream. At L2 there are no merges and no losses on any chemistry: every
+check-up segment survives intact.
+
+\begin{table}[t]
+\centering
+\caption{Fate of check-up segments (CAP, PUL, qOCV) relative to the L0
+reference. \emph{Intact} = exact or split.}
+\label{tab:checkup}
+\begin{tabular}{lrrrrr}
+\toprule
+& & \multicolumn{2}{c}{L1 (no procedure name)} & \multicolumn{2}{c}{L2 (no protocol column)} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+Chemistry & $n$ & exact & intact & exact & intact \\
+\midrule
+NMC    & \num{3054} & \SI{89.3}{\percent} & \SI{89.3}{\percent} & \SI{99.9}{\percent} & \SI{100}{\percent} \\
+LFP    & \num{332}  & \SI{85.5}{\percent} & \SI{85.5}{\percent} & \SI{99.7}{\percent} & \SI{100}{\percent} \\
+Na-ion & \num{90}   & \SI{100}{\percent}  & \SI{100}{\percent}  & \SI{95.6}{\percent} & \SI{100}{\percent} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Every one of the \num{376} segments L1 merges is a pulse (\num{349} test,
+\num{27} restore); capacity and quasi-OCV segments never break at any level. The
+boundaries L1 loses and L2 recovers are rest-to-charge transitions following a
+rest \emph{shorter} than $\tau_{\mathrm{pau}}$: no rest-based rule can fire
+there, but the state changes, and that change is in the current. L2 therefore
+outperforms L1 while reading strictly less metadata. The protocol columns supply
+timing, not information.
+
+\subsection{Cross-chemistry transfer}
+\label{sec:res-loco}
+
+We next ask whether the \emph{labelling} stage transfers to a chemistry it has
+never seen, given only that chemistry's physical parameters and no labelled
+examples from it.
+
+The unsupervised route transfers directly. Applied to LFP with only
+Table~\ref{tab:inputs} changed, it recovers all \num{16} check-ups, yielding a
+monotonic capacity trajectory from \SI{98.3}{\percent} to \SI{60.2}{\percent} of
+nominal, with a first measured capacity of \SI{1.18}{\ampere\hour} against
+\SI{1.2}{\ampere\hour} nominal. The mechanism is that the capacity C-rate enters
+as a parameter rather than being learned: on LFP the first clustering layer
+finds no clean capacity cluster and a second, stricter layer recovers it, with
+the target rate supplied by configuration at both stages.
+
+The supervised route exposes a design failure worth reporting. A random forest
+trained on NMC and applied to LFP labels \emph{none} of the \num{16} capacity
+discharges correctly, and every check-up consequently reports no state of
+health. The cause is the C-rate: NMC capacity tests run
+at C/2 and LFP at 1C, and a model trained on absolute pipeline labels has
+learned ``capacity test'' to mean ``a full discharge at C/2''
+(Section~\ref{sec:res-ablation} isolates this under controlled folds).
+Retraining the
+same model on a scale-free description of segment shape --- full or partial,
+charge or discharge --- and resolving that description against the target cell's
+$C_{\mathrm{cap}}$ at inference recovers all \num{16}, reproducing the
+unsupervised result exactly. On sodium-ion, both routes recover all \num{6}
+check-ups.
+
+\paragraph{Why a model trained at C/2 recognises a discharge at 1C.} The
+result is initially counter-intuitive --- the model has never seen a 1C capacity
+test --- so it is worth being explicit about what changes, because nothing about
+the model, the features or the training data does. Only the question does.
+
+In the absolute space the model is asked \emph{is this the capacity test?} That
+question is rate-dependent: its ``yes'' examples all sit at a normalised current
+of \num{0.5}, so an LFP discharge at \num{1.0} is outside the class it learned
+and there is no route by which the model could know that this cell's capacity
+rate is different. In the shape space it is asked \emph{what shape is this?} ---
+a question with no rate in it. A full discharge is a full discharge whether it
+takes one hour or two, and the training class reflects that: on our fleet its
+members already span normalised currents from \num{0.05} to \num{1.0}. A 1C full
+discharge is therefore an ordinary member of a class the model learned from NMC
+and sodium-ion cells, not an extrapolation.
+
+The rate then enters exactly once, after the model has finished, as arithmetic
+rather than inference: is this segment's \emph{measured} current within
+\SI{5}{\percent} of the rate this cell's configuration declares? LFP declares
+1C and the segment measures 1C, so it resolves to a capacity test. Under the
+controlled folds of Section~\ref{sec:res-ablation} --- training on NMC and
+sodium-ion, testing on LFP --- all \num{39} LFP capacity tests are predicted
+\texttt{full\_discharge} and all \num{39} resolve correctly.
+
+The chemistry-specific quantity is never learned, so it never has to transfer.
+
+The sodium-ion result carries a caveat that must be stated with it: the
+scale-free model tags \emph{two} capacity segments per check-up in four of the
+six programmes. It resolves capacity by C-rate alone and does not test for a
+full voltage swing, so a partial discharge at the capacity rate is accepted. The
+downstream capacity calculation rejects the extras --- it requires a preceding
+full charge --- so the reported capacity is unaffected, but label precision is
+not \SI{100}{\percent}. Section~\ref{sec:res-ablation} quantifies this and shows
+the coulombic feature removes it.
+
+\todobox{Provenance}{%
+The per-cell numbers in this section come from a run of 2026-07-23 whose
+comparison artefacts were overwritten (the comparison tool writes to a fixed
+filename, so a later chemistry's run replaced the earlier one's). The
+\emph{finding} is independently reproduced under controlled folds in
+Section~\ref{sec:res-ablation}, which is the version a reader can re-run.
+Before submission, either re-run the per-cell comparison and archive it under
+per-chemistry names, or cut this section's cell-level counts and let
+Section~\ref{sec:res-ablation} carry the result. Do not present numbers whose
+artefacts no longer exist.}
+
+\subsection{Segment-type accuracy against hand labels}
+\label{sec:res-f1}
+
+\todobox{Experiment not yet run}{%
+Hand-label a stratified sample of segments per chemistry (target: a few hundred
+each, drawn across cells and ageing states, labelled by someone who did not
+build the method) and report per-class precision, recall and F1 for CAP, PUL,
+qOCV and other, for both labelling routes. This is the only place in the paper
+where the labels are compared against ground truth rather than against each
+other --- Section~\ref{sec:res-loco} compares two automated routes, which cannot
+detect an error both make. Without it, a reviewer is entitled to ask what the
+accuracy actually is.}
+
+\subsection{Check-up detection recall, and a fixed-threshold baseline}
+\label{sec:res-recall}
+
+Sections~\ref{sec:res-metadata} and~\ref{sec:res-loco} ask whether segments are
+cut and labelled correctly. This section asks the question the method exists for:
+given a cell's raw record, are the check-ups found at all?
+
+\paragraph{Ground truth.} The cycler writes one file per test, and the procedure
+name in each file's header states whether that test was a check-up. That
+assignment is made once, at ingest, and is independent of everything downstream:
+it says \emph{where the answer is}, while the method has to find the check-up
+inside the signal. Using it as ground truth to score a method that never reads
+it is therefore not circular. It is, however, weaker than a written schedule,
+and we state the limitation rather than the stronger claim: it counts check-ups
+\emph{present in the data}, so one that was scheduled but never ran, or ran but
+was never uploaded, is invisible here. Ground truth is read from the raw layer
+rather than from the segmented output, so that a programme the segmenter dropped
+entirely cannot disappear from the denominator.
+
+A check-up counts as \emph{detected} when the pipeline produced a capacity value
+for it, and as \emph{complete} when it also yielded a pulse and both quasi-OCV
+branches.
+
+\paragraph{Baseline.} The foils locate the capacity test with a fixed absolute
+current --- in BatteryLife's MICH script, a hard-coded threshold near
+\SI{2.37}{\ampere}, used to \emph{delete} the RPT \cite{batterylife}. We
+reproduce the structure of that approach rather than its constant: a single
+absolute current, calibrated on one chemistry (NMC, whose capacity test is C/2
+on a \SI{3.0}{\ampere\hour} cell, i.e.\ \SI{1.5}{\ampere}), applied unchanged to
+the others. A segment is called a capacity test when it is a discharge within
+\SI{5}{\percent} of that current lasting at least \SI{30}{\minute}. This is not
+a defeat of prior work --- the threshold was written for a different purpose, on
+a single source. It measures what a fixed constant costs when the chemistry
+changes.
+
+\begin{table}[t]
+\centering
+\caption{Check-up detection. \emph{Substantial} excludes files below
+\SI{10}{\percent} of the median check-up size --- aborted runs and setup stubs
+that share the check-up's procedure name. The baseline is calibrated on NMC.}
+\label{tab:recall}
+\begin{tabular}{lrrrrrr}
+\toprule
+& & \multicolumn{3}{c}{this method} & \multicolumn{2}{c}{fixed threshold} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-7}
+Chemistry & $n$ & recall & subst. & complete & recall & false \\
+\midrule
+NMC    & \num{163} & \SI{98.8}{\percent} & \SI{100}{\percent} & \SI{93.9}{\percent} & \SI{98.8}{\percent} & 0 \\
+LFP    & \num{41}  & \SI{95.1}{\percent} & \SI{100}{\percent} & \SI{95.1}{\percent} & \SI{0.0}{\percent}  & 0 \\
+Na-ion & \num{6}   & \SI{100}{\percent}  & \SI{100}{\percent} & \SI{100}{\percent}  & \SI{0.0}{\percent}  & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:recall} gives the result. Across \num{210} check-ups on three
+chemistries the method makes \textbf{no false detections at all}, and every
+check-up it does not detect is a fragment: the four misses are between
+\SI{0.4}{\percent} and \SI{3}{\percent} of the median check-up file size, and
+are aborted runs or temperature-criterion stubs that share the check-up's
+procedure name. Above a \SI{10}{\percent} size floor, recall is
+\SI{100}{\percent} on all three chemistries.
+
+The baseline behaves exactly as its design predicts. On the chemistry it was
+calibrated for it is indistinguishable from the method (\SI{98.8}{\percent},
+the same two fragmentary misses). On both unseen chemistries it finds
+\emph{nothing} --- \num{0} of \num{41} LFP and \num{0} of \num{6} sodium-ion
+check-ups --- because LFP's capacity test runs at 1C on a
+\SI{1.2}{\ampere\hour} cell (\SI{1.2}{\ampere}) and sodium-ion's at C/2 on a
+\SI{10.5}{\ampere\hour} cell (\SI{5.25}{\ampere}), and neither is within
+\SI{5}{\percent} of \SI{1.5}{\ampere}. The constant does not transfer because a
+current in amperes is not a property of the test; the C-rate is.
+
+This is the paper's argument in its simplest form. The same quantity ---
+``which discharge is the capacity test'' --- is a hard-coded constant in the
+baseline and a declared parameter in the method, and that difference alone is
+the gap between \SI{0}{\percent} and \SI{100}{\percent} on an unseen chemistry.
+
+\subsection{What carries transfer: the features or the label space?}
+\label{sec:res-ablation}
+
+Section~\ref{sec:res-loco} showed that one supervised model transfers and
+another does not. Two things differ between them, and this section separates
+them: the model could fail because its \emph{features} are chemistry-bound, or
+because its \emph{label space} is. We hold the features, the model and the folds
+fixed and vary only the label space.
+
+\paragraph{Two label spaces.} In the \emph{absolute} space the classes are the
+pipeline's own: CAP, PUL, qOCV and the leftovers. ``CAP'' there means ``a full
+discharge at this fleet's capacity C-rate'', so the rate is inside the class
+definition and must be learned from the training chemistries. In the
+\emph{shape} space the classes describe only what the segment is --- full
+discharge, full charge, partial discharge, partial charge, pulse --- with no
+rate in any class name; a prediction is resolved to CAP afterwards by testing
+the segment's own measured C-rate against the held-out chemistry's declared
+$C_{\mathrm{cap}}$. The chemistry-specific number is learned in the first case
+and supplied as configuration in the second.
+
+\paragraph{Result.} In the absolute space, held-out capacity recall is
+\textbf{zero} on LFP and on sodium-ion, and no feature set changes it --- not
+removing the voltage-range feature, not adding the coulombic duration, not
+substituting one for the other. In the shape space it is \SI{100}{\percent} on
+all three chemistries, for every feature set.
+
+The reason is visible in the training distribution. With LFP held out, every
+training capacity segment sits at a normalised current of exactly \num{0.500} ---
+NMC and sodium-ion are both C/2 --- while LFP's is \num{1.000}. The model has
+learned ``capacity test'' to mean ``a full discharge at C/2'', and at prediction
+time the LFP segments fall outside that region on most of the current features
+at once. It is broad covariate shift, not a deficiency of any single feature,
+which is why no feature substitution repairs it. Held-out sodium-ion fails for
+the same reason from the other side: its capacity current, \num{0.476}, sits
+just below the \num{0.500}--\num{1.000} band the model saw.
+
+\paragraph{Where the features do matter.} Not for recall, but for precision.
+Resolving a full discharge to CAP by its C-rate alone accepts any discharge at
+that rate, whether or not it swept the full cell. On sodium-ion the shipped
+feature set predicts \num{12} capacity segments where there are \num{6}: the six
+extras are partial C/2 discharges whose measured rate (\num{0.476}) is
+\emph{identical} to the true capacity tests', but whose corrected SoC swing is
+\num{0.229} against \num{0.951}. Adding the coulombic duration
+$|I|\,\Delta t / Q_{\mathrm{nom}}$ --- \num{0.104} for the extras against
+\num{0.985} for the true ones --- restores precision to \SI{100}{\percent}
+without changing recall. It is a scale-free measure of how much charge the
+segment actually moved, and it is what the rate test alone cannot see.
+
+\paragraph{A hypothesis this replaced.} We had expected LFP's flat discharge
+plateau to break the voltage-range feature, by compressing the voltage span that
+distinguishes a full sweep from a partial one, and had intended the coulombic
+feature as the remedy. That mechanism does not occur in this data.
+\texttt{Voltage\_range} separates full from partial discharges on LFP with a ROC
+AUC of \num{1.0} (medians \num{0.90} against \num{0.04}), because a full LFP
+discharge still traverses both knees of the curve even though its middle is
+flat, while the partial discharges this protocol contains are small SoC-adjust
+steps. The failure would require a partial discharge that is large in charge but
+small in voltage; the largest partial here moves \SI{40}{\percent} of nominal
+capacity, and none is confusable. We report this as a negative result: the
+coulombic feature earns its place in this method, but for the precision reason
+above, not the one we assumed.
+
+\todobox{Ablation still owed}{%
+Section~\ref{sec:features} excludes voltage-shape and temperature features on
+the grounds that they are chemistry- and fixture-bound. That is currently a
+design rationale, not a measurement: add them back and report the change.}
+
+\subsection{Validation on independent laboratories}
+\label{sec:res-external}
+
+Every cell in Table~\ref{tab:cells} was measured at one institute on one cycler
+family, so none of the preceding results speaks to portability between
+laboratories. We therefore ran the method against reference performance tests
+from two independent laboratories --- ISU-ILCC and UConn-ILCC --- ingested
+through thin format adapters and given nothing but their published cell
+parameters. \textbf{No label from either laboratory was used.}
+
+\paragraph{What an adapted dataset can and cannot test.} The adapters
+synthesise the columns the pipeline expects, and for ISU-ILCC the procedure
+field is a single constant while the state field is a per-sweep tag the adapter
+itself invents. The metadata ablation of Section~\ref{sec:res-metadata} is
+therefore \emph{not} run on these data: one cannot meaningfully ablate protocol
+columns one has written oneself, and reporting such a number would be
+circular. What the external data does test is the question that matters most
+here --- given a foreign laboratory's record and its datasheet scalars, are the
+check-ups found?
+
+\paragraph{Ground truth and detectors.} One programme is one reference
+performance test, guaranteed by both adapters' construction, so the denominator
+needs no labelling. Three detectors run over identical segments: the two
+labelling routes of Section~\ref{sec:labelling} as the pipeline actually runs
+them --- \emph{clustering} and the shipped \emph{classifier} --- and the
+\emph{configured criterion}, a full sweep that is a discharge within
+\SI{5}{\percent} of the laboratory's declared $C_{\mathrm{cap}}$.
+
+The configured criterion is reported in two implementations. The first states
+it directly as a rule. The second learns it: a model trained on the in-house
+fleet only, predicting segment shape with no C-rate in any class, whose
+predictions are resolved against the external laboratory's $C_{\mathrm{cap}}$
+--- the procedure of Section~\ref{sec:res-ablation} with a laboratory boundary
+in place of a chemistry boundary. These are \emph{not} independent evidence, and
+we do not present them as two results: the model is largely recovering the same
+full-versus-partial cut the rule states outright. The variant is included only
+to show that the criterion survives being learned rather than written, so that
+the transfer claim of Section~\ref{sec:res-ablation} is not an artefact of
+having hand-written a good rule.
+
+Both routes are run on both laboratories. This matters: which routes a dataset
+has happened to be processed with is an accident of its history, and comparing
+one laboratory under one route against another laboratory under another would
+confound the route with the laboratory.
+
+\begin{table}[t]
+\centering
+\caption{Cross-laboratory validation. \num{177} reference performance tests from
+two independent laboratories (3 cells each), no target-laboratory labels used.
+\emph{Tagged} is segments selected per test; one is ideal, and a detector that
+finds every test by tagging three segments in each has not solved the problem.
+The indented row is the configured criterion learned rather than written, not a
+separate detector.}
+\label{tab:external}
+\begin{tabular}{llrrr}
+\toprule
+Laboratory & Detector & RPTs & Recovered & Tagged \\
+\midrule
+\multirow{3}{*}{ISU-ILCC}
+ & clustering                     & \num{84} & \SI{89.3}{\percent} & \num{0.89} \\
+ & classifier (shipped)           & \num{84} & \SI{100}{\percent}  & \num{3.07} \\
+ & configured criterion           & \num{84} & \SI{100}{\percent}  & \num{1.00} \\
+ & \quad\emph{as a learned model} & \num{84} & \SI{100}{\percent}  & \num{1.00} \\
+\midrule
+\multirow{3}{*}{UConn-ILCC}
+ & clustering                     & \num{93} & \SI{100}{\percent}  & \num{1.00} \\
+ & classifier (shipped)           & \num{93} & \SI{100}{\percent}  & \num{1.84} \\
+ & configured criterion           & \num{93} & \SI{100}{\percent}  & \num{1.09} \\
+ & \quad\emph{as a learned model} & \num{93} & \SI{100}{\percent}  & \num{1.12} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:external} gives the result. \textbf{The configured criterion
+recovers all \num{177} external capacity tests}, on laboratories whose cells
+differ from ours in capacity by a factor of eight (\SI{0.28}{\ampere\hour} for
+ISU-ILCC against \SI{3.0}{\ampere\hour} for our NMC) and whose capacity C-rates
+match none of ours. It holds whether the criterion is written or learned: the
+learned variant was never shown a segment from either laboratory, and was given
+each laboratory's declared $C_{\mathrm{cap}}$ and nothing else.
+
+\paragraph{A defect the in-house fleet could not expose.} Table~\ref{tab:external}
+reports corrected numbers. On first contact with UConn-ILCC the unsupervised
+route recovered \SI{9.7}{\percent} of its capacity tests, from a defect in our
+implementation rather than anything about the laboratory.
+
+Where more than one cluster passed the current and direction masks, the
+confirmation stage selected the \emph{smallest}. That branch is reachable only
+when at least two clusters qualify, and across all ten in-house cells exactly
+one ever does, so the rule had never been exercised. UConn-ILCC's protocol
+produces two: a constant-current capacity test at $C_{\mathrm{cap}}$, and a
+CC-CV discharge whose CV tail drags its mean about \SI{5}{\percent} low --- still
+inside the band of Eq.~\eqref{eq:resolve} --- while raising its current standard
+deviation from \num{0.0} to \num{0.06}. The smaller cluster held four segments;
+the discarded one held the thirty-three capacity tests.
+
+Selecting instead the qualifying cluster whose mean current is closest to
+$C_{\mathrm{cap}}$ raises UConn-ILCC to \SI{100}{\percent} and changes nothing
+in-house: identical capacity counts, bit-identical capacity exports, and a
+controlled comparison on the sodium-ion cell differing in none of its \num{132}
+segments. After the correction the unsupervised route recovers all \num{93}
+UConn-ILCC tests and \SI{89.3}{\percent} of the ISU-ILCC ones.
+
+The configured criterion was unaffected throughout, since it does not consult
+cluster size. Exposing the defect required a protocol that discharges twice near
+the capacity rate, which ours does not contain --- so cross-laboratory data
+tested the implementation here, not only its generalisation.
+\paragraph{Scope of the claim.} The two laboratories do not exercise the whole
+taxonomy, and it is worth being precise about which parts they test. ISU-ILCC's
+reference test is four charge/discharge sweeps at two rates: it contains no
+pulses and no quasi-OCV, and the pipeline correctly reports none. UConn-ILCC's
+adds a pulse sequence, recovered in all \num{93} of its tests by both routes,
+but likewise contains no low-rate sweep --- no segment anywhere in its records
+falls in a C/20 band, and the longest non-rest segment is a C/3 discharge. So
+this section establishes cross-laboratory portability for the \emph{capacity}
+test on two sources and for the \emph{pulse} label on one, and it establishes
+nothing at all for quasi-OCV, for want of a foreign protocol containing one.
+That the pipeline reports zero quasi-OCV segments on both sources is the correct
+answer rather than a miss, and it is worth noting that it produces no false
+positives there either.
+
+\todobox{Widening the external evidence}{%
+Both external sources are NMC-type cells, so laboratory and chemistry are not
+fully crossed. The Pozzato--Onori dataset \cite{pozzato} carries the complete
+taxonomy --- C/20 capacity, HPPC pulses and pseudo-OCV --- and would extend
+this section from capacity alone to all three segment types. \textbf{Verify its
+structure against the original dataset, not a secondary processing script.}}
+
+\subsection{Beyond check-ups: opportunistic capacity from field data}
+\label{sec:res-field}
+
+Every result so far comes from a designed check-up, where a protocol exists even
+if the method does not read it. This section asks what survives when there is no
+protocol at all.
+
+We use the on-road charging records of \num{20} production electric vehicles
+\cite{deng2023}, roughly \num{29} months per vehicle. The data are
+charging-only, and the charging is opportunistic: whatever the driver plugged in
+for, at whatever state of charge, for whatever duration. Nothing schedules a
+capacity test, and there is no $C_{\mathrm{cap}}$ to declare, because the
+vehicle does not have a specified charge rate.
+
+Stages (i) and (ii) of Section~\ref{sec:method} carry over unchanged: sessions
+are split on gaps in the record, and each is described by its duration, charge
+and voltage excursion, current level and variability. Stage (iii) clusters those
+descriptors. Stage (iv) has nothing to resolve against --- an opportunistic
+charge declares no $C_{\mathrm{cap}}$ --- so it selects instead by
+top-of-charge voltage: among clusters whose median excursion clears a floor, the
+one that ends highest. A charge that ends high reached the top of charge, where
+a partial top-up stops lower.
+
+\paragraph{A stage that looked load-bearing and was not.} Our first attempt at
+stage (iii) clustered on six descriptors, one of which was a hand-written flag
+marking whether the charge reached a constant-voltage tail. It appeared to work
+on all \num{20} vehicles. It did not: the selected cluster reproduced that flag
+to \SIrange{99.7}{100}{\percent} agreement on every vehicle, so the clustering
+was relabelling an input it had been handed rather than discovering anything.
+Deleting stages (iii) and (iv) and writing the flag as a rule directly would
+have given the same tables to within about one session per vehicle.
+
+Removing the flag and keeping the other physical descriptors does not repair it
+--- on \num{11} of \num{20} vehicles the full charges then fail to separate at
+all, and no selection rule can choose a cluster that does not exist. What does
+work is clustering on the state-of-charge excursion \emph{alone}: it partitions
+that axis finely, and selection by top-of-charge voltage then picks the deep
+charges that ended highest. Only about \SI{37}{\percent} of the sessions it
+selects carry a CV tail, so it is finding a different and cleaner population
+rather than the flag under another name --- and the flag becomes an independent
+check on the result instead of its cause. We report this because a stage that
+contributes nothing is easy to leave in place unexamined, and the check that
+exposed it is cheap: compare what the stage selects against each of its own
+inputs.
+
+The result is a consistent object across the fleet: a median excursion of about
+\SI{66}{\percent} state of charge ending near the top of charge, holding a
+median of \num{57} sessions per vehicle (\numrange{28}{565}) out of some
+\num{2700}.
+
+Two checks. First, on the sessions both retain, our coulomb count reproduces the
+dataset authors' own published extraction exactly: median and maximum absolute
+difference are \SI{0.000}{\ampere\hour} on all \num{20} vehicles. Second, and
+the point of selecting at all, estimates drawn from the cluster are less noisy.
+Because these packs fade \SIrange{20}{30}{\percent} over the record, scatter
+must be measured about the ageing trend rather than across it; the spread of the
+raw timeline is dominated by real degradation and is nearly blind to estimator
+noise. Detrended, the scatter falls from \SI{1.67}{\percent} to
+\SI{0.67}{\percent} of median capacity --- a factor of \num{2.47} (IQR
+\numrange{2.14}{3.18}), and an improvement on \num{20} of \num{20} vehicles.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/field_timeline.pdf}
+\caption{Capacity estimates for one vehicle over its record, every charging
+session against the sessions the CAP cluster selects, each with its own
+rolling-median ageing trend. Selection removes most of the scatter, and the
+selected series is sparse but spans the record. Its trend tracks the
+all-session trend closely; the two agree to within \SI{0.32}{\percent} of
+capacity.}
+\label{fig:field-timeline}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.62\linewidth]{figures/field_fleet.pdf}
+\caption{Scatter about the ageing trend for all \num{20} vehicles, the published
+extraction over all sessions against the CAP cluster. Sorted by the former.}
+\label{fig:field-fleet}
+\end{figure}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/field_fleet_timelines.pdf}
+\caption{All \num{20} vehicles. Grey, every charging session as extracted by the
+dataset authors; blue, the sessions this method selects, with their ageing
+trend. Each panel is normalised to its own first level so the fade is
+comparable. The dashed line marks the last selected session: on most vehicles it
+now sits at or near the end of the record on every vehicle. The selected series
+is sparse --- a median of \num{57} sessions --- but tracks the grey population
+without systematic offset.}
+\label{fig:field-fleet-timelines}
+\end{figure*}
+
+\paragraph{The selection agrees with the unselected estimate.} Comparing the two
+populations like with like --- medians in matched \num{30}-day bins, restricted
+to the window where both exist --- the selected estimate sits within
+\SI{0.32}{\percent} of capacity of the all-session one, and the difference
+narrows over each record rather than widening (\SI{-0.37}{\percent} over the
+first half of the overlap, \SI{-0.03}{\percent} over the second). Selection here
+buys precision, not a different answer.
+
+That is worth stating because an earlier version of this selection, the circular
+one described above, did show a divergence that grew to \SI{1.8}{\percent} over
+each record. It was an artefact of what that selection admitted, not a property
+of the data, and it disappears once the selection is sound. The lesson we take
+from it is that a systematic drift between two estimators is easy to
+over-interpret when one of them has not been validated.
+
+\paragraph{Coverage is high but sparse.} The selected sessions span essentially
+the whole of each record --- median coverage \SI{97}{\percent} of the span,
+minimum \SI{90}{\percent}, and only \num{1} of \num{20} vehicles below
+\SI{90}{\percent} --- but they are few, so consecutive estimates are separated
+by a median of \num{133} days and at worst \num{260}
+(Figure~\ref{fig:field-fleet-timelines}). A field SOH timeline built this way
+tracks the fade over the full record but samples it coarsely, and any use of it
+downstream has to tolerate multi-month gaps. The sparseness is a property of how
+rarely these vehicles are charged to the top, not something the estimator can
+fix.
+
+\paragraph{What this does and does not show.} It is a generality result, not a
+portability one. Field charging contains no pulses and no quasi-OCV sweep, so
+only the capacity branch of the taxonomy is exercised. More importantly, the
+stage that carries portability everywhere else in this paper is precisely the
+stage that cannot run here: with no declared rate, selection falls back to a
+threshold on top-of-charge voltage, of the kind Section~\ref{sec:res-recall}
+shows does not transfer between chemistries. We report the field result as
+evidence that the segmentation and description stages capture
+charge/discharge structure generally enough to be useful outside a laboratory,
+and as a demarcation of where the method's central mechanism stops applying.
+
+%% ===================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{What is and is not claimed}
+
+The method is not metadata-free, and describing it that way would be wrong. It
+requires the parameters of Table~\ref{tab:inputs}. What it does not require is a
+description of the experiment's structure: which step is which, in what order,
+under what indexing. That is the distinction that governs portability, because
+the two kinds of information have different availability. Voltage limits,
+nominal capacity and target C-rates are known before the cell is connected, are
+identical for every cell of a type, and are stable across laboratories. A
+step-index map is authored per protocol, is invalidated when the protocol is
+edited, and does not exist at all for a dataset one did not generate.
+
+\subsection{Where portability comes from}
+
+Three results in Section~\ref{sec:results} are the same result seen from
+different angles, and it is worth stating once.
+
+Everything that transfers shares one property: the chemistry-specific quantity
+($C_{\mathrm{cap}}$) enters as a \emph{parameter at the point of use} rather
+than being absorbed into something fitted. Everything that fails absorbed it ---
+the fixed-current baseline into a constant
+(Section~\ref{sec:res-recall}), the absolute-label classifier into learned
+weights (Section~\ref{sec:res-ablation}). The failures are not partial: both go
+to \SI{0}{\percent} on an unseen chemistry, because a quantity that has been
+absorbed is not merely inaccurate off-domain, it is silently wrong.
+
+The controlled comparison in Section~\ref{sec:res-ablation} is what makes this
+more than an observation about two implementations. Holding the features, the
+model and the folds fixed and varying only whether the C-rate is learned or
+declared moves held-out capacity recall from \SI{0}{\percent} to
+\SI{100}{\percent}. No feature set we tried recovers any of that gap. So
+portability here is a property of what the method \emph{refuses to learn}, not
+of how its inputs are engineered --- and it is bought with roughly five
+datasheet scalars, which is the trade the introduction claims is worth making.
+
+This also bounds the claim. Feature design is not irrelevant; it sets precision
+once recall is secured. Resolving capacity by C-rate alone accepts partial
+discharges at that rate, and it took a scale-free measure of swept charge to
+reject them. Parameterisation decides whether the method finds the right
+segments at all; features decide how cleanly.
+
+\subsection{Limitations}
+
+\begin{itemize}
+\item \textbf{Cross-laboratory evidence covers capacity only.} The in-house
+fleet is single-institute; Section~\ref{sec:res-external} adds two independent
+laboratories, but their adapters give an independent ground truth for the
+capacity test alone, not for the pulse and quasi-OCV labels. Both external
+sources are also NMC-type, so laboratory and chemistry are not fully crossed.
+\item \textbf{The signal-only segmenter was measured, not adopted.}
+Section~\ref{sec:res-metadata} evaluates it as an ablation of the shipped
+implementation, not as a system built on it. Two costs would have to be
+addressed first. Outside the check-up taxonomy L2 disturbs the rest structure
+(on NMC, \num{1161} merged and \num{302} lost non-check-up segments), and rest
+stubs supply the predecessor voltage $v_{-}$ of Eq.~\eqref{eq:phi} and the
+relaxation window used for pulse resistance; and impedance-spectroscopy dwell
+windows are indistinguishable from rests by current alone. Neither affects the
+capacity, pulse or quasi-OCV result.
+\item \textbf{Check-ups, not cycling.} The method is developed and evaluated on
+check-up data. Nothing here establishes behaviour on cycling profiles.
+\item \textbf{Small $n$ per chemistry.} Seven NMC cells, two LFP and one
+sodium-ion. A larger in-house fleet exists and is not used here
+(Section~\ref{sec:data}).
+\item \textbf{Two residual metadata uses} remain outside boundary detection: a
+state-based filter drops a small class of cycler bookkeeping rows, and files are
+grouped by test identifier. Neither describes protocol composition, and the
+second has a single-group fallback, but both should be disclosed rather than
+defended.
+\end{itemize}
+
+%% ===================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+\todobox{Write last}{%
+Write this once Sections~\ref{sec:res-f1}--\ref{sec:res-external} carry results.
+It should state the two established findings --- that check-up boundaries are
+recoverable from the current alone with no loss of capacity, pulse or quasi-OCV
+segments across three chemistries, and that cross-chemistry label transfer is a
+property of the label space rather than of training breadth --- and should not
+reach beyond them.}
+
+%% ===================================================================
+\section*{Data and code availability}
+\todo{state repository, licence, and which figures/tables regenerate from which
+command}
+
+\section*{Acknowledgements}
+\todo{funding, project number}
+
+\bibliographystyle{elsarticle-num}
+\bibliography{refs}
+
+\end{document}

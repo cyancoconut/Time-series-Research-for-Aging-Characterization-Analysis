@@ -5,16 +5,25 @@ for each cell by downloading each test file exactly once.
 For each file:
   - All rows, Zeit + Strom  -> Ah throughput accumulator (full timeline)
   - CU file: all rows, all columns -> BRONZE_CU
-  - Non-CU file: first row only, all columns + Prozedur name -> BRONZE_CU stub
+  - Non-CU file: first + last row, all columns + Prozedur name -> BRONZE_CU stub
 
 Ah_throughput is computed over the full timeline (all files) and merged
-into BRONZE_CU by Zeit, so stubs receive the Ah value at their first row.
+into BRONZE_CU by Zeit, so stubs receive the Ah value at each stub row.
+
+Incremental builds (--incremental): instead of re-reading and re-integrating
+every test file, append only files not yet in the per-cell manifest sidecar
+(`<cell>_manifest.json`, stored beside BRONZE_CU). The manifest carries the
+list of processed files plus the running Ah total and last sample, so the Ah
+integral continues seamlessly across the gap. Output is identical to a full
+rebuild. Caveat: assumes new files have later timestamps — a backfilled file
+with earlier Zeit needs a full --overwrite rebuild.
 
 Usage:
     cd src
     python download/build_bronze_cu_with_ah.py /path/to/battery_config.json
     python download/build_bronze_cu_with_ah.py /path/to/battery_config.json --cells VTC_cell01
     python download/build_bronze_cu_with_ah.py /path/to/battery_config.json --overwrite
+    python download/build_bronze_cu_with_ah.py /path/to/battery_config.json --incremental
 
 Required config keys (battery_config.json):
     working_path, type_cell, minio_endpoint, bucket_name, minio_prefix
@@ -39,6 +48,7 @@ import argparse
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 from minio import Minio
 from minio.error import S3Error
@@ -46,11 +56,33 @@ from minio.error import S3Error
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from util.add_ah_throughput import add_ah_throughput
 from util import io_router
+from util.procedure_filter import as_filter_list
 
 
-def _is_cu(object_name: str, cu_marker: str) -> bool:
+def _is_cu(object_name: str, cu_marker) -> bool:
+    """True when the test file's programme field matches the CU marker(s).
+
+    ``cu_marker`` is a substring or a list of substrings (the check-up
+    programme name(s)); a file is a CU when its 4th '='-delimited field
+    contains **any** of them.
+    """
     parts = os.path.basename(object_name).split("=")
-    return len(parts) > 3 and cu_marker in parts[3]
+    if len(parts) <= 3:
+        return False
+    markers = as_filter_list(cu_marker) or []
+    return any(m in parts[3] for m in markers)
+
+
+def _is_unfinished(object_name: str) -> bool:
+    """True for a still-running test export (``…=unfinished.parquet``).
+
+    Unfinished tests are excluded from BRONZE_CU entirely: their payload can be
+    a partial export whose ``Zeit`` reads back as object dtype (crashing the Ah
+    integral), and once the test finishes it re-downloads under a *different*
+    basename, which the incremental manifest would treat as a new file and
+    double-count. Only integrate a test once it is finished.
+    """
+    return os.path.basename(object_name).endswith("=unfinished.parquet")
 
 
 def _programme_name(object_name: str) -> str:
@@ -58,7 +90,13 @@ def _programme_name(object_name: str) -> str:
     return parts[3] if len(parts) > 3 else ""
 
 
-def _combine_tests(dfs: list) -> pd.DataFrame:
+def _normalize_tests(dfs: list) -> pd.DataFrame:
+    """Concat per-test frames, unify the Zeit column, sort, rename `#` columns.
+
+    Does *not* assign BM_Programm — that is a global numbering over the whole
+    cell and must be assigned last (after any incremental concat) so the full
+    and incremental paths produce identical results. Use `_assign_bm_programm`.
+    """
     combined = pd.concat(dfs, ignore_index=True)
 
     zeit_columns = combined.filter(like="Zeit").columns.tolist()
@@ -73,6 +111,11 @@ def _combine_tests(dfs: list) -> pd.DataFrame:
     combined.sort_values("Zeit", inplace=True)
     combined = combined.rename(columns=lambda x: x.split("#")[0] if "#" in x else x)
     combined.reset_index(drop=True, inplace=True)
+    return combined
+
+
+def _assign_bm_programm(combined: pd.DataFrame) -> pd.DataFrame:
+    combined = combined.sort_values("Zeit").reset_index(drop=True)
     combined["BM_Programm"] = combined.groupby("Ahjo_Test_ID").ngroup()
     return combined
 
@@ -121,49 +164,19 @@ def _read_test_bytes_minio(client: Minio, bucket: str, object_name: str) -> byte
         return None
 
 
-def process_cell(
-    cfg: dict,
-    cell: str,
-    out_bronze_cu: str | None,
-    overwrite: bool = False,
-    upload_minio: bool = False,
-    minio_client: Minio | None = None,
-    download_from: str = "minio",
-) -> None:
-    bucket_name = cfg["bucket_name"]
-    prefix = cfg["minio_prefix"]
-    working_path = cfg.get("working_path")
-    cell_file = f"{cell}.parquet"
-    # CU-file detection follows the config's procedure_filter (the check-up
-    # programme name in the 4th '='-delimited filename field).
-    cu_marker = cfg.get("procedure_filter")
-    if not cu_marker:
-        raise ValueError(
-            "procedure_filter must be set in the battery config — it is the "
-            "check-up programme name used to detect CU test files."
-        )
+def _read_tests(
+    cell_tests: list,
+    download_from: str,
+    minio_client: Minio | None,
+    bucket_name: str,
+    cu_marker: str,
+) -> tuple:
+    """Read a list of per-test files into (tests, ah_frames).
 
-    if not overwrite:
-        if out_bronze_cu and os.path.exists(out_bronze_cu):
-            print(f"{cell} - local BRONZE_CU already exists, skipping.")
-            return
-        if upload_minio and io_router.bronze_exists_on_minio(minio_client, cfg, cell_file):
-            print(f"{cell} - MinIO BRONZE_CU already exists, skipping.")
-            return
-
-    if download_from == "local":
-        cell_tests = _list_cell_tests_local(working_path, cell)
-    else:
-        cell_tests = _list_cell_tests_minio(minio_client, bucket_name, prefix, cell)
-
-    if not cell_tests:
-        print(f"{cell} - no parquet files found.")
-        return
-
-    if not any(_is_cu(t, cu_marker) for t in cell_tests):
-        print(f"{cell} - no CU files found, skipping.")
-        return
-
+    CU files contribute full rows to `tests` (and Zeit/Strom to `ah_frames`);
+    non-CU files contribute a first+last-row stub to `tests` and their full
+    Zeit/Strom timeline to `ah_frames`.
+    """
     tests = []
     ah_frames = []
 
@@ -186,55 +199,355 @@ def process_cell(
             ah_frames.append(df[["Zeit", "Strom"]].copy())
             tests.append(df)
         else:
-            # stub: first row only, all columns; reuse table for Ah extraction
+            # Non-CU: open via ParquetFile on the in-memory bytes. Read
+            # Zeit+Strom for the Ah accumulator (full cycling timeline,
+            # column-projected) and first+last rows (all columns) for the
+            # BRONZE_CU stub — no full pandas materialization of the file.
             try:
-                table = pq.read_table(io.BytesIO(data))
-                stub = table.slice(0, 1).to_pandas()
+                pf = pq.ParquetFile(io.BytesIO(data))
+            except Exception as e:
+                print(f"  Error opening {object_name}: {e}")
+                continue
+
+            n_rows = pf.metadata.num_rows
+            n_rg = pf.num_row_groups
+            if n_rows == 0 or n_rg == 0:
+                continue
+
+            try:
+                ah_frames.append(pf.read(columns=["Zeit", "Strom"]).to_pandas())
+            except Exception as e:
+                print(f"  Error reading Zeit/Strom from {object_name}: {e}")
+
+            try:
+                first_rg = pf.read_row_group(0)
+                if n_rows == 1:
+                    stub = first_rg.slice(0, 1).to_pandas()
+                else:
+                    last_rg = (
+                        first_rg if n_rg == 1 else pf.read_row_group(n_rg - 1)
+                    )
+                    stub = pa.concat_tables([
+                        first_rg.slice(0, 1),
+                        last_rg.slice(last_rg.num_rows - 1, 1),
+                    ]).to_pandas()
             except Exception as e:
                 print(f"  Error reading stub from {object_name}: {e}")
                 continue
             stub["Prozedur"] = _programme_name(object_name)
             tests.append(stub)
 
-            try:
-                ah_frames.append(table.select(["Zeit", "Strom"]).to_pandas())
-            except Exception as e:
-                print(f"  Error reading Zeit/Strom from {object_name}: {e}")
+    return tests, ah_frames
 
+
+def _compute_ah(
+    ah_frames: list,
+    offset: float = 0.0,
+    seed_zeit=None,
+    seed_strom=None,
+    gap_threshold_s=None,
+) -> pd.DataFrame:
+    """Cumulative Ah throughput over `ah_frames`, returning a df with Zeit +
+    Ah_throughput (+ Current/Time_UTC).
+
+    For the incremental path, a synthetic seed row `(seed_zeit, seed_strom)` is
+    prepended so the trapezoid integral bridges the gap from the last
+    previously-processed sample, and `offset` (the prior cumulative total) is
+    added. The seed row is dropped before returning. For the full path,
+    `offset=0` and `seed_zeit=None`.
+
+    `gap_threshold_s` is forwarded to `add_ah_throughput` to zero out the
+    phantom throughput integrated across the dead time between test files (see
+    that function). It applies identically on the seed→first-new-row bridge, so
+    a real parking gap there contributes nothing while `offset` still carries
+    the prior cumulative total forward.
+    """
+    df_all = pd.concat(ah_frames, ignore_index=True)
+    if seed_zeit is not None:
+        seed = pd.DataFrame({"Zeit": [pd.Timestamp(seed_zeit)], "Strom": [seed_strom]})
+        df_all = pd.concat([seed, df_all], ignore_index=True)
+    # Frames can arrive with a heterogeneous Zeit dtype — a partial export may
+    # store it as object/strings, or mix tz-aware and tz-naive across files (and
+    # with the seed). That makes the concatenated column object dtype, which
+    # breaks the .dt access below. Normalize to tz-aware UTC so dedup/sort and
+    # the Time_UTC handling all operate on a real datetime column.
+    df_all["Zeit"] = pd.to_datetime(df_all["Zeit"], utc=True)
+    df_all = df_all.drop_duplicates("Zeit").sort_values("Zeit").reset_index(drop=True)
+    df_all[df_all.select_dtypes(np.float64).columns] = (
+        df_all.select_dtypes(np.float64).astype(np.float32)
+    )
+    # add_ah_throughput needs Time_UTC + Current; keep original Zeit for merge key
+    df_ah = df_all.rename(columns={"Strom": "Current"})
+    df_ah["Time_UTC"] = df_ah["Zeit"]
+    if df_ah["Time_UTC"].dt.tz is None:
+        df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_localize("UTC")
+    else:
+        df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_convert("UTC")
+    df_ah = add_ah_throughput(df_ah, gap_threshold_s=gap_threshold_s)
+    if offset:
+        df_ah["Ah_throughput"] = df_ah["Ah_throughput"] + offset
+    if seed_zeit is not None:
+        df_ah = df_ah[df_ah["Zeit"] != pd.Timestamp(seed_zeit)].reset_index(drop=True)
+    return df_ah
+
+
+def _ah_watermark(df_ah: pd.DataFrame) -> tuple:
+    """(ah_total, last_zeit ISO, last_strom) at the end of the timeline."""
+    return (
+        float(df_ah["Ah_throughput"].iloc[-1]),
+        df_ah["Zeit"].iloc[-1].isoformat(),
+        float(df_ah["Current"].iloc[-1]),
+    )
+
+
+def _build_full(
+    tests: list, ah_frames: list, cell: str, gap_threshold_s=None
+) -> tuple:
+    bronze = _normalize_tests(tests)
+    if ah_frames:
+        df_ah = _compute_ah(ah_frames, gap_threshold_s=gap_threshold_s)
+        bronze = bronze.merge(df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left")
+        ah_total, last_zeit, last_strom = _ah_watermark(df_ah)
+    else:
+        print(f"{cell} - no Zeit/Strom data for Ah throughput; column omitted.")
+        ah_total = last_zeit = last_strom = None
+    bronze = _assign_bm_programm(bronze)
+    return bronze, ah_total, last_zeit, last_strom
+
+
+def _build_incremental(
+    tests: list,
+    ah_frames: list,
+    existing_bronze: pd.DataFrame,
+    manifest: dict,
+    gap_threshold_s=None,
+) -> tuple:
+    new_rows = _normalize_tests(tests)
+    offset = manifest.get("ah_total") or 0.0
+    seed_zeit = manifest.get("last_zeit")
+    seed_strom = manifest.get("last_strom")
+    if ah_frames:
+        df_ah = _compute_ah(
+            ah_frames, offset, seed_zeit, seed_strom,
+            gap_threshold_s=gap_threshold_s,
+        )
+        new_rows = new_rows.merge(
+            df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left"
+        )
+        ah_total, last_zeit, last_strom = _ah_watermark(df_ah)
+    else:
+        ah_total, last_zeit, last_strom = (
+            manifest.get("ah_total"), seed_zeit, seed_strom,
+        )
+    combined = pd.concat([existing_bronze, new_rows], ignore_index=True)
+    combined = _assign_bm_programm(combined)
+    return combined, ah_total, last_zeit, last_strom
+
+
+def _manifest_key(object_name: str) -> str:
+    """Stable per-file key for the manifest — the basename, so it matches
+    across local and MinIO sources (one config = one source)."""
+    return os.path.basename(object_name)
+
+
+def _manifest_local_path(out_bronze_cu: str) -> str:
+    stem = os.path.basename(out_bronze_cu).rsplit(".parquet", 1)[0]
+    return os.path.join(os.path.dirname(out_bronze_cu), f"{stem}_manifest.json")
+
+
+def _manifest_minio_key(cell: str, layer: str = "BRONZE_CU") -> str:
+    return f"{layer}/{cell}_manifest.json"
+
+
+def _load_incremental_state(
+    cfg: dict,
+    cell: str,
+    out_bronze_cu: str | None,
+    upload_minio: bool,
+    minio_client: Minio | None,
+    layer: str = "BRONZE_CU",
+) -> tuple:
+    """Return (manifest, existing_bronze) — preferring local, else MinIO.
+
+    Returns (None, None) when no prior state exists, signalling a full build.
+    """
+    if out_bronze_cu and os.path.exists(out_bronze_cu):
+        mpath = _manifest_local_path(out_bronze_cu)
+        if os.path.exists(mpath):
+            with open(mpath) as f:
+                manifest = json.load(f)
+            return manifest, pd.read_parquet(out_bronze_cu)
+
+    if upload_minio and minio_client is not None:
+        bucket = cfg["bucket_name"]
+        mkey = f"{cfg['minio_prefix']}/{_manifest_minio_key(cell, layer=layer)}"
+        try:
+            resp = minio_client.get_object(bucket, mkey)
+            try:
+                manifest = json.loads(resp.read())
+            finally:
+                resp.close()
+                resp.release_conn()
+        except S3Error:
+            return None, None
+        try:
+            with io_router.fetch_bronze(minio_client, cfg, f"{cell}.parquet", layer=layer) as p:
+                existing = pd.read_parquet(p)
+        except S3Error:
+            return None, None
+        return manifest, existing
+
+    return None, None
+
+
+def _save_manifest(
+    cfg: dict,
+    cell: str,
+    out_bronze_cu: str | None,
+    upload_minio: bool,
+    minio_client: Minio | None,
+    processed: list,
+    ah_total,
+    last_zeit,
+    last_strom,
+    layer: str = "BRONZE_CU",
+) -> None:
+    payload = {
+        "processed": sorted({_manifest_key(p) for p in processed}),
+        "ah_total": ah_total,
+        "last_zeit": last_zeit,
+        "last_strom": last_strom,
+    }
+    text = json.dumps(payload, indent=2)
+    if out_bronze_cu:
+        mpath = _manifest_local_path(out_bronze_cu)
+        os.makedirs(os.path.dirname(mpath), exist_ok=True)
+        with open(mpath, "w") as f:
+            f.write(text)
+        print(f"  Saved manifest:   {mpath}")
+    if upload_minio and minio_client is not None:
+        io_router._upload_bytes(
+            minio_client, cfg, _manifest_minio_key(cell, layer=layer),
+            text.encode("utf-8"), include_tag=False,
+        )
+
+
+def process_cell(
+    cfg: dict,
+    cell: str,
+    out_bronze_cu: str | None,
+    overwrite: bool = False,
+    upload_minio: bool = False,
+    minio_client: Minio | None = None,
+    download_from: str = "minio",
+    incremental: bool = False,
+    layer: str = "BRONZE_CU",
+    filter_key: str = "procedure_filter",
+) -> None:
+    bucket_name = cfg["bucket_name"]
+    prefix = cfg["minio_prefix"]
+    working_path = cfg.get("working_path")
+    cell_file = f"{cell}.parquet"
+    # Test-file detection follows the config's procedure filter (the programme
+    # name in the 4th '='-delimited filename field).
+    cu_marker = cfg.get(filter_key)
+    if not cu_marker:
+        raise ValueError(
+            f"{filter_key} must be set in the battery config — it is the "
+            f"programme name used to detect {layer} test files."
+        )
+
+    # In incremental mode an existing BRONZE_CU is the base to append to, not a
+    # reason to skip — the skip-on-exists check only applies to full builds.
+    if not overwrite and not incremental:
+        if out_bronze_cu and os.path.exists(out_bronze_cu):
+            print(f"{cell} - local {layer} already exists, skipping.")
+            return
+        if upload_minio and io_router.bronze_exists_on_minio(
+            minio_client, cfg, cell_file, layer=layer
+        ):
+            print(f"{cell} - MinIO {layer} already exists, skipping.")
+            return
+
+    if download_from == "local":
+        cell_tests = _list_cell_tests_local(working_path, cell)
+    else:
+        cell_tests = _list_cell_tests_minio(minio_client, bucket_name, prefix, cell)
+
+    if not cell_tests:
+        print(f"{cell} - no parquet files found.")
+        return
+
+    # Exclude still-running tests (…=unfinished.parquet) from the build — see
+    # _is_unfinished. Applied in every mode so a full build can't integrate an
+    # unfinished payload that a later incremental build would double-count.
+    cell_tests = [t for t in cell_tests if not _is_unfinished(t)]
+    if not cell_tests:
+        print(f"{cell} - only unfinished test files; nothing to build yet.")
+        return
+
+    if not any(_is_cu(t, cu_marker) for t in cell_tests):
+        print(f"{cell} - no CU files found, skipping.")
+        return
+
+    # Incremental: load the manifest + existing BRONZE_CU and process only the
+    # test files not already incorporated. Falls back to a full build when no
+    # prior state exists (or under --overwrite).
+    manifest = None
+    existing_bronze = None
+    if incremental and not overwrite:
+        manifest, existing_bronze = _load_incremental_state(
+            cfg, cell, out_bronze_cu, upload_minio, minio_client, layer=layer
+        )
+        if manifest is None:
+            print(f"{cell} - no prior manifest/{layer}; doing a full build.")
+
+    pending = cell_tests
+    if manifest is not None:
+        processed = set(manifest.get("processed", []))
+        pending = [t for t in cell_tests if _manifest_key(t) not in processed]
+        if not pending:
+            print(f"{cell} - {layer} already up to date (no new test files).")
+            return
+        print(f"{cell} - {len(pending)} new test file(s) since last build.")
+
+    tests, ah_frames = _read_tests(
+        pending, download_from, minio_client, bucket_name, cu_marker
+    )
     if not tests:
         print(f"{cell} - no data loaded.")
         return
 
-    bronze = _combine_tests(tests)
+    # Mask the trapezoid contribution over inter-file gaps so dead time between
+    # test files doesn't book phantom Ah. Default (None) auto-derives the gap
+    # cut from the cell's sampling cadence; set `ah_gap_threshold_s` to pin a
+    # fixed seconds value instead.
+    gap_threshold_s = cfg.get("ah_gap_threshold_s")
 
-    # --- Ah throughput computed over full timeline, merged into BRONZE_CU ---
-    if ah_frames:
-        df_all = pd.concat(ah_frames, ignore_index=True)
-        df_all = df_all.drop_duplicates("Zeit").sort_values("Zeit").reset_index(drop=True)
-        df_all[df_all.select_dtypes(np.float64).columns] = (
-            df_all.select_dtypes(np.float64).astype(np.float32)
+    if manifest is not None:
+        bronze, ah_total, last_zeit, last_strom = _build_incremental(
+            tests, ah_frames, existing_bronze, manifest,
+            gap_threshold_s=gap_threshold_s,
         )
-        # add_ah_throughput needs Time_UTC + Current; keep original Zeit for merge key
-        df_ah = df_all.rename(columns={"Strom": "Current"})
-        df_ah["Time_UTC"] = df_ah["Zeit"]
-        if df_ah["Time_UTC"].dt.tz is None:
-            df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_localize("UTC")
-        else:
-            df_ah["Time_UTC"] = df_ah["Time_UTC"].dt.tz_convert("UTC")
-        df_ah = add_ah_throughput(df_ah)
-
-        bronze = bronze.merge(df_ah[["Zeit", "Ah_throughput"]], on="Zeit", how="left")
     else:
-        print(f"{cell} - no Zeit/Strom data for Ah throughput; column omitted.")
+        bronze, ah_total, last_zeit, last_strom = _build_full(
+            tests, ah_frames, cell, gap_threshold_s=gap_threshold_s
+        )
 
     if out_bronze_cu:
         _save_local_parquet(bronze, out_bronze_cu)
     if upload_minio:
         io_router.upload_parquet(
             minio_client, cfg, bronze,
-            io_router.bronze_object_key(f"{cell}.parquet"),
+            io_router.bronze_object_key(f"{cell}.parquet", layer=layer),
             include_tag=False,
         )
+    _save_manifest(
+        cfg, cell, out_bronze_cu, upload_minio, minio_client,
+        processed=cell_tests, ah_total=ah_total,
+        last_zeit=last_zeit, last_strom=last_strom,
+        layer=layer,
+    )
 
 
 def _list_cells_minio(minio_client: Minio, bucket_name: str, prefix: str) -> list:
@@ -251,10 +564,11 @@ def _list_cells_minio(minio_client: Minio, bucket_name: str, prefix: str) -> lis
 def _list_cells_local(working_path: str) -> list:
     if not working_path or not os.path.isdir(working_path):
         return []
-    reserved = {"BRONZE_CU", "preSILVER", "SILVER", "GOLD",
+    reserved = {"BRONZE_CU", "BRONZE_PARA", "preSILVER", "SILVER", "GOLD",
                 "with_features_pre_labeled", "with_features_post_labeled",
                 "20_export_pulse", "30_export_qocv", "40_capacity_monitore",
-                "50_evaluation"}
+                "50_evaluation", "10_initial_characterization",
+                "25_export_eis", "60_classifier"}
     cells = []
     for name in sorted(os.listdir(working_path)):
         full = os.path.join(working_path, name)
@@ -265,7 +579,14 @@ def _list_cells_local(working_path: str) -> list:
     return cells
 
 
-def run(cfg: dict, target_cells: list = None, overwrite: bool = False) -> None:
+def run(
+    cfg: dict,
+    target_cells: list = None,
+    overwrite: bool = False,
+    incremental: bool = False,
+    layer: str = "BRONZE_CU",
+    filter_key: str = "procedure_filter",
+) -> None:
     bucket_name = cfg["bucket_name"]
     prefix = cfg["minio_prefix"]
     working_path = cfg.get("working_path")
@@ -294,34 +615,66 @@ def run(cfg: dict, target_cells: list = None, overwrite: bool = False) -> None:
     needs_minio = download_from == "minio" or upload_minio
     minio_client = io_router.make_minio_client(cfg) if needs_minio else None
 
-    if target_cells:
-        cells = target_cells
-    elif download_from == "minio":
+    if download_from == "minio":
         cells = _list_cells_minio(minio_client, bucket_name, prefix)
     else:
         cells = _list_cells_local(working_path)
+
+    # --cells is a name *fragment*, as in main.py — not a literal cell name.
+    # It used to replace the discovered list outright, so `--cells 02` looked
+    # for a cell called "02" and reported "02 - no parquet files found."
+    # instead of matching …_28Ah_02. A full name still matches, being a
+    # substring of itself.
+    if target_cells:
+        fragments = [t for t in target_cells if t]
+        matched = [c for c in cells if any(t in c for t in fragments)]
+        if not matched:
+            raise SystemExit(
+                f"--cells {fragments} matched none of the {len(cells)} cells "
+                f"found in {'MinIO ' + prefix if download_from == 'minio' else working_path}: "
+                f"{cells}"
+            )
+        cells = matched
 
     for cell in cells:
         print(f"Processing {cell}...")
         process_cell(
             cfg=cfg,
             cell=cell,
-            out_bronze_cu=os.path.join(working_path, "BRONZE_CU", f"{cell}.parquet") if save_local else None,
+            out_bronze_cu=os.path.join(working_path, layer, f"{cell}.parquet") if save_local else None,
             overwrite=overwrite,
             upload_minio=upload_minio,
             minio_client=minio_client,
             download_from=download_from,
+            incremental=incremental,
+            layer=layer,
+            filter_key=filter_key,
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build BRONZE_CU and Ah sidecar from MinIO")
     parser.add_argument("config", help="Path to battery config JSON")
-    parser.add_argument("--cells", nargs="*", help="Optional subset of cells")
+    parser.add_argument(
+        "--cells",
+        nargs="*",
+        help="Optional subset of cells, matched as name fragments (e.g. 02)",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Rebuild even if output exists")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Append only new test files to an existing BRONZE_CU (uses the "
+             "manifest sidecar); full build if no prior state exists.",
+    )
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = json.load(f)
 
-    run(cfg, target_cells=args.cells, overwrite=args.overwrite)
+    run(
+        cfg,
+        target_cells=args.cells,
+        overwrite=args.overwrite,
+        incremental=args.incremental,
+    )
