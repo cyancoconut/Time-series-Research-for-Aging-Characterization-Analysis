@@ -26,14 +26,6 @@ dig2mat.log
 # Generated analysis plots
 /plots/
 
-# LaTeX build artifacts
-paper/*.aux
-paper/*.bbl
-paper/*.blg
-paper/*.fdb_latexmk
-paper/*.fls
-paper/*.log
-paper/*.out
-paper/main.pdf
-paper/*.spl
-paper/build*.log
+# The manuscript is a separate project at ~/Documents/Project_METAbatt_paper
+# (split out 2026-09-10). Ignored here so a stray copy cannot be committed back.
+paper/
