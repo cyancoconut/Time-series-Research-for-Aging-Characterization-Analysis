@@ -11,8 +11,8 @@ Workflow::
     feats = sessions.session_features(split_sessions(load_vehicle(...)), vehicle=v)
     labeled = cluster_sessions(feats)
     summary = summarize_clusters(labeled)
-    cap_label = pick_cap_cluster(labeled)
-    cap_sessions = labeled[labeled["cluster_label"] == cap_label]
+    cap_labels = pick_cap_clusters(labeled)
+    cap_sessions = labeled[labeled["cluster_label"].isin(cap_labels)]
 """
 from __future__ import annotations
 
@@ -31,15 +31,17 @@ from sklearn.preprocessing import StandardScaler
 # than discovering the capacity population. Removing the flag and clustering on
 # the remaining physical features failed on 11 of 20 vehicles.
 #
-# Clustering on dSOC alone is both non-circular and better. pick_cap_cluster
-# then takes the cluster with the highest median_SOC_end, ties broken by the
-# broadest median_dSOC — "of the charges that ended full, the ones that came
-# furthest". Measured against the previous default, per vehicle:
+# Clustering on dSOC alone is both non-circular and better. pick_cap_clusters
+# then keeps every cluster that ended full and covered at least half the SOC
+# window. Measured against the previous default, per vehicle:
 #
 #     variant                      found   med n   resid%   coverage%
 #     previous (has_cv_tail)       20/20     290     1.33          79
 #     [V_max, SOC_end]             20/20      74     0.93          20
 #     dSOC alone                   20/20      57     0.67          97
+#
+# (measured at the 1% min_cluster_size in force at the time; the comparison
+# between feature sets holds, the absolute figures have since moved.)
 #
 # Better on scatter and on record coverage on 20 of 20 vehicles each, and only
 # ~37% of the sessions it selects carry a CV tail — so it finds a different and
@@ -51,6 +53,38 @@ from sklearn.preprocessing import StandardScaler
 DEFAULT_FEATURE_COLUMNS = [
     "dSOC",
 ]
+
+
+# min_cluster_size as a fraction of a vehicle's session count.
+#
+# 5% suits 19 of the 20 vehicles. Vehicle 9 needs 2%, and the reason is
+# structural rather than a fitted constant: this parameter does two different
+# jobs depending on how a driver charges. Where the deep charges fall into
+# discrete habitual bands separated by real gaps in the dSOC axis — vehicle 9
+# has a literal empty gap from 69.2 to 71.2, some 3.5x the epsilon merge
+# distance — the parameter decides *which band* is admitted. Where the deep
+# range is a smooth plateau instead (vehicle 10: 38-64 sessions in every
+# 5-point bin from 35 to 85, no dip anywhere), it decides *how much of the
+# continuum* is taken. One value cannot mean the same thing in both cases,
+# which is why the fleet result is not monotonic in it.
+#
+# At 5% all 167 of vehicle 9's sessions with dSOC >= 70 fall into noise and the
+# only cluster on offer is a shallow one (median dSOC 28.4, ending at SOC 76.8)
+# that pick_cap_clusters now rejects outright — so at 5% that vehicle yields an
+# empty table, not a bad one. 2% lets its deep bands reach cluster status.
+#
+# The fleet-level cost of the override is nil: median scatter reduction is
+# 1.71x either way, and it recovers the 20th vehicle.
+DEFAULT_MIN_CLUSTER_FRACTION = 0.05
+MIN_CLUSTER_FRACTION_OVERRIDES: dict[str, float] = {"9": 0.02}
+
+
+def _min_cluster_fraction(feats: pd.DataFrame) -> float:
+    """Per-vehicle min_cluster_size fraction, read off the ``vehicle`` column."""
+    if "vehicle" not in feats.columns or feats.empty:
+        return DEFAULT_MIN_CLUSTER_FRACTION
+    vehicle = str(feats["vehicle"].iloc[0])
+    return MIN_CLUSTER_FRACTION_OVERRIDES.get(vehicle, DEFAULT_MIN_CLUSTER_FRACTION)
 
 
 def _build_feature_matrix(feats: pd.DataFrame) -> pd.DataFrame:
@@ -76,9 +110,9 @@ def _build_feature_matrix(feats: pd.DataFrame) -> pd.DataFrame:
 # scatter degrades to 0.71% and 1.02%.
 #
 # Those numbers were measured at min_cluster_size = 1% of sessions, which was
-# the default at the time; the default is now 5% and already merges the bands
-# structurally, so epsilon does much less work than it used to. It has not been
-# re-swept against the coarser partition.
+# the default at the time; the default is now 5% (2% on vehicle 9), which
+# already merges the bands structurally, so epsilon does less work than it did.
+# It has not been re-swept against the coarser partition.
 def cluster_sessions(
     feats: pd.DataFrame,
     *,
@@ -89,17 +123,34 @@ def cluster_sessions(
 ) -> pd.DataFrame:
     """Add a ``cluster_label`` column (-1 = noise) to the per-session features.
 
-    Default ``min_cluster_size`` is ``max(10, 5% of session count)`` — 112-153
-    on these vehicles. This is a coarse partition on purpose: it yields 2-3
-    clusters per vehicle, one of which is the broad "charged most of the way and
-    ended full" population, and every vehicle has one. At 1% (26-30) the same
-    population splits into 5-10 narrow dSOC bands, and on vehicles 3 and 16 the
-    deepest bands failed to reach cluster status at all and fell into noise,
-    leaving those two with no CAP cluster and an empty capacity table.
+    Default ``min_cluster_size`` is ``max(10, f * session count)``, where ``f``
+    is ``DEFAULT_MIN_CLUSTER_FRACTION`` (5%) unless the vehicle appears in
+    ``MIN_CLUSTER_FRACTION_OVERRIDES`` — see the note on those constants for why
+    vehicle 9 needs 2%. Pass ``min_cluster_size`` explicitly to bypass both.
 
-    The trade is scatter for coverage — see ``pick_cap_cluster``. Below ~15 the
-    partition fragments further and the pick turns unstable: vehicle 16 finds a
-    CAP population at 20, loses it at 15, and finds a much smaller one at 10.
+    Measured over the fleet, under the multi-cluster ``pick_cap_clusters`` rule:
+
+        setting          found   total n   med dSOC   med resid%   ratio   cov%
+        5%, v9 at 2%     20/20      7367       60.4         1.02    1.71x   99.9
+        5% flat          19/20      7083       60.0         1.02    1.70x   99.9
+        3% flat          20/20      7324       60.8         0.97    1.75x   99.9
+        2% flat          20/20      7739       61.8         0.98    1.71x   99.8
+
+    ``ratio`` is the reduction in capacity scatter about the ageing trend
+    against taking every charging session. Note it is nearly flat across these
+    settings: what moves it is how *deep* the admitted population is, not how
+    the partition is cut. Taking only the single deepest admissible cluster
+    reaches ~2.1x, at 4397 sessions instead of 7367 — precision bought with
+    density. The multi-cluster rule is preferred because it samples the record
+    far more finely (consecutive estimates ~1 day apart against ~130).
+
+    The consequence to keep in mind is that a sparse deep tail can still be
+    stranded in noise on a plateau vehicle. Vehicle 10 is the live example: its
+    60 deepest sessions (median dSOC 85.2, SOC_end 97.6, the highest CV-tail
+    rate in the vehicle at 55%) are all label -1, and the admitted clusters take
+    the plateau instead. Selecting on a dSOC threshold rather than on cluster
+    density would address this, but is a larger change to the method than a
+    parameter choice.
 
     Cluster membership counts are in any case an accident of how often a given
     driver charged from empty, not a property of the cell, so tying selection to
@@ -110,7 +161,10 @@ def cluster_sessions(
         out["cluster_label"] = pd.Series(dtype=int)
         return out
 
-    mcs = min_cluster_size if min_cluster_size is not None else max(10, int(len(feats) * 0.05))
+    if min_cluster_size is not None:
+        mcs = min_cluster_size
+    else:
+        mcs = max(10, int(len(feats) * _min_cluster_fraction(feats)))
     ms = min_samples if min_samples is not None else max(5, mcs // 2)
 
     X = _build_feature_matrix(feats)[feature_columns].to_numpy(dtype=float)
@@ -151,77 +205,73 @@ def summarize_clusters(labeled: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("n", ascending=False).reset_index(drop=True)
 
 
-def pick_cap_cluster(
+def pick_cap_clusters(
     labeled: pd.DataFrame,
     *,
-    min_median_dsoc: float = 0.0,
-) -> int | None:
-    """Pick the cluster that ended fullest, and among those, charged broadest.
+    min_median_dsoc: float = 50.0,
+    min_median_soc_end: float = 95.0,
+) -> list[int]:
+    """Return every cluster that qualifies as a capacity population, deepest first.
 
-    * ``median_SOC_end`` — the completeness signal. A session that ends at the
-      top of the SOC window reached full charge; a partial top-up stops lower.
+    Admissibility is the whole rule. A cluster is a capacity population when
 
-      SOC saturates: the qualifying clusters share a median SOC_end of exactly
-      97.6, so on its own this sort is decided by row order rather than by the
-      criterion. ``median_dSOC`` therefore breaks the tie, descending — among
-      the clusters that end full, the broadest charge. (``median_V_max``
-      saturates the same way, ~380 V, so the criterion this replaced was equally
-      tie-bound.)
-    * ``median_dSOC >= min_median_dsoc`` — an optional depth floor, off by
-      default. See the note on its removal below.
+    * ``median_dSOC > min_median_dsoc`` (default 50) — it covers at least half
+      the SOC window, and
+    * ``median_SOC_end > min_median_soc_end`` (default 95) — it ends essentially
+      full.
 
-    ``median_V_max`` was the previous completeness criterion and is still
-    computed in ``summarize_clusters``. SOC_end says the same thing in SOC
-    points and is not lifted by the current-dependent IR offset that inflates
-    V_max on fast charges. The CV-tail rate is deliberately unused — it was the
-    criterion before that and made the stage circular (it is also a clustering
-    input). Both remain useful as independent checks on what was selected.
+    Every cluster meeting both is returned; there is no single winner. The list
+    is ordered by ``median_dSOC`` descending so the deepest population comes
+    first, but callers are expected to use all of them.
 
-    **The depth floor is off by default because it cannot coexist with the 5%
-    min_cluster_size.** At that coarser partition the winning clusters sit at
-    median dSOC 54-70, so a floor of 70 rejects every one of them and no vehicle
-    yields a CAP cluster at all. Paired with 5%, this rule finds a cluster on
-    20 of 20 vehicles where 1%-plus-floor-70 found 18.
+    **Why all of them, rather than the best one.** The previous rule sorted on
+    ``median_SOC_end`` and took the top cluster, breaking ties on
+    ``median_dSOC``. SOC_end saturates — qualifying clusters share a median of
+    exactly 97.6 — so that sort was decided entirely by the tie-break, and it
+    discarded clusters that were equally valid capacity events merely for being
+    slightly shallower. On a *modal* vehicle that is a real loss: vehicle 9 has
+    three admissible bands at median dSOC 75.6, 59.4 and 41.6, of which the old
+    rule kept only the first. Taking all qualifying clusters uses the whole
+    measurable record instead of one band of it.
 
-    What that costs, measured over the fleet — 1% with a floor of 70 against 5%
-    with none:
+    The floors are what keeps that safe. They are deliberately loose — 50 and 95
+    admit anything that plausibly is a capacity event — but they are hard, so a
+    shallow cluster cannot enter simply because nothing better exists. At the 5%
+    ``min_cluster_size`` this setting replaced, vehicle 9's only pick was a
+    cluster at median dSOC 28.4 ending at SOC 76.8; it fails both floors and now
+    yields an empty list rather than a capacity table with 2.70% scatter at a
+    depth that reads several percent high.
 
-        variant           vehicles   total n   med n   med resid%   med cov%   med dSOC
-        1%, floor 70         18/20      1219      52         0.61       96.6       79.9
-        5%, no floor         20/20      7317     390         1.02       99.9       60.0
+    Why a depth floor at all: with the charge endpoint held fixed,
+    capacity-vs-dSOC is flat above ~70 points and inflates below — roughly +1%
+    at dSOC 50-60 against the >=70 reference, rising to ~+7% below 20. A cluster
+    whose median dSOC sits below 50 is measuring the inflation, not the cell.
+    Admitting the 50-70 band therefore accepts a known ~1% upward bias on those
+    sessions in exchange for coverage.
 
-    Six times the sessions and near-total record coverage, at 1.7x the
-    trend-residual scatter. The scatter is the price of a broad cluster: the
-    selected population spans ~28 dSOC points p10-p90 against ~4 before, and its
-    dSOC mix wanders 9-15 points from quarter to quarter. That wandering is
-    non-monotonic, so it inflates scatter rather than faking a trend, and on
-    trend precision the trade is favourable — the standard error of the ageing
-    trend improves from 0.085 to 0.052.
+    ``median_V_max`` was an earlier completeness criterion and is still computed
+    in ``summarize_clusters``. SOC_end says the same thing in SOC points and is
+    not lifted by the current-dependent IR offset that inflates V_max on fast
+    charges. The CV-tail rate is deliberately unused — it was the criterion
+    before that and made the stage circular (it is also a clustering input).
+    Both remain useful as independent checks on what was selected.
 
-    The bias it accepts is real but small. With the charge endpoint held fixed,
-    capacity-vs-dSOC is flat above 70 points and inflates below: ~+1% at dSOC
-    50-60 against the >=70 reference, rising to ~+7% below 20. A median dSOC of
-    60 therefore reads roughly 1% high.
-
-    **Vehicle 9 is the case to watch.** Without a floor it selects a cluster at
-    median dSOC 28.4 — its deep sessions are all in noise at this
-    min_cluster_size, 49% of the vehicle — giving 2.70% residual scatter, four
-    times the fleet median, at a depth where the estimate reads several percent
-    high. It is *found* rather than *usable*. A floor around 40 would return
-    None there instead, at the cost of dropping back to 19 of 20.
+    Note the floors cannot rescue a stranded population — they only reject a bad
+    cluster. If a vehicle's deep sessions are all label -1, as vehicle 10's 60
+    deepest still are, no admissible cluster contains them.
     """
     summary = summarize_clusters(labeled)
     candidates = summary[
         (summary["cluster_label"] != -1)
-        & (summary["median_dSOC"] >= min_median_dsoc)
+        & (summary["median_dSOC"] > min_median_dsoc)
+        & (summary["median_SOC_end"] > min_median_soc_end)
     ]
     if candidates.empty:
-        return None
-    return int(
-        candidates.sort_values(
-            ["median_SOC_end", "median_dSOC"], ascending=[False, False]
-        ).iloc[0]["cluster_label"]
-    )
+        return []
+    return [
+        int(c)
+        for c in candidates.sort_values("median_dSOC", ascending=False)["cluster_label"]
+    ]
 
 
 if __name__ == "__main__":
@@ -252,12 +302,12 @@ if __name__ == "__main__":
         print(f"  sessions={len(labeled)}  clusters={n_clusters}  noise={n_noise}")
         summary = summarize_clusters(labeled)
         print(summary.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
-        cap = pick_cap_cluster(labeled)
-        if cap is None:
+        cap = pick_cap_clusters(labeled)
+        if not cap:
             print("  ← no cluster selected")
         else:
-            cap_rows = labeled[labeled["cluster_label"] == cap]
-            print(f"  ← CAP cluster: {cap}  (n={len(cap_rows)}, "
+            cap_rows = labeled[labeled["cluster_label"].isin(cap)]
+            print(f"  ← CAP clusters: {cap}  (n={len(cap_rows)}, "
                   f"median dSOC={cap_rows['dSOC'].median():.1f}, "
                   f"SOC_end={cap_rows['SOC_end'].median():.1f}, "
                   f"CV-tail rate={cap_rows['has_cv_tail'].mean():.1%})")

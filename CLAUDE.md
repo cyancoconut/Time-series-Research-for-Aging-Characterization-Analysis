@@ -287,11 +287,13 @@ Smoke-tested: all 20 vehicles load cleanly, 100 % non-null on every canonical co
 
 Charging-session segmentation (per the dataset's own `capacity_extract.py`): `dt > 10 s` between consecutive rows. Vehicle #1 has 4 223 sessions over 843 days, with **197 sessions of ΔSOC > 70 %** (strong CAP candidates).
 
-**Later stages (planned, not yet built):**
-- F2 (shiyunliu) — session segmentation + per-session feature extraction (`duration_s, dSOC, I_mean, I_std, has_CV_tail, T_mean, SOC_start, SOC_end`).
-- F3 — HDBSCAN cluster on the per-session feature matrix → pick the "full CC-CV" cluster as the CAP equivalent.
-- F4 — coulomb-count CAP-cluster sessions → SOH timeline per vehicle; emit `40_capacity_monitore`-shaped CSV so the existing aging-status monitor and aging matrix run unchanged.
-- F5 — benchmark our extracted capacities against the dataset author's published Fig1.png values.
+**Later stages (all built):**
+- **F2 — `field/sessions.py`**: `split_sessions` (10 s gap rule) + `session_features` → `duration_s, dSOC, I_mean, I_std, has_cv_tail, V_max, SOC_start, SOC_end`.
+- **F3 — `field/cluster_sessions.py`**: HDBSCAN on **`dSOC` alone** (the wider feature set was circular — `has_cv_tail` was both an input and the answer). `min_cluster_size = max(10, 2% of sessions)`, `min_samples = mcs // 2`, `cluster_selection_epsilon = 0.03`. `pick_cap_clusters` returns **every** cluster with `median_dSOC > 50` **and** `median_SOC_end > 95`, deepest first — multiple CAP clusters per vehicle are normal (1–3, median 2). Returns `[]` when nothing qualifies, so a vehicle with no usable population yields an empty capacity table rather than a bad one.
+- **F4 — `field/extract_capacity.py`**: coulomb-counts every session in any CAP cluster (`Capacity_py = ∫|I|dt / (|ΔSOC|/100)`), accumulating `Ah_throughput` over *all* sessions. Emits `40_capacity_monitore/<vehicle>_capacity.csv` per session (deliberately not monthly-aggregated) so the existing aging-status monitor and aging matrix run unchanged.
+- **F5 — `field/benchmark_shiyunliu.py`** + figures in **`field/plot_field.py`** (`--out-dir`; writes `field_timeline/_fleet/_fleet_timelines/_medians.pdf`). Current fleet result: HDBSCAN cuts capacity scatter about the ageing trend by **1.71×** (median, IQR 1.60–1.99), better on 20/20 vehicles.
+
+`min_cluster_size` is the touchy parameter and is non-monotonic, because it does two different jobs depending on the vehicle. On a *modal* vehicle (e.g. #9) the deep charges form discrete dSOC bands with real density valleys between them, so it decides *which mode* is selected; on a *plateau* vehicle (e.g. #10) the deep range is flat with no dip, so it decides *how much of the continuum* is taken. At the earlier 5 % default all 167 of vehicle 9's `dSOC ≥ 70` sessions were stranded in noise and the pick landed on a shallow cluster (median dSOC 28.4, ending at SOC 76.8, 2.70 % scatter) that its own noise bucket beat on every criterion. Note the floors reject a bad cluster but cannot rescue a stranded population — vehicle 10's 60 deepest sessions are still label −1.
 
 **Legacy code from earlier scopes** (kept for reference): `io_rwth.py` (RWTH Aachen adapter) and `segment.py` (rule-based DRIVE/CHARGE/REST segmenter that was the F2 of an earlier plan). Both remain useful as sibling adapters / reference implementations; neither is on the path of the current shiyunliu work.
 

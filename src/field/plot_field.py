@@ -340,9 +340,9 @@ def medians(base_dir: str, out_path: str) -> str:
         if feats.empty:
             continue
         labeled = cs.cluster_sessions(feats)
-        cap_label = cs.pick_cap_cluster(labeled)
-        cap_ids = set(labeled.loc[labeled["cluster_label"] == cap_label, "session_id"]) \
-            if cap_label is not None else set()
+        cap_labels = cs.pick_cap_clusters(labeled)
+        cap_ids = set(labeled.loc[labeled["cluster_label"].isin(cap_labels), "session_id"]) \
+            if cap_labels else set()
         caps = []
         for sid, sub in df.groupby("session_id"):
             sf = labeled[labeled["session_id"] == sid]
