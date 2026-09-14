@@ -7,6 +7,7 @@ downstream calculation step expects.
 """
 
 import json
+import math
 import logging
 import os
 
@@ -38,7 +39,8 @@ _LABEL_TO_TAGGED = {
 
 
 def _map_llm_label_to_tagged(
-    label: str, abs_crate, cap_rate, cap_tol: float, qocv_rate=None, qocv_tol: float = 0.2
+    label: str, abs_crate, cap_rate, cap_tol: float, qocv_rate=None,
+    qocv_tol: float = 0.2, max_rate_ratio: float = 2.0
 ) -> str:
     """Map a free-form LLM cluster name (`full_discharge_c2`, `pulse`, `qocv_c20`,
     `mixed_*`, …) to the cluster-tagged form calculate/ matches on.
@@ -57,12 +59,25 @@ def _map_llm_label_to_tagged(
     - a ``full_charge`` / ``full_discharge`` is resolved by its **measured**
       C-rate (``abs_Current_mean``, already ÷ Nom_Capacity) — the same signal the
       rule filters key on — rather than trusting the LLM's full-vs-qocv call or
-      re-parsing the label's crate suffix:
-        * ``abs_crate <= qocv_rate * (1 + qocv_tol)`` -> ``QOCV*`` (a full sweep
-          at/below the configured quasi-OCV C-rate, charge or discharge).
-        * else a ``full_discharge`` within ``cap_rate * (1 ± cap_tol)`` -> ``CAP*``.
-      ``qOCV_CRate`` << ``cap_rate``, so the two bands never overlap; qocv is
-      checked first. With either rate unset that branch is skipped.
+      re-parsing the label's crate suffix, which carries the *training* cell's
+      vocabulary and is wrong on a cell whose capacity test runs at another rate.
+
+      The measured rate is assigned to whichever **declared** rate it is nearer
+      to in log space — ``cap_rate`` or ``qocv_rate`` — rather than tested
+      against a fixed band around each. A band has to be wide enough for the
+      worst case and narrow enough to exclude the other class, and there is no
+      such width when a protocol's measured rate sits systematically off its
+      declared one: a CCCV capacity test reads several percent low, because its
+      mean includes a constant-voltage tail decaying to the cutoff, and a ±5%
+      band rejects it while a band wide enough to admit it is no longer a
+      meaningful claim. Nearest-rate needs no width at all, because
+      ``qocv_rate`` and ``cap_rate`` differ by more than an order of magnitude
+      in any protocol containing both.
+
+      ``max_rate_ratio`` keeps the rule able to refuse: a sweep further than
+      this factor from *both* declared rates resolves to neither and passes
+      through unlabelled, so a full discharge at some third rate is not forced
+      into one of the two classes. With either rate unset the branch is skipped.
     """
     low = label.lower()
     if "pulse" in low:
@@ -73,14 +88,15 @@ def _map_llm_label_to_tagged(
         return "CAP*"
     if ("full_discharge" in low or "full_charge" in low) and abs_crate is not None:
         ac = abs(abs_crate)
-        if qocv_rate and ac <= qocv_rate * (1 + qocv_tol):
-            return "QOCV*"
-        if (
-            "full_discharge" in low
-            and cap_rate
-            and cap_rate * (1 - cap_tol) <= ac <= cap_rate * (1 + cap_tol)
-        ):
-            return "CAP*"
+        if ac > 0 and (qocv_rate or cap_rate):
+            d_qocv = abs(math.log(ac / qocv_rate)) if qocv_rate else math.inf
+            d_cap = abs(math.log(ac / cap_rate)) if cap_rate else math.inf
+            bound = math.log(max_rate_ratio)
+            if min(d_qocv, d_cap) <= bound:
+                if d_qocv <= d_cap:
+                    return "QOCV*"
+                if "full_discharge" in low:
+                    return "CAP*"
     return label
 
 
@@ -101,6 +117,7 @@ def predict_targets(
     meta_path: str,
     cap_rate=None,
     cap_tol: float = 0.05,
+    max_rate_ratio: float = 2.0,
     qocv_rate=None,
     qocv_tol: float = 0.2,
 ) -> pd.DataFrame:
@@ -157,7 +174,8 @@ def predict_targets(
         for idx, lbl in preds.fillna("-1").items():
             c = float(crate.loc[idx]) if crate is not None and pd.notna(crate.loc[idx]) else None
             tagged.append(
-                _map_llm_label_to_tagged(str(lbl), c, cap_rate, cap_tol, qocv_rate, qocv_tol)
+                _map_llm_label_to_tagged(str(lbl), c, cap_rate, cap_tol, qocv_rate,
+                                         qocv_tol, max_rate_ratio)
             )
         X_out["target"] = pd.Series(tagged, index=preds.index).astype(object)
     else:
