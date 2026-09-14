@@ -17,6 +17,8 @@ class DismemblerFunctions:
         # When set, every Zustand change inside a matching procedure also fires
         # a segment boundary so DCH and CHA become separate segments. None ->
         # behaviour is unchanged.
+        # Retained for configuration compatibility. Zustand changes now always
+        # fire a boundary, so this no longer gates anything.
         self.QOCV_PROCEDURE_FILTER = QOCV_PROCEDURE_FILTER
 
     def prefiltering(self, df_cell, drop_columns):
@@ -107,22 +109,26 @@ class DismemblerFunctions:
                 & (programm_df["ZUSTAND_Duration_minutes"].shift() > self.PAU_DURATION)
             )
 
-            # Within a qOCV procedure the discharge and charge halves share one
-            # Prozedur and are only separated by a sub-threshold PAU, so neither
-            # the Prozedur-change nor the long-PAU rule splits them. Fire a
-            # boundary on every Zustand change for rows whose Prozedur matches
-            # QOCV_PROCEDURE_FILTER. ZUSTAND_group already increments on each
-            # Zustand change, so a group change == a Zustand change. Inert
-            # (all-False) when the filter is unset or no Prozedur matches.
-            if self.QOCV_PROCEDURE_FILTER:
-                qocv_zustand_boundary = programm_df["Prozedur"].str.contains(
-                    self.QOCV_PROCEDURE_FILTER, na=False
-                ) & (
-                    programm_df["ZUSTAND_group"]
-                    != programm_df["ZUSTAND_group"].shift()
-                )
-            else:
-                qocv_zustand_boundary = pd.Series(False, index=programm_df.index)
+            # A Zustand change is a procedure boundary, always.
+            #
+            # This used to fire only for rows whose Prozedur matched
+            # QOCV_PROCEDURE_FILTER, added because a qOCV procedure's discharge
+            # and charge halves share one Prozedur and are separated by a
+            # sub-threshold PAU, so neither the Prozedur-change nor the long-PAU
+            # rule split them. That was the general case wearing a special
+            # case's clothes: without it the only boundary sources are the
+            # long-PAU rule and the procedure *name*, which makes segmentation
+            # depend on a protocol metadata column. A source that writes one
+            # constant Prozedur — any adapted external dataset — then has almost
+            # nothing to segment on.
+            #
+            # Firing on every Zustand change is what the method is documented to
+            # do, and it reads the state rather than the protocol.
+            # ZUSTAND_group already increments on each Zustand change, so a
+            # group change is a Zustand change.
+            zustand_boundary = (
+                programm_df["ZUSTAND_group"] != programm_df["ZUSTAND_group"].shift()
+            )
 
             # New procedure condition: PAU state + long duration + (group change OR first row)
             programm_df["new_procedure_start"] = (
@@ -142,8 +148,8 @@ class DismemblerFunctions:
                 # OR procedure change
                 (programm_df["Prozedur"] != programm_df["Prozedur"].shift())
                 |
-                # OR Zustand change inside a qOCV procedure
-                qocv_zustand_boundary
+                # OR any Zustand change
+                zustand_boundary
             )
 
             # Cumulative sum to create unique procedure identifiers
