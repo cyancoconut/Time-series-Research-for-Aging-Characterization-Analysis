@@ -258,6 +258,7 @@ def _process_cell_inner(
         cfg["tolerances"]["pulse_cluster_tolerance"],
         cfg["v_max"],
         cfg.get("tolerances", {}).get("qocv_duration_tolerance", 1.2),
+        cfg.get("tolerances", {}).get("cap_rate_tolerance", 0.05),
     )
 
     classifier_path = cfg.get("classifier_model_path")
@@ -276,6 +277,7 @@ def _process_cell_inner(
             meta_path,
             cap_rate=cfg.get("cap_rate"),
             qocv_rate=cfg.get("qocv_crate"),
+            cap_tol=cfg.get("tolerances", {}).get("cap_rate_tolerance", 0.05),
         )
         df_silver = model_and_supervise.merge_target(dismembered_df, X_silver)
         for col in df_silver.columns:

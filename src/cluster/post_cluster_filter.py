@@ -27,12 +27,21 @@ class cluster_filter:
         pulse_cluster_tolerance,
         V_max,
         qocv_duration_tolerance=1.2,
+        cap_rate_tolerance=0.05,
     ):
         self.number_programms = number_programms
         self.qOCV_CRate = qOCV_CRate
         self.Nom_Capacity = Nom_Capacity
         self.V_Nom = V_Nom
         self.CAP_Rate = CAP_Rate
+        # Half-width of the band a segment's measured rate must fall in to be
+        # resolved as the capacity test, as a fraction of CAP_Rate. 0.05 suits a
+        # constant-current capacity test, whose measured rate sits on the
+        # declared one. A CCCV capacity test reads roughly 6% low, because the
+        # mean includes a constant-voltage tail decaying to the cutoff, so it
+        # needs a wider band. Configurable rather than hardcoded so widening it
+        # for such a protocol does not loosen the criterion for every cell.
+        self.cap_rate_tolerance = cap_rate_tolerance
         self.CAP_Type = CAP_Type
         # CAP_Temp accepts a scalar or a list of target temperatures (°C).
         # temperature_filter keeps rows within ±3°C of *any* configured value.
@@ -62,10 +71,11 @@ class cluster_filter:
             mask_CRate = (abs(cluster_means["Current_mean"]) < self.CAP_Rate * 1.1) & (
                 abs(cluster_means["Current_mean"]) > self.CAP_Rate * 0.9
             )  # and the mean of current should be around cap_rate
+            _tol = self.cap_rate_tolerance
             mask_CRate_strict = (
-                abs(cluster_means["Current_mean"]) < self.CAP_Rate * 1.05
+                abs(cluster_means["Current_mean"]) < self.CAP_Rate * (1 + _tol)
             ) & (
-                abs(cluster_means["Current_mean"]) > self.CAP_Rate * 0.95
+                abs(cluster_means["Current_mean"]) > self.CAP_Rate * (1 - _tol)
             )  # layer-2 mask; ±5% absorbs cycler current inaccuracy (e.g. 1.55 A vs 1.50 A at C/2)
             mask_discharge = (
                 cluster_means["Current_mean"] < 0
