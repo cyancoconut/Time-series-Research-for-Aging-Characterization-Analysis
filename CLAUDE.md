@@ -650,20 +650,31 @@ After each test pulse a C/2 restore returns the cell to its original SoC. `updat
 
 After `df_gold.update(...)` in `_process_cell`, final targets are mapped per-`ID` onto `X_silver` and re-saved to `with_features_post_labeled/<cell>.csv`, overwriting intermediate cluster labels (CAP*/PUL*/QOCV*) with finals (CAP, PUL, PUL*RES, qOCV_DCH, qOCV_CHA, −1). Unmatched numeric labels are left as-is.
 
-## Field-data track (`src/field/`)
+## Field-data track — moved out of this repository
 
-Parallel pipeline for **EV field data**, separate from the cycler CU pipeline. Lives in `src/field/`.
+The field-data track (`src/field/`) lives in the manuscript repository, at
+`Project_METAbatt_paper/analysis/field/`, with its 28 commits of history
+preserved through a `git subtree` merge.
 
-Current focus: the **shiyunliu on-road EV charging dataset** (20 production EVs, ~29 months each, MIT licence; Deng et al. Applied Energy 339:120954; repo `shiyunliu-battery/battery-charging-data-of-on-road-electric-vehicles`). At `<working_data>/field_data/shiyunliu_20ev/` as `#1.csv`..`#20.csv` (~1.4 GB, ~800 k rows/vehicle). **Charging-only** — sessions detected by 10-s gaps; the goal is to identify "capacity tests" = opportunistic full CC-CV charges via a modified main.py + HDBSCAN.
+The copy that was here on `main` was stale: it predated the non-circular
+selection, the `cluster_selection_epsilon` fix and the multi-cluster CAP rule,
+and it was missing `plot_field.py` and `ica_prototype.py` entirely. The current
+code is the one in the manuscript repository.
 
-*(Earlier datasets, kept for reference: RWTH Aachen "Electric Vehicle and Battery Data" at `…/field_data/rwth_aachen/` — pre-segmented by activity, hence the pivot away. TUM FTM UDS at `…/field_data/tum_uds/` — only the 286 session JSONs, parquets blocked by LFS budget.)*
+It moved because nothing in this pipeline imported it — the dependency check is
+clean in both directions — and its only consumer is §6 of the paper ("Beyond
+check-ups: opportunistic capacity from field data"). Keeping it here meant the
+numbers printed in that section could go stale whenever this repository moved,
+with nothing able to detect it; that is what happened to the abstract's scatter
+figure, which claimed 2.47x while the selection rule had changed twice
+underneath it and the true figure was 1.71x.
 
-**Stage F1 — `field/io_shiyunliu.py`** (`python -m field.io_shiyunliu [base_dir]`): `load_vehicle(path)` returns canonical `Time / Voltage / Current / Temperature / SOC / Cell_V_max / Cell_V_min / Cell_T_min / Available_Energy_kWh / Available_Capacity_Ah` (extras preserved). Decodes `record_time` (int `YYYYMMDDhhmmss`) → UTC, strips unit suffixes, **negates `charge_current`** so positive = charging (raw convention is the opposite), and `check_sign_convention` re-verifies via dSOC/dt. Smoke-tested: all 20 load clean, 100 % non-null, ~842–847-day spans. **Outliers: vehicles #6 and #17** show post-negation max Current 400 A vs ~90–95 A elsewhere — treat with care. Session segmentation: `dt > 10 s`; vehicle #1 has 4 223 sessions, 197 with ΔSOC > 70 % (strong CAP candidates).
+**Do not re-add it here.** Code the check-up pipeline calls lives here; code
+whose only consumer is the manuscript lives with the manuscript. See
+`analysis/README.md` in that repository.
 
-**Planned (not built):** F2 — session segmentation + per-session features (`duration_s, dSOC, I_mean, I_std, has_CV_tail, T_mean, SOC_start, SOC_end`). F3 — HDBSCAN → pick the full CC-CV cluster as CAP. F4 — coulomb-count CAP sessions → SOH timeline, emit `40_capacity_monitore`-shaped CSV so the existing monitor/matrix run unchanged. F5 — benchmark against the author's published Fig1.png.
-
-Legacy (off the current path): `io_rwth.py`, `segment.py`.
-
+The datasets are unaffected and belong to neither repository:
+`<working_data>/field_data/{shiyunliu_20ev,rwth_aachen,tum_uds}/`.
 ## Documentation
 
 - `METAbatt_Pipeline_Report.md` — full technical report
