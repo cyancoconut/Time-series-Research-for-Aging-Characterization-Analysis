@@ -168,6 +168,30 @@ def _read_test_bytes_minio(client: Minio, bucket: str, object_name: str) -> byte
         return None
 
 
+def _has_ah_columns(frame: pd.DataFrame, object_name: str) -> bool:
+    """True when `frame` can contribute to the Ah counter, else warn and skip.
+
+    A malfunctioning test can log no current at all — the file is there, a few
+    seconds long, with no `Strom` column. `ParquetFile.read(columns=…)` does
+    **not** raise on a name missing from the schema, it silently returns the
+    columns it found, so such a file would otherwise reach `_frame_contributions`
+    as a `Zeit`-only frame and fail there with an opaque KeyError.
+
+    Skipping it is also the right answer physically: a recording without a
+    current channel booked no charge, exactly like the passive logger
+    `_compute_ah` is built around. The file still contributes its rows/stub to
+    `tests`, so nothing is lost from BRONZE_CU itself.
+    """
+    missing = [c for c in ("Zeit", "Strom") if c not in frame.columns]
+    if not missing:
+        return True
+    print(
+        f"  No Ah contribution from {object_name}: missing {missing} "
+        f"(columns: {list(frame.columns)})"
+    )
+    return False
+
+
 def _read_tests(
     cell_tests: list,
     download_from: str,
@@ -205,7 +229,8 @@ def _read_tests(
             except Exception as e:
                 print(f"  Error reading {object_name}: {e}")
                 continue
-            ah_frames.append(df[["Zeit", "Strom"]].copy())
+            if _has_ah_columns(df, object_name):
+                ah_frames.append(df[["Zeit", "Strom"]].copy())
             tests.append(df)
         else:
             # Non-CU: open via ParquetFile on the in-memory bytes. Read
@@ -224,9 +249,12 @@ def _read_tests(
                 continue
 
             try:
-                ah_frames.append(pf.read(columns=["Zeit", "Strom"]).to_pandas())
+                frame = pf.read(columns=["Zeit", "Strom"]).to_pandas()
             except Exception as e:
                 print(f"  Error reading Zeit/Strom from {object_name}: {e}")
+            else:
+                if _has_ah_columns(frame, object_name):
+                    ah_frames.append(frame)
 
             try:
                 first_rg = pf.read_row_group(0)
@@ -257,8 +285,15 @@ def _frame_contributions(frame: pd.DataFrame, gap_threshold_s=None) -> pd.DataFr
     duplicate timestamps **within this file** — a repeat sample of the same
     instant carries no new charge, but the same instant in a *different* file
     is a separate recording and must survive.
+
+    A frame without both columns contributes nothing (see `_has_ah_columns`);
+    callers are expected to have filtered those out already, so this is a
+    backstop, not the reporting path.
     """
-    df = frame.rename(columns={"Strom": "Current"})[["Zeit", "Current"]].copy()
+    df = frame.rename(columns={"Strom": "Current"})
+    if not {"Zeit", "Current"}.issubset(df.columns):
+        return pd.DataFrame({"Zeit": [], "Current": [], "contrib": []})
+    df = df[["Zeit", "Current"]].copy()
     df["Zeit"] = pd.to_datetime(df["Zeit"], utc=True, errors="coerce")
     df = (df.dropna(subset=["Zeit"])
             .drop_duplicates("Zeit")
@@ -403,8 +438,12 @@ def _build_full(
     tests: list, ah_frames: list, cell: str, gap_threshold_s=None
 ) -> tuple:
     bronze = _normalize_tests(tests)
-    if ah_frames:
-        df_ah = _compute_ah(ah_frames, gap_threshold_s=gap_threshold_s)
+    df_ah = (
+        _compute_ah(ah_frames, gap_threshold_s=gap_threshold_s)
+        if ah_frames
+        else pd.DataFrame()
+    )
+    if not df_ah.empty:
         bronze = _merge_ah(bronze, df_ah)
         ah_total, last_zeit, last_strom = _ah_watermark(df_ah)
     else:
@@ -425,11 +464,15 @@ def _build_incremental(
     offset = manifest.get("ah_total") or 0.0
     seed_zeit = manifest.get("last_zeit")
     seed_strom = manifest.get("last_strom")
-    if ah_frames:
-        df_ah = _compute_ah(
+    df_ah = (
+        _compute_ah(
             ah_frames, offset, seed_zeit, seed_strom,
             gap_threshold_s=gap_threshold_s,
         )
+        if ah_frames
+        else pd.DataFrame()
+    )
+    if not df_ah.empty:
         new_rows = _merge_ah(new_rows, df_ah)
         ah_total, last_zeit, last_strom = _ah_watermark(df_ah)
     else:
