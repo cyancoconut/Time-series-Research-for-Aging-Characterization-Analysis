@@ -85,6 +85,10 @@ def _is_unfinished(object_name: str) -> bool:
     integral), and once the test finishes it re-downloads under a *different*
     basename, which the incremental manifest would treat as a new file and
     double-count. Only integrate a test once it is finished.
+
+    Their tail is still recorded, separately, under the manifest's `unfinished`
+    key (`_unfinished_state`), so the aging monitor can show what a cell is
+    doing right now without any of it entering the committed state.
     """
     return os.path.basename(object_name).endswith("=unfinished.parquet")
 
@@ -419,6 +423,117 @@ def _ah_watermark(df_ah: pd.DataFrame) -> tuple:
     )
 
 
+def _unfinished_state(
+    unfinished_tests: list,
+    download_from: str,
+    minio_client: Minio | None,
+    bucket_name: str,
+    ah_total,
+    last_zeit,
+    last_strom,
+    gap_threshold_s=None,
+) -> dict | None:
+    """Provisional watermark over the still-running test files.
+
+    The unfinished files are kept out of BRONZE_CU and out of the manifest's
+    committed state (see `_is_unfinished`), which leaves the aging monitor
+    reading a `last_row_time` that predates the test currently running on the
+    cell. This reads them separately so the monitor has something recent to
+    show, *without* any of it reaching the committed numbers: the result is
+    written under the manifest's own `unfinished` key, recomputed from scratch
+    on every build, and never read back by `_load_incremental_state`. Once the
+    test finishes and re-downloads under its final basename, the block simply
+    disappears and the file is integrated normally.
+
+    The Ah total is seeded on the committed watermark (`ah_total`/`last_zeit`/
+    `last_strom`), the same bridge the incremental path uses, so the
+    provisional number is on the same scale as the real one rather than being
+    this file's charge in isolation. A partial export is allowed to be
+    malformed — anything that fails here costs the provisional value, never
+    the build.
+    """
+    frames = []
+    tails = []
+
+    for object_name in unfinished_tests:
+        if download_from == "local":
+            data = _read_test_bytes_local(object_name)
+        else:
+            data = _read_test_bytes_minio(minio_client, bucket_name, object_name)
+        if data is None:
+            continue
+        try:
+            pf = pq.ParquetFile(io.BytesIO(data))
+        except Exception as e:
+            print(f"  Error opening unfinished {object_name}: {e}")
+            continue
+        if pf.metadata.num_rows == 0 or pf.num_row_groups == 0:
+            continue
+
+        available = pf.schema_arrow.names
+        try:
+            frame = pf.read(columns=["Zeit", "Strom"]).to_pandas()
+        except Exception as e:
+            print(f"  Error reading Zeit/Strom from unfinished {object_name}: {e}")
+        else:
+            if _has_ah_columns(frame, object_name):
+                frames.append(frame)
+
+        tail_cols = [c for c in ("Zeit", "Prozedur") if c in available]
+        if "Zeit" not in tail_cols:
+            continue
+        try:
+            tail = pf.read_row_group(
+                pf.num_row_groups - 1, columns=tail_cols
+            ).to_pandas()
+        except Exception as e:
+            print(f"  Error reading tail from unfinished {object_name}: {e}")
+            continue
+        if tail.empty:
+            continue
+        zeit = pd.to_datetime(tail["Zeit"].iloc[-1], utc=True, errors="coerce")
+        if pd.isna(zeit):
+            continue
+        prozedur = (
+            tail["Prozedur"].iloc[-1] if "Prozedur" in tail.columns
+            else _programme_name(object_name)
+        )
+        tails.append((zeit, prozedur))
+
+    if not frames and not tails:
+        return None
+
+    u_ah = u_zeit = u_strom = None
+    if frames:
+        try:
+            df_ah = _compute_ah(
+                frames, ah_total or 0.0, last_zeit, last_strom,
+                gap_threshold_s=gap_threshold_s,
+            )
+        except Exception as e:
+            print(f"  WARNING: provisional Ah over unfinished tests failed: {e}")
+        else:
+            if not df_ah.empty:
+                u_ah, u_zeit, u_strom = _ah_watermark(df_ah)
+
+    # The Ah watermark and the newest tail are the same sample whenever both
+    # were read; report the later one so a file whose Ah contribution was
+    # skipped (no `Strom`, unparseable `Zeit`) still moves the clock forward.
+    prozedur = None
+    if tails:
+        newest_zeit, prozedur = max(tails, key=lambda t: t[0])
+        if u_zeit is None or newest_zeit > pd.Timestamp(u_zeit):
+            u_zeit = newest_zeit.isoformat()
+
+    return {
+        "files": sorted(_manifest_key(t) for t in unfinished_tests),
+        "ah_total": u_ah,
+        "last_zeit": u_zeit,
+        "last_strom": u_strom,
+        "last_prozedur": prozedur,
+    }
+
+
 def _merge_ah(bronze: pd.DataFrame, df_ah: pd.DataFrame) -> pd.DataFrame:
     """Attach ``Ah_throughput`` to the output rows, on ``Zeit``.
 
@@ -551,6 +666,7 @@ def _save_manifest(
     last_zeit,
     last_strom,
     layer: str = "BRONZE_CU",
+    unfinished: dict | None = None,
 ) -> None:
     payload = {
         "processed": sorted({_manifest_key(p) for p in processed}),
@@ -558,6 +674,9 @@ def _save_manifest(
         "last_zeit": last_zeit,
         "last_strom": last_strom,
     }
+    # Provisional, never part of the committed state — see `_unfinished_state`.
+    if unfinished is not None:
+        payload["unfinished"] = unfinished
     text = json.dumps(payload, indent=2)
     if out_bronze_cu:
         mpath = _manifest_local_path(out_bronze_cu)
@@ -621,6 +740,7 @@ def process_cell(
     # Exclude still-running tests (…=unfinished.parquet) from the build — see
     # _is_unfinished. Applied in every mode so a full build can't integrate an
     # unfinished payload that a later incremental build would double-count.
+    unfinished_tests = [t for t in cell_tests if _is_unfinished(t)]
     cell_tests = [t for t in cell_tests if not _is_unfinished(t)]
     if not cell_tests:
         print(f"{cell} - only unfinished test files; nothing to build yet.")
@@ -642,12 +762,36 @@ def process_cell(
         if manifest is None:
             print(f"{cell} - no prior manifest/{layer}; doing a full build.")
 
+    # Mask the trapezoid contribution over inter-file gaps so dead time between
+    # test files doesn't book phantom Ah. Default (None) auto-derives the gap
+    # cut from the cell's sampling cadence; set `ah_gap_threshold_s` to pin a
+    # fixed seconds value instead.
+    gap_threshold_s = cfg.get("ah_gap_threshold_s")
+
     pending = cell_tests
     if manifest is not None:
         processed = set(manifest.get("processed", []))
         pending = [t for t in cell_tests if _manifest_key(t) not in processed]
         if not pending:
+            # Nothing new to integrate, but a test running on the cell moves on
+            # between builds, so refresh the provisional block and rewrite the
+            # manifest with the committed state untouched.
             print(f"{cell} - {layer} already up to date (no new test files).")
+            if unfinished_tests:
+                _save_manifest(
+                    cfg, cell, out_bronze_cu, upload_minio, minio_client,
+                    processed=cell_tests,
+                    ah_total=manifest.get("ah_total"),
+                    last_zeit=manifest.get("last_zeit"),
+                    last_strom=manifest.get("last_strom"),
+                    layer=layer,
+                    unfinished=_unfinished_state(
+                        unfinished_tests, download_from, minio_client,
+                        bucket_name, manifest.get("ah_total"),
+                        manifest.get("last_zeit"), manifest.get("last_strom"),
+                        gap_threshold_s=gap_threshold_s,
+                    ),
+                )
             return
         print(f"{cell} - {len(pending)} new test file(s) since last build.")
 
@@ -657,12 +801,6 @@ def process_cell(
     if not tests:
         print(f"{cell} - no data loaded.")
         return
-
-    # Mask the trapezoid contribution over inter-file gaps so dead time between
-    # test files doesn't book phantom Ah. Default (None) auto-derives the gap
-    # cut from the cell's sampling cadence; set `ah_gap_threshold_s` to pin a
-    # fixed seconds value instead.
-    gap_threshold_s = cfg.get("ah_gap_threshold_s")
 
     if manifest is not None:
         bronze, ah_total, last_zeit, last_strom = _build_incremental(
@@ -687,6 +825,11 @@ def process_cell(
         processed=cell_tests, ah_total=ah_total,
         last_zeit=last_zeit, last_strom=last_strom,
         layer=layer,
+        unfinished=_unfinished_state(
+            unfinished_tests, download_from, minio_client, bucket_name,
+            ah_total, last_zeit, last_strom,
+            gap_threshold_s=gap_threshold_s,
+        ) if unfinished_tests else None,
     )
 
 
