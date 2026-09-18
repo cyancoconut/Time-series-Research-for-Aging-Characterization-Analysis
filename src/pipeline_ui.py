@@ -549,7 +549,7 @@ class PipelineUI(ctk.CTk):
             "Fit + plot pulse (2RC)   →   <cell>_parameters.json + plots/"
         )
         self.ch_fit_eis = s.add_checkbox(
-            "Fit + plot EIS (2×ZARC + Warburg)   →   <cell>_parameters.json + plots/"
+            "Fit + plot EIS (N×ZARC + Warburg)   →   <cell>_parameters.json + plots/"
         )
         self.ch_fit_qocv = s.add_checkbox(
             "Plot qOCV   →   <cell>_parameters.json + plots/"
@@ -567,6 +567,19 @@ class PipelineUI(ctk.CTk):
         self.ch_clustering.set("Auto (config)")
         self.ch_clustering.pack(side="left")
 
+        # The EIS branch count. "Auto" leaves it to the DRT vote (or to
+        # eis_n_zarc if the config sets one); 1 / 2 pin it for this run without
+        # editing the config, which is what you want on a cell whose vote you
+        # have looked at and disagree with.
+        zarc = ctk.CTkFrame(s, fg_color="transparent")
+        zarc.grid(sticky="w", padx=4, pady=(2, 2))
+        ctk.CTkLabel(zarc, text="EIS ZARC branches:").pack(side="left", padx=(0, 6))
+        self.ch_n_zarc = ctk.CTkSegmentedButton(
+            zarc, values=["Auto (DRT vote)", "1", "2"],
+        )
+        self.ch_n_zarc.set("Auto (DRT vote)")
+        self.ch_n_zarc.pack(side="left")
+
         ctk.CTkLabel(
             parent,
             text=(
@@ -575,8 +588,11 @@ class PipelineUI(ctk.CTk):
                 "the parametrization test files. Outputs go to <working_path>/"
                 "10_initial_characterization/<cell>/ (data/, plots/, "
                 "<cell>_parameters.json); the BOL capacity CSV stays out of "
-                "40_capacity_monitore/. Fixed models: 2RC (pulse), 2×ZARC + "
-                "generalized Warburg (EIS). The three fit blocks run "
+                "40_capacity_monitore/. Models: 2RC (pulse), N×ZARC + "
+                "generalized Warburg (EIS). The EIS branch count is one number "
+                "for the whole cell — on Auto the DRT votes it, or pin 1 / 2 "
+                "here to override both the vote and eis_n_zarc. The three fit "
+                "blocks run "
                 "independently (--only): unticking one keeps its previous "
                 "results in <cell>_parameters.json instead of refitting it. "
                 "Not part of 'Run all' — this is a one-off BOL step, not part "
@@ -632,6 +648,7 @@ class PipelineUI(ctk.CTk):
         if s.get("ch_overwrite"):
             self.ch_overwrite.select()
         self.ch_clustering.set(s.get("ch_clustering", "Auto (config)"))
+        self.ch_n_zarc.set(s.get("ch_n_zarc", "Auto (DRT vote)"))
 
         dl = {**DEFAULT_DOWNLOAD_CFG, **s.get("download_cfg", {})}
         self._apply_download_cfg(dl)
@@ -659,6 +676,7 @@ class PipelineUI(ctk.CTk):
             "ch_fit_qocv": bool(self.ch_fit_qocv.get()),
             "ch_overwrite": bool(self.ch_overwrite.get()),
             "ch_clustering": self.ch_clustering.get(),
+            "ch_n_zarc": self.ch_n_zarc.get(),
             "download_cfg": self._collect_download_cfg(),
         })
         _save_ui_state(self._state)
@@ -970,6 +988,9 @@ class PipelineUI(ctk.CTk):
         parts = self._char_fit_parts()
         if len(parts) < 3:                 # all three ticked == the plain run
             argv += ["--only", *parts]
+        n_zarc = self.ch_n_zarc.get()
+        if n_zarc.isdigit():               # "Auto (DRT vote)" passes nothing
+            argv += ["--n-zarc", n_zarc]
         return argv
 
     def _collect_characterization_steps(self) -> list[tuple[str, list[str]]] | None:
