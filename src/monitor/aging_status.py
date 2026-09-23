@@ -29,13 +29,18 @@ RED_THRESHOLD = 60.0
 
 
 def _make_readers(cfg, source):
-    """Return (cells, fetch_capacity, fetch_bronze_tail).
+    """Return (cells, fetch_capacity, fetch_bronze_tail, fetch_manifest).
 
     fetch_bronze_tail(stem) returns a 1-row DataFrame with Time + Prozedur of
     the last row in the cell's BRONZE_CU parquet, or None if BRONZE_CU is
     missing. BRONZE_CU's last row is the last-row stub of the most recent
     cycling test (see build_bronze_cu_with_ah), so this reflects the cell's
     most recent activity without needing a pipeline run.
+
+    fetch_manifest(stem) returns the BRONZE_CU manifest sidecar as a dict, or
+    None. Its `unfinished` block carries the tail of the test *currently
+    running* on the cell, which by construction is absent from BRONZE_CU
+    itself — see `_latest_activity`.
     """
     if source == "local":
         wp = cfg["working_path"]
@@ -52,7 +57,14 @@ def _make_readers(cfg, source):
                 return None
             return _read_bronze_tail(path)
 
-        return cells, fetch_capacity, fetch_bronze_tail
+        def fetch_manifest(stem):
+            path = os.path.join(wp, "BRONZE_CU", f"{stem}_manifest.json")
+            if not os.path.exists(path):
+                return None
+            with open(path) as f:
+                return json.load(f)
+
+        return cells, fetch_capacity, fetch_bronze_tail, fetch_manifest
 
     client = io_router.make_minio_client(cfg)
     bucket = cfg["bucket_name"]
@@ -84,7 +96,19 @@ def _make_readers(cfg, source):
         finally:
             f.close()
 
-    return cells, fetch_capacity, fetch_bronze_tail
+    def fetch_manifest(stem):
+        key = f"{cfg['minio_prefix']}/BRONZE_CU/{stem}_manifest.json"
+        try:
+            response = client.get_object(bucket, key)
+        except Exception:
+            return None
+        try:
+            return json.loads(response.read())
+        finally:
+            response.close()
+            response.release_conn()
+
+    return cells, fetch_capacity, fetch_bronze_tail, fetch_manifest
 
 
 def _read_bronze_tail(source):
@@ -129,6 +153,38 @@ def _has_unfinished_pertest(cell_stem, cfg, source, client=None):
     return False
 
 
+def _latest_activity(tail, manifest):
+    """(last_time, last_prozedur) from the BRONZE_CU tail and the manifest's
+    `unfinished` block, whichever is newer.
+
+    A still-running test is deliberately excluded from BRONZE_CU (its partial
+    export would corrupt the Ah integral and double-count once it finishes), so
+    on exactly the cells this monitor cares about most — the ones working right
+    now — BRONZE_CU's last row predates the current test, by as much as a whole
+    check-up. `build_bronze_cu_with_ah` records that file's tail separately
+    under the manifest's `unfinished` key, so prefer it when it is ahead.
+    """
+    last_t = pd.NaT
+    last_prozedur = None
+    if tail is not None and not tail.empty:
+        if "Time" in tail.columns:
+            last_t = pd.to_datetime(tail["Time"].iloc[0], errors="coerce")
+        if "Prozedur" in tail.columns:
+            last_prozedur = tail["Prozedur"].iloc[0]
+
+    block = (manifest or {}).get("unfinished") or {}
+    u_t = pd.to_datetime(block.get("last_zeit"), errors="coerce", utc=True)
+    if pd.isna(u_t):
+        return last_t, last_prozedur
+
+    ref = last_t
+    if pd.notna(ref) and ref.tzinfo is None:
+        ref = ref.tz_localize("UTC")
+    if pd.isna(ref) or u_t > ref:
+        return u_t, block.get("last_prozedur") or last_prozedur
+    return last_t, last_prozedur
+
+
 def _cell_summary(df):
     if df.empty or "SOH" not in df.columns:
         return {"latest_soh": None, "delta_soh_per_cu": None, "n_cu": 0}
@@ -149,7 +205,7 @@ def _cell_summary(df):
 
 
 def build_status_table(cfg, source="minio"):
-    cells, fetch_capacity, fetch_bronze_tail = _make_readers(cfg, source)
+    cells, fetch_capacity, fetch_bronze_tail, fetch_manifest = _make_readers(cfg, source)
     logging.info(f"Found {len(cells)} capacity CSVs ({source})")
 
     client = io_router.make_minio_client(cfg) if source == "minio" else None
@@ -171,13 +227,18 @@ def build_status_table(cfg, source="minio"):
         last_prozedur = None
         try:
             tail = fetch_bronze_tail(cell_stem)
-            if tail is not None and not tail.empty:
-                if "Time" in tail.columns:
-                    last_t = pd.to_datetime(tail["Time"].iloc[0], errors="coerce")
-                if "Prozedur" in tail.columns:
-                    last_prozedur = tail["Prozedur"].iloc[0]
         except Exception as e:
+            tail = None
             logging.warning(f"{cell_stem}: BRONZE_CU tail read failed: {type(e).__name__}: {e}")
+        try:
+            manifest = fetch_manifest(cell_stem)
+        except Exception as e:
+            manifest = None
+            logging.warning(f"{cell_stem}: manifest read failed: {type(e).__name__}: {e}")
+        try:
+            last_t, last_prozedur = _latest_activity(tail, manifest)
+        except Exception as e:
+            logging.warning(f"{cell_stem}: activity read failed: {type(e).__name__}: {e}")
 
         if _has_unfinished_pertest(cell_stem, cfg, source, client):
             status = "unfinished"
