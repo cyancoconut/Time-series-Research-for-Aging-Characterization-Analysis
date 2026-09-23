@@ -316,8 +316,6 @@ def _frame_contributions(frame: pd.DataFrame, gap_threshold_s=None) -> pd.DataFr
 def _compute_ah(
     ah_frames: list,
     offset: float = 0.0,
-    seed_zeit=None,
-    seed_strom=None,
     gap_threshold_s=None,
 ) -> pd.DataFrame:
     """Cumulative Ah throughput over `ah_frames`, returning a df with Zeit +
@@ -342,16 +340,28 @@ def _compute_ah(
     timestamps where it actually flowed, and a zero-current logger contributes
     nothing instead of corrupting its neighbours.
 
-    For the incremental path, a synthetic seed row `(seed_zeit, seed_strom)` is
-    prepended so the trapezoid integral bridges the gap from the last
-    previously-processed sample, and `offset` (the prior cumulative total) is
-    added. The seed row is dropped before returning. For the full path,
-    `offset=0` and `seed_zeit=None`.
+    **Nothing is booked between files.** Each frame's first row has no
+    predecessor *within that frame*, so it contributes zero, and the interval
+    separating two files is in no frame at all. That is the right answer — no
+    instrument was recording across it — and it is what makes an incremental
+    build equal a full rebuild by construction: the incremental path integrates
+    only the new files and adds `offset` (the prior cumulative total), which is
+    exactly the sum a full build would have reached over the same files.
+
+    There used to be a "bridge" here: a synthetic two-row frame joining the
+    manifest's watermark to the earliest new sample, so the integral spanned the
+    append seam. It dated from when the full path integrated the *union* of all
+    rows, where that seam did carry a trapezoid; once integration went per-file
+    the full path stopped booking it, and the bridge became the only term that
+    could — inverting its purpose from preserving full↔incremental equality to
+    being the sole thing breaking it. Worse, it could not be masked: a two-row
+    frame gives `gap_cut` a single interval, its `len(dt_s) > 2` guard returns
+    `None` ("mask nothing"), so a park between two test files booked its
+    interpolated current in full, and no `gap_factor` could have caught it.
 
     `gap_threshold_s` zeroes out the phantom throughput integrated across dead
-    time (see `util.add_ah_throughput`). It applies within each file and on the
-    seed→first-new-row bridge, so a real parking gap there contributes nothing
-    while `offset` still carries the prior cumulative total forward.
+    time *within* a file (see `util.add_ah_throughput`), which is where a file
+    spanning its own long rest still needs it.
     """
     parts = [_frame_contributions(f, gap_threshold_s) for f in ah_frames]
     parts = [p for p in parts if not p.empty]
@@ -359,22 +369,6 @@ def _compute_ah(
         return pd.DataFrame(columns=["Zeit", "Current", "Ah_throughput"])
 
     _warn_on_concurrent_current(parts)
-
-    if seed_zeit is not None:
-        # The bridge is between files, so it is its own two-row "recording":
-        # the seed sample and the earliest new one.
-        first = min(p["Zeit"].iloc[0] for p in parts)
-        first_current = next(
-            p["Current"].iloc[0] for p in parts if p["Zeit"].iloc[0] == first
-        )
-        bridge = _frame_contributions(
-            pd.DataFrame({"Zeit": [pd.Timestamp(seed_zeit), first],
-                          "Strom": [seed_strom, first_current]}),
-            gap_threshold_s,
-        )
-        # Only the bridge contribution is wanted; the endpoint rows themselves
-        # are already carried by the seed's own build and by `parts`.
-        parts.append(bridge.iloc[1:])
 
     allc = pd.concat(parts, ignore_index=True).sort_values("Zeit")
     # Two files sharing a timestamp each booked their own charge there; keep the
@@ -384,9 +378,6 @@ def _compute_ah(
     )
     df_ah["Ah_throughput"] = df_ah["contrib"].cumsum() + (offset or 0.0)
     df_ah = df_ah.drop(columns="contrib")
-    if seed_zeit is not None:
-        seed_ts = pd.to_datetime(seed_zeit, utc=True)
-        df_ah = df_ah[df_ah["Zeit"] != seed_ts].reset_index(drop=True)
     return df_ah
 
 
@@ -429,8 +420,6 @@ def _unfinished_state(
     minio_client: Minio | None,
     bucket_name: str,
     ah_total,
-    last_zeit,
-    last_strom,
     gap_threshold_s=None,
 ) -> dict | None:
     """Provisional watermark over the still-running test files.
@@ -445,10 +434,12 @@ def _unfinished_state(
     test finishes and re-downloads under its final basename, the block simply
     disappears and the file is integrated normally.
 
-    The Ah total is seeded on the committed watermark (`ah_total`/`last_zeit`/
-    `last_strom`), the same bridge the incremental path uses, so the
-    provisional number is on the same scale as the real one rather than being
-    this file's charge in isolation. A partial export is allowed to be
+    The Ah total is offset by the committed `ah_total`, the same way the
+    incremental path carries its own total forward, so the provisional number
+    is on the same scale as the real one rather than being this file's charge
+    in isolation. Like any other file the running test is integrated on its
+    own, and the seam back to the last committed sample books nothing — see
+    `_compute_ah`. A partial export is allowed to be
     malformed — anything that fails here costs the provisional value, never
     the build.
     """
@@ -507,8 +498,7 @@ def _unfinished_state(
     if frames:
         try:
             df_ah = _compute_ah(
-                frames, ah_total or 0.0, last_zeit, last_strom,
-                gap_threshold_s=gap_threshold_s,
+                frames, ah_total or 0.0, gap_threshold_s=gap_threshold_s,
             )
         except Exception as e:
             print(f"  WARNING: provisional Ah over unfinished tests failed: {e}")
@@ -577,13 +567,8 @@ def _build_incremental(
 ) -> tuple:
     new_rows = _normalize_tests(tests)
     offset = manifest.get("ah_total") or 0.0
-    seed_zeit = manifest.get("last_zeit")
-    seed_strom = manifest.get("last_strom")
     df_ah = (
-        _compute_ah(
-            ah_frames, offset, seed_zeit, seed_strom,
-            gap_threshold_s=gap_threshold_s,
-        )
+        _compute_ah(ah_frames, offset, gap_threshold_s=gap_threshold_s)
         if ah_frames
         else pd.DataFrame()
     )
@@ -591,8 +576,12 @@ def _build_incremental(
         new_rows = _merge_ah(new_rows, df_ah)
         ah_total, last_zeit, last_strom = _ah_watermark(df_ah)
     else:
+        # Nothing integrable in the new files; the watermark stands where the
+        # previous build left it.
         ah_total, last_zeit, last_strom = (
-            manifest.get("ah_total"), seed_zeit, seed_strom,
+            manifest.get("ah_total"),
+            manifest.get("last_zeit"),
+            manifest.get("last_strom"),
         )
     combined = pd.concat([existing_bronze, new_rows], ignore_index=True)
     combined = _assign_bm_programm(combined)
@@ -788,7 +777,6 @@ def process_cell(
                     unfinished=_unfinished_state(
                         unfinished_tests, download_from, minio_client,
                         bucket_name, manifest.get("ah_total"),
-                        manifest.get("last_zeit"), manifest.get("last_strom"),
                         gap_threshold_s=gap_threshold_s,
                     ),
                 )
@@ -827,8 +815,7 @@ def process_cell(
         layer=layer,
         unfinished=_unfinished_state(
             unfinished_tests, download_from, minio_client, bucket_name,
-            ah_total, last_zeit, last_strom,
-            gap_threshold_s=gap_threshold_s,
+            ah_total, gap_threshold_s=gap_threshold_s,
         ) if unfinished_tests else None,
     )
 
