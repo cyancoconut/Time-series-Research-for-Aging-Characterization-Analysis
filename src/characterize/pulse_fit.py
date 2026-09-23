@@ -654,13 +654,28 @@ def _onset_step_voltage(t, v, t_p, i_pulse, slope_k=0.005):
     ``|dV/dt|`` has dropped below ``slope_k * |i_pulse|`` (V/s) — the threshold
     scales with current so it auto-adapts across C-rates. Falls back to ``v[0]``
     when there are too few early samples to form a slope.
+
+    A slope needs a predecessor *inside* the array, so index 0 is excluded (with
+    ``t[0] > 0`` it would otherwise wrap to ``-1`` and difference against the last
+    sample of the window). Samples sharing a timestamp with their predecessor
+    carry no slope either — the cycler repeats a timestamp at 1 Hz logging — and
+    are held at ``inf`` so the knee search skips them instead of dividing by zero.
     """
     t = np.asarray(t, dtype=float)
     v = np.asarray(v, dtype=float)
     early = np.where((t > 0) & (t <= min(2.0, t_p)))[0]
+    early = early[early > 0]
     if len(early) < 1:
         return float(v[0])
-    dvdt = np.abs((v[early] - v[early - 1]) / (t[early] - t[early - 1]))
+    dt = t[early] - t[early - 1]
+    dvdt = np.abs(
+        np.divide(
+            v[early] - v[early - 1],
+            dt,
+            out=np.full(len(early), np.inf),
+            where=dt > 0,
+        )
+    )
     below = early[dvdt < slope_k * abs(i_pulse)]
     k = below[0] if len(below) else early[-1]
     return float(v[k])
