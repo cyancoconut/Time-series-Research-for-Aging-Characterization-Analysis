@@ -85,12 +85,19 @@ SOC_ORDER = ["90%", "50%", "10%"]
 DEFAULT_SOC = "50%"  # used when a cell lacks len(SOC_ORDER) distinct cycles
 REMOVE_PULSE_BEFORE_MIN = 0       # drop pulses earlier than this into a cycle
                                   # (0 = keep all; kept inert here)
-# Pulses to exclude from the fit by their ``Zustand/Current`` identity. The
-# lead DCH/-1.5 pulse has no pre-pulse pause, so its onset-R0 cross-check is
-# unavailable and only the termination jump remains; the RC fit then degenerates
-# (the step is undersampled at ~0.2 s, so the early double-layer region the RC
-# needs is unmeasured). Dropped by label rather than by timing.
-EXCLUDE_ZUSTAND_CURRENT = ["DCH/-1.5"]
+
+# Amplitude whitelist: fit *only* pulses whose |I| plateau matches one of these
+# amperages, within ``PULSE_CURRENT_TOL`` (relative). Empty (the default) keeps
+# every pulse, i.e. the gate is off. Matched on |I|, so one entry covers the CHA
+# and the DCH pulse of the same amplitude: a pulse is wanted for its amplitude,
+# and the CHA/DCH pair at one amplitude is one measurement of the same step.
+# An HPPC leg interleaves the test pulse with a restore step
+# of a different amplitude, and a run may carry several test amplitudes whose
+# resistances are not one series - naming the amplitude picks the wanted one
+# without depending on where it sits in the sequence, and without a per-cell
+# ``Zustand/Current`` label (which is amplitude *and* rounding dependent).
+PULSE_CURRENT_A = []
+PULSE_CURRENT_TOL = 0.05          # relative half-width of each amplitude window
 CYCLE_ACTIVE_LIMIT_HOUR = 3.5     # time_diff > this starts a new cycle
 # 3.5 h, not 4.0: the rest between two SOC stadiums is the SOC-adjust step, and
 # it *shrinks as the cell ages* (less Ah to move). On VTC6_004 it slides 4.46 h
@@ -150,7 +157,8 @@ _CONFIG_GLOBALS = {
     "rest_current_a": "REST_CURRENT_A",
     "cycle_active_limit_hour": "CYCLE_ACTIVE_LIMIT_HOUR",
     "r_dc_delta_t_s": "R_DC_DELTA_T",
-    "exclude_zustand_current": "EXCLUDE_ZUSTAND_CURRENT",
+    "pulse_current_a": "PULSE_CURRENT_A",
+    "pulse_current_tolerance": "PULSE_CURRENT_TOL",
     "remove_pulse_before_min": "REMOVE_PULSE_BEFORE_MIN",
     "soc_sweep_direction": "SOC_SWEEP_DIRECTION",
     "soc_step_pct": "SOC_SWEEP_STEP_PCT",
@@ -316,31 +324,60 @@ def _is_bad_current_segment(group):
     return bool(cur.std() > PULSE_STD_FRACTION * amp)
 
 
-def _segment_zc(grp):
-    """Representative ``Zustand/Current`` label of a pulse segment (e.g. DCH/-1.5)."""
-    active = grp.loc[grp["Current"].abs() > REST_CURRENT_A, "Zustand/Current"]
-    src = active if not active.empty else grp["Zustand/Current"]
-    return src.mode().iloc[0]
+def _segment_amplitude(grp):
+    """Median |I| over a segment's active rows, in A (NaN when it has none)."""
+    cur = grp.loc[grp["Current"].abs() > REST_CURRENT_A, "Current"]
+    if cur.empty:
+        return float("nan")
+    return float(cur.abs().median())
+
+
+def _matches_current(amp, allowed, tol):
+    """True when ``amp`` (A) is within ``tol`` (relative) of an allowed amplitude.
+
+    ``allowed`` empty/None -> the gate is off and everything matches. An
+    amplitude that could not be measured (NaN) never matches an active gate:
+    a whitelist states which pulses are wanted, so an unknown one is excluded
+    rather than waved through.
+    """
+    if not allowed:
+        return True
+    if not np.isfinite(amp):
+        return False
+    return any(abs(amp - abs(float(a))) <= abs(tol * float(a)) for a in allowed)
 
 
 def select_pulse_segments(
     labeled,
     remove_before_min=REMOVE_PULSE_BEFORE_MIN,
-    exclude_zc=EXCLUDE_ZUSTAND_CURRENT,
+    current_a=None,
+    current_tol=None,
 ):
     """Return the list of *good* pulse ``pulse_segment_id`` values, in time order.
 
-    A good pulse: Zustand in {CHA, DCH}, stable current, not in ``exclude_zc``
-    (matched on the ``Zustand/Current`` label), and starting at least
-    ``remove_before_min`` minutes into its cycle.
+    A good pulse: Zustand in {CHA, DCH}, stable current, starting at least
+    ``remove_before_min`` minutes into its cycle, and - when a current
+    whitelist is active - carrying one of the wanted |I| amplitudes
+    (either polarity; the gate matches on |I|).
+
+    ``current_a`` / ``current_tol`` default to :data:`PULSE_CURRENT_A` /
+    :data:`PULSE_CURRENT_TOL` read **at call time** (``None`` sentinel),
+    so a config loaded after import still applies. ``current_a=[]``
+    switches the gate off explicitly.
     """
-    exclude_zc = set(exclude_zc or [])
+    current_a = PULSE_CURRENT_A if current_a is None else current_a
+    current_tol = (
+        PULSE_CURRENT_TOL if current_tol is None else float(current_tol)
+    )
     pulses = labeled[labeled["Zustand"].isin(["CHA", "DCH"])]
     good = []
     for seg_id, grp in pulses.groupby("pulse_segment_id", sort=False):
-        zc = _segment_zc(grp)
-        if zc in exclude_zc:
-            logging.info("skip pulse seg %s: excluded by Zustand/Current=%s", seg_id, zc)
+        amp = _segment_amplitude(grp)
+        if not _matches_current(amp, current_a, current_tol):
+            logging.info(
+                "skip pulse seg %s: |I|=%.3f A not in %s A (+-%.0f%%)",
+                seg_id, amp, list(current_a), 100 * current_tol,
+            )
             continue
         if grp["time_from_cycle_start_min"].min() < remove_before_min:
             logging.info(
@@ -1501,7 +1538,8 @@ def plot_validation(curves, val_df, out_png):
     logging.info("validation plot -> %s", out_png)
 
 
-def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
+def fit_folder(folder, nom_capacity, remove_before_min,
+               current_a=None, current_tol=None):
     """Fit every pulse file in ``folder`` and return one combined results table.
 
     Each BM_Programm can have several files (stale stubs + the rehydrated
@@ -1528,7 +1566,9 @@ def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc):
             logging.info("skip BM%s: SOH=NA", bm)
             continue
         labeled = label_time_diff(pd.read_parquet(f), os.path.basename(f))
-        seg_ids = select_pulse_segments(labeled, remove_before_min, exclude_zc)
+        seg_ids = select_pulse_segments(
+            labeled, remove_before_min, current_a, current_tol
+        )
         res, _, _ = fit_2rc(labeled, seg_ids, nom_capacity)
         if res.empty:
             logging.warning("BM%s (SOH=%s): no pulses fit", bm, soh)
@@ -1822,7 +1862,8 @@ def run_cell_folder(folder, args, out_csv=None):
     (empty when nothing fit), so a multi-cell run can concatenate them.
     """
     results = fit_folder(
-        folder, args.nom_capacity, args.remove_pulse_before_min, args.exclude_zc
+        folder, args.nom_capacity, args.remove_pulse_before_min,
+        current_a=args.pulse_current_a, current_tol=args.pulse_current_tol,
     )
     if results.empty:
         logging.warning("no pulses fit in %s", folder)
@@ -1924,8 +1965,14 @@ def main():
         help="drop pulses earlier than this many minutes into a cycle (0=keep all)",
     )
     ap.add_argument(
-        "--exclude-zc", nargs="*", default=EXCLUDE_ZUSTAND_CURRENT,
-        help="Zustand/Current labels to exclude from the fit (e.g. DCH/-1.5)",
+        "--pulse-current-a", nargs="*", type=float, default=None, metavar="A",
+        help="fit only pulses whose |I| plateau matches one of these amperages "
+             "(within --pulse-current-tol). Omit to fit every pulse.",
+    )
+    ap.add_argument(
+        "--pulse-current-tol", type=float, default=None, metavar="FRAC",
+        help="relative half-width of each --pulse-current-a window "
+             f"(default {PULSE_CURRENT_TOL:g} = +-{100 * PULSE_CURRENT_TOL:g}%%)",
     )
     ap.add_argument(
         "--config",
@@ -1965,7 +2012,8 @@ def main():
         cfg = load_2rc_config(args.config)
         if cfg.get("nom_capacity") is not None:
             args.nom_capacity = cfg["nom_capacity"]
-        args.exclude_zc = EXCLUDE_ZUSTAND_CURRENT
+        args.pulse_current_a = PULSE_CURRENT_A
+        args.pulse_current_tol = PULSE_CURRENT_TOL
         args.remove_pulse_before_min = REMOVE_PULSE_BEFORE_MIN
 
     if args.nom_capacity is None:
@@ -2041,7 +2089,8 @@ def main():
     logging.info("pulse_sequence (%d representative pulses):\n%s", len(seq), seq.to_string())
 
     seg_ids = select_pulse_segments(
-        labeled, args.remove_pulse_before_min, args.exclude_zc
+        labeled, args.remove_pulse_before_min,
+        args.pulse_current_a, args.pulse_current_tol,
     )
     results, curves, records = fit_2rc(labeled, seg_ids, args.nom_capacity)
     if results.empty:

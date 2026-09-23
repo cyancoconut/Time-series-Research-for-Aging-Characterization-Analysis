@@ -154,7 +154,6 @@ from analysis.fit_2rc_pulse import (
     _warburg_step,
     label_time_diff,
     select_pulse_segments,
-    EXCLUDE_ZUSTAND_CURRENT,
     REMOVE_PULSE_BEFORE_MIN,
     _parse_soh,
 )
@@ -1640,14 +1639,14 @@ def plot_vs_soh(results, out_png, title=""):
 # ---------------------------------------------------------------------------
 # Folder mode
 # ---------------------------------------------------------------------------
-def fit_folder(folder, nom_capacity, remove_before_min, exclude_zc, **kw):
+def fit_folder(folder, nom_capacity, remove_before_min, **kw):
     files = sorted(glob.glob(os.path.join(folder, "*_pulse_*SOH.parquet")))
     logging.info("folder mode: %d pulse files", len(files))
     frames = []
     for path in files:
         stem = os.path.splitext(os.path.basename(path))[0]
         labeled = label_time_diff(pd.read_parquet(path), os.path.basename(path))
-        seg_ids = select_pulse_segments(labeled, remove_before_min, exclude_zc)
+        seg_ids = select_pulse_segments(labeled, remove_before_min)
         res, _ = fit_frac(labeled, seg_ids, nom_capacity, **kw)
         if res.empty:
             continue
@@ -1773,7 +1772,6 @@ def main():
     ap.add_argument("--no-p10", action="store_true", help="stop after P9")
     ap.add_argument("--remove-pulse-before-min", type=float,
                     default=REMOVE_PULSE_BEFORE_MIN)
-    ap.add_argument("--exclude-zc", nargs="*", default=EXCLUDE_ZUSTAND_CURRENT)
     ap.add_argument("-o", "--out", help="output CSV")
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--self-test", action="store_true",
@@ -1794,7 +1792,7 @@ def main():
 
     if os.path.isdir(args.parquet):
         results = fit_folder(args.parquet, args.nom_capacity,
-                             args.remove_pulse_before_min, args.exclude_zc, **kw)
+                             args.remove_pulse_before_min, **kw)
         if results.empty:
             logging.warning("no pulses fit in %s", args.parquet)
             return
@@ -1817,8 +1815,7 @@ def main():
 
     labeled = label_time_diff(pd.read_parquet(args.parquet),
                               os.path.basename(args.parquet))
-    seg_ids = select_pulse_segments(labeled, args.remove_pulse_before_min,
-                                    args.exclude_zc)
+    seg_ids = select_pulse_segments(labeled, args.remove_pulse_before_min)
     results, curves = fit_frac(labeled, seg_ids, args.nom_capacity, **kw)
     if results.empty:
         logging.warning("no pulses fit")

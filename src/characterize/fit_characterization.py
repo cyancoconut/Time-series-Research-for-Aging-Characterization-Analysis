@@ -269,6 +269,34 @@ def _pulse_cell_stem(file_name: str) -> str:
     return m.group(1) if m else stem
 
 
+def _pulse_current_list(value) -> list:
+    """Normalise a pulse-amplitude whitelist to a list of floats (A).
+
+    Accepts a scalar, a list, or a string of whitespace/comma-separated
+    numbers — the UI hands this over as free text, and a config may carry
+    either a bare number or a list. ``None``/empty -> ``[]`` (gate off).
+    Amplitudes are stored as given; matching is on |I| (``_matches_current``).
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [p for p in value.replace(",", " ").split() if p]
+    elif not isinstance(value, (list, tuple)):
+        value = [value]
+    out = []
+    for item in value:
+        try:
+            amp = float(item)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"pulse_current_a: {item!r} is not a number (amperes)"
+            ) from None
+        if amp == 0:
+            raise ValueError("pulse_current_a: 0 A is not a pulse amplitude")
+        out.append(amp)
+    return out
+
+
 def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float,
               cfg: dict = None, steps: pd.DataFrame = None) -> dict:
     """2RC fit of every pulse bundle in ``data_dir``.
@@ -309,21 +337,41 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float,
     override = _normalize_sweep_direction(raw_override) if raw_override is not None else None
     step = float(cfg["soc_step_pct"]) if cfg.get("soc_step_pct") is not None else pulse_fit.SOC_SWEEP_STEP_PCT
 
+    # Pulse-amplitude whitelist: fit only the pulses the user asked for. An
+    # HPPC leg interleaves the test pulse with a restore step of a different
+    # amplitude, and a sweep may carry several test amplitudes whose
+    # resistances are not one series. Unset -> every pulse, as before.
+    current_a = _pulse_current_list(cfg.get("pulse_current_a"))
+    current_tol = (
+        float(cfg["pulse_current_tolerance"])
+        if cfg.get("pulse_current_tolerance") is not None
+        else pulse_fit.PULSE_CURRENT_TOL
+    )
+
     try:
         results, assignment = pulse_fit.fit_folder(
             data_dir,
             nom_capacity,
             pulse_fit.REMOVE_PULSE_BEFORE_MIN,
-            pulse_fit.EXCLUDE_ZUSTAND_CURRENT,
             sweep_direction=override,
             soc_step_pct=step,
+            current_a=current_a,
+            current_tol=current_tol,
         )
     except Exception as exc:                      # one bad bundle ≠ dead cell
         logging.warning("pulse fit failed: %s", exc)
         block["error"] = f"{type(exc).__name__}: {exc}"
         return block
     if results.empty:
+        # Name the filter when one is active: "no pulses fit" on a folder full
+        # of pulses is otherwise a puzzle, and a mistyped amplitude is the
+        # likeliest cause.
         block["error"] = "no pulses fit"
+        if current_a:
+            block["error"] += (
+                f" — none matched pulse_current_a={current_a} A "
+                f"(±{100 * current_tol:g}%)"
+            )
         return block
 
     bundle_diags = assignment.get("bundles", [])
@@ -346,6 +394,8 @@ def fit_pulse(data_dir: str, plots_dir: str, nom_capacity: float,
         "soc_step_pct": step,
         "soc_direction_override": override,
         "plateau_gap_ah": round(nom_capacity * step / 100.0, 4),
+        "pulse_current_a": current_a or None,
+        "pulse_current_tolerance": current_tol if current_a else None,
         "bundles": bundle_diags,
     }
     block["fits"] = _records(results, PULSE_COLS)
@@ -1294,8 +1344,16 @@ def write_fit_csvs(cell_dir: str, stem: str, payload: dict) -> list:
 
 
 def run(cfg: dict, target_cells: list = None, parts: list = None,
-        n_zarc: int = None) -> None:
+        n_zarc: int = None, pulse_current: list = None) -> None:
     parts = normalize_parts(parts)
+    if pulse_current:
+        # Same precedence as --n-zarc: a one-off run pins the pulse amplitudes
+        # without editing the battery config (the UI's "Pulse current" entry).
+        cfg = {**cfg, "pulse_current_a": _pulse_current_list(pulse_current)}
+        logging.info(
+            "pulse fit restricted to |I| = %s A by --pulse-current",
+            cfg["pulse_current_a"],
+        )
     if n_zarc is not None:
         # A caller-supplied branch count outranks the config's own
         # `eis_n_zarc`, so a one-off run can pin N without editing the battery
@@ -1377,9 +1435,18 @@ def main() -> None:
             % eis_vs_soc.ZARC_COLUMN_SLOTS
         ),
     )
+    parser.add_argument(
+        "--pulse-current", nargs="+", type=float, metavar="A",
+        help=(
+            "Fit only pulses whose |I| plateau matches one of these amperages "
+            "(within pulse_current_tolerance, default "
+            f"+-{100 * pulse_fit.PULSE_CURRENT_TOL:g}%%), overriding "
+            "pulse_current_a in the config. Omit to fit every pulse."
+        ),
+    )
     args = parser.parse_args()
     run(load_config(args.config), target_cells=args.cells, parts=args.only,
-        n_zarc=args.n_zarc)
+        n_zarc=args.n_zarc, pulse_current=args.pulse_current)
 
 
 if __name__ == "__main__":
