@@ -29,7 +29,7 @@ The legacy notebook `src/Process_Detection_via_Cluster_py_METABATT.ipynb` still 
 - Tab 4 → `python -m monitor.aging_status <battery_cfg> [-o …]`
 - Tab 5 → a checklist of evaluation outputs run in sequence by one "Run evaluation" button: **Fleet-wide capacity aggregation** → `python -m evaluation.export_cap_pulse <battery_cfg>`; **Capacity evaluation (Alterungsmatrix)** → `python -m evaluation.aging_matrix <battery_cfg>`. Pulse / qOCV evaluations are placeholder checkboxes (disabled) for future stages. The "Run all 1→2→3→4→5" chain runs stages 1–4 then every ticked Tab 5 evaluation.
 - Tab 6 → `python -m cluster.train_classifier <battery_cfg> [--model-out …] [--meta-out …] [--labels …]`. A **Labels** toggle (Config / target / llm) maps to `--labels`; `Config` omits it so the config's `classifier_label_source` (default `target`) decides.
-- Tab 7 → `download/build_bronze_para.py` → `python -m characterize.main_para` → `python -m characterize.fit_characterization`, each gated by its checkbox and run in sequence. The fit stage has **one checkbox per block** (pulse / EIS / qOCV) → `--only`; all three ticked passes no flag, none ticked skips the stage. The **EIS ZARC branches** control (`Auto (DRT vote)` / `1` / `2`) passes `--n-zarc N` when a number is picked, pinning the branch count for that run over `eis_n_zarc`. Outside the chain (one-off BOL step).
+- Tab 7 → `download/build_bronze_para.py` → `python -m characterize.main_para` → `python -m characterize.fit_characterization`, each gated by its checkbox and run in sequence. The fit stage has **one checkbox per block** (pulse / EIS / qOCV) → `--only`; all three ticked passes no flag, none ticked skips the stage. The **EIS ZARC branches** control (`Auto (DRT vote)` / `1` / `2`) passes `--n-zarc N` when a number is picked, pinning the branch count for that run over `eis_n_zarc`. The **Pulse current (A)** entry passes `--pulse-current A …`, restricting the 2RC fit to pulses of those |I| amplitudes (overrides `pulse_current_a`; empty fits every pulse). Outside the chain (one-off BOL step).
 
 The Download tab's "Save JSON" matches `download/get_user_input.py`; full-pipeline runs auto-write it to `.metabatt_ui_download.json` (gitignored).
 
@@ -573,8 +573,34 @@ which also honours `eis_n_zarc` when the config sets it) or `1` / `2` to pin N
 for that run. Picking a number passes `--n-zarc N` to
 `characterize.fit_characterization`, which outranks the config key; the params
 file records it as `zarc_branches_source: "pinned (eis_n_zarc / --n-zarc)"`.
+Beside them a **Pulse current (A)** entry takes the pulse amplitudes to fit
+(space-separated amperes, `--pulse-current`), empty meaning every pulse.
 Like Tab 6 it is **outside**
 the "Run all 1→2→3→4→5" chain.
+
+**Pulse-amplitude filter** (`pulse_current_a` / `pulse_current_tolerance`, CLI
+`--pulse-current`, UI "Pulse current (A)") — `select_pulse_segments` keeps a
+pulse only when its median active |I| is within `pulse_current_tolerance`
+(relative, default 0.05) of one of the listed amperages. Unset (the default)
+fits every pulse, so this changes nothing until asked for. Matched on **|I|**,
+so **both polarities** of a given amplitude are kept — the CHA and DCH pulse
+at one amplitude are one measurement of the same step. It exists because an
+HPPC leg
+interleaves the test pulse with a restore step of a different amplitude, and a
+run may carry several test amplitudes whose resistances are **not** one series;
+naming the amplitude picks the wanted pulses without depending on where they
+sit in the sequence. A segment whose amplitude cannot be measured is dropped
+rather than waved through. It **replaces** the old `exclude_zustand_current` /
+`--exclude-zc` blacklist (which matched a rounded `Zustand/Current` label such
+as `DCH/-1.5`, so it was per-cell and polarity-bound); that key, its CLI flag
+and its `["DCH/-1.5"]` default are **gone** from both fitters and from
+`analysis/fit_frac_pulse.py`, so a run that relied on the default now fits the
+lead pulse too unless it is filtered out by amplitude. The active filter is recorded in
+`pulse.settings.pulse_current_a` / `…_tolerance`, and a filter that matched
+nothing reports so in `pulse.error` instead of a bare "no pulses fit". Both
+pulse fitters carry it — `characterize/pulse_fit.py` (the characterization
+path) and its fork `analysis/fit_2rc_pulse.py` (standalone, flags
+`--pulse-current-a` / `--pulse-current-tol`, config keys the same).
 
 ## Aging-status monitor
 
@@ -621,6 +647,8 @@ the "Run all 1→2→3→4→5" chain.
 | `classifier_label_source` | `target` (default) or `llm` — training-target space for `train_classifier` (CLI `--labels` overrides). `llm` trains on the free-form `llm_label` column; inference maps it back via measured C-rate. |
 | `llm_interpret` | When true (or `main.py --interpret`), the HDBSCAN run is a label-only LLM pass: writes `llm_*` into the per-segment CSV and skips GOLD/exports. Default false. |
 | `para_procedure_filter` | **List** of programme-name substrings marking parametrization test files (single-element list is normal). Required by `build_bronze_para.py` and `characterize.main_para`. |
+| `pulse_current_a` | Optional list of pulse amplitudes in **A** (scalar, list or space/comma-separated string). The 2RC pulse fit uses only pulses whose median active \|I\| matches one of them. Omit to fit every pulse. |
+| `pulse_current_tolerance` | Relative half-width of each `pulse_current_a` window (default `0.05` = ±5 %). |
 | `qocv_ir_ohm` | Optional (Ω). Fallback IR correction for the qOCV→SOC mapping when only **one** branch was exported, so the pair-derived `η(SOC)` isn't available: the branch is shifted by `I·R` with `I` read from the sweep. Ignored when both cha and dch exist. Omit for no scalar fallback. |
 
 `hdbscan_para_layer_1["min_cluster_size"]` defaults to `max(2, n_programs − 1)`; an explicit config value wins (merged last). `cluster_selection_epsilon` must be **0.3** (not 3.0) for correct qOCV separation.

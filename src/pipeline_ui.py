@@ -580,6 +580,22 @@ class PipelineUI(ctk.CTk):
         self.ch_n_zarc.set("Auto (DRT vote)")
         self.ch_n_zarc.pack(side="left")
 
+        # Which pulses the 2RC fit sees. A sweep interleaves the test pulse
+        # with a restore step of a different amplitude, and may carry several
+        # test amplitudes; naming the wanted |I| here picks them out without
+        # editing pulse_current_a in the config. Empty = fit every pulse.
+        # Laid out like the two controls above (own frame, packed) rather than
+        # via s.add_entry: those frames are gridded without an explicit row, so
+        # a later add_entry would land on a row one of them already occupies.
+        pcur = ctk.CTkFrame(s, fg_color="transparent")
+        pcur.grid(sticky="w", padx=4, pady=(2, 2))
+        ctk.CTkLabel(pcur, text="Pulse current (A):").pack(side="left", padx=(0, 6))
+        self.ch_pulse_current = ctk.CTkEntry(
+            pcur, width=260,
+            placeholder_text="optional, space-separated, e.g. 9.87 3.0",
+        )
+        self.ch_pulse_current.pack(side="left")
+
         ctk.CTkLabel(
             parent,
             text=(
@@ -591,7 +607,10 @@ class PipelineUI(ctk.CTk):
                 "40_capacity_monitore/. Models: 2RC (pulse), N×ZARC + "
                 "generalized Warburg (EIS). The EIS branch count is one number "
                 "for the whole cell — on Auto the DRT votes it, or pin 1 / 2 "
-                "here to override both the vote and eis_n_zarc. The three fit "
+                "here to override both the vote and eis_n_zarc. Pulse current "
+                "restricts the 2RC fit to pulses of the named |I| amplitudes "
+                "(±5 %, config pulse_current_a / pulse_current_tolerance); "
+                "empty fits every pulse. The three fit "
                 "blocks run "
                 "independently (--only): unticking one keeps its previous "
                 "results in <cell>_parameters.json instead of refitting it. "
@@ -649,6 +668,7 @@ class PipelineUI(ctk.CTk):
             self.ch_overwrite.select()
         self.ch_clustering.set(s.get("ch_clustering", "Auto (config)"))
         self.ch_n_zarc.set(s.get("ch_n_zarc", "Auto (DRT vote)"))
+        self.ch_pulse_current.insert(0, s.get("ch_pulse_current", ""))
 
         dl = {**DEFAULT_DOWNLOAD_CFG, **s.get("download_cfg", {})}
         self._apply_download_cfg(dl)
@@ -677,6 +697,7 @@ class PipelineUI(ctk.CTk):
             "ch_overwrite": bool(self.ch_overwrite.get()),
             "ch_clustering": self.ch_clustering.get(),
             "ch_n_zarc": self.ch_n_zarc.get(),
+            "ch_pulse_current": self.ch_pulse_current.get(),
             "download_cfg": self._collect_download_cfg(),
         })
         _save_ui_state(self._state)
@@ -991,6 +1012,9 @@ class PipelineUI(ctk.CTk):
         n_zarc = self.ch_n_zarc.get()
         if n_zarc.isdigit():               # "Auto (DRT vote)" passes nothing
             argv += ["--n-zarc", n_zarc]
+        currents = self.ch_pulse_current.get().replace(",", " ").split()
+        if currents:                       # empty entry fits every pulse
+            argv += ["--pulse-current", *currents]
         return argv
 
     def _collect_characterization_steps(self) -> list[tuple[str, list[str]]] | None:

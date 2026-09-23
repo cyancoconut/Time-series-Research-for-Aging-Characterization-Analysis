@@ -46,6 +46,8 @@
     "eis_drt_lambda": 0.001,
     "soc_sweep_direction": null,
     "soc_step_pct": 5.0,
+    "pulse_current_a": null,
+    "pulse_current_tolerance": 0.05,
     "running_window_days": 2,
 
     "feature_columns": ["Voltage", "Current", "Temperature"],
