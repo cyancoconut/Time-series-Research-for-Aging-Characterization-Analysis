@@ -93,17 +93,27 @@ class DismemblerFunctions:
                 how="left",
             )
 
+            # A pause is still a pause after the relabel below. The "_EIS_" rule
+            # renames PAU rows to EIS so that EIS dwell windows survive the stub
+            # reduction, but the *boundary* rules must keep seeing them as
+            # pauses: a procedure whose legs are separated only by renamed rests
+            # would otherwise never split. On csi_Hina_Puls_EIS_neg10 that left
+            # one 21 h segment holding an emptying discharge, a full charge and
+            # the capacity discharge; its signed currents average to -0.22 A, so
+            # it reads as a rest and no CAP is ever found for the cell.
+            is_pause = programm_df["Zustand"].isin(PAU_Columns)
+
             # Relabel PAU rows whose procedure contains "_EIS_" as EIS
-            mask_pau = programm_df["Zustand"].isin(PAU_Columns)
             mask_eis = programm_df["Prozedur"].str.contains("_EIS_", na=False)
-            programm_df.loc[mask_pau & mask_eis, ["Zustand"]] = "EIS"
-            # Recompute after relabeling so EIS rows are excluded
+            programm_df.loc[is_pause & mask_eis, ["Zustand"]] = "EIS"
+            # Rows still PAU after the relabel. Used by the stub reduction and
+            # the pure-PAU pre-labelling, which must leave EIS windows intact.
             mask_pau = programm_df["Zustand"].isin(PAU_Columns)
 
             # Fire a new procedure start when exiting a long PAU into the next Zustand group
             prev_group_was_long_pau = (
                 (programm_df["ZUSTAND_group"] != programm_df["ZUSTAND_group"].shift())
-                & programm_df["Zustand"].shift().isin(PAU_Columns)
+                & is_pause.shift(fill_value=False)
                 & (programm_df["ZUSTAND_Duration_minutes"].shift() > self.PAU_DURATION)
             )
 
@@ -127,7 +137,7 @@ class DismemblerFunctions:
             # New procedure condition: PAU state + long duration + (group change OR first row)
             programm_df["new_procedure_start"] = (
                 (
-                    programm_df["Zustand"].isin(PAU_Columns)
+                    is_pause
                     & (programm_df["ZUSTAND_Duration_minutes"] > self.PAU_DURATION)
                     & (
                         (
