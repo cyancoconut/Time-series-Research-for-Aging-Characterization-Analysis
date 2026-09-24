@@ -66,6 +66,8 @@ import textwrap
 import numpy as np
 import pandas as pd
 
+from analysis import eis_lin_kk
+
 try:  # keep SOC parameterisation identical to the pulse sweep
     from analysis.fit_2rc_pulse import SOC_SWEEP_DIRECTION, SOC_SWEEP_STEP_PCT
 except Exception:  # standalone fallback if imported outside the package
@@ -827,8 +829,20 @@ def fit_zarc_warburg_eis(spec: pd.DataFrame, seed: dict = None, r_tot0=None,
 
 def build_eis_table(df: pd.DataFrame, direction=None, step=None,
                     fit_zarc=True, two_stage_r0=True, hf_f_min=None,
-                    n_zarc: int = ZARC_BRANCHES_DEFAULT) -> pd.DataFrame:
+                    n_zarc: int = ZARC_BRANCHES_DEFAULT, lin_kk: bool = True,
+                    kk_opts: dict = None, kk_diag: pd.DataFrame = None) -> pd.DataFrame:
     """Per-measurement feature table with a time-ordered sweep SOC.
+
+    ``lin_kk`` KK-screens every spectrum before anything is fitted
+    (:mod:`analysis.eis_lin_kk`) and excludes the points that fail from the
+    features, the HF R0 stage and the ZARC fit — a point that is not
+    Kramers-Kronig consistent is not a property of the cell, and least squares
+    cannot tell that by itself. Nothing is deleted: the flagged rows keep their
+    ``kk_outlier`` marker in ``df`` so the plots can draw them. ``kk_opts``
+    passes thresholds through to :func:`analysis.eis_lin_kk.annotate_bundle`.
+    ``kk_diag`` is that function's per-measurement frame when the caller has
+    already screened the bundle (:func:`characterize.fit_characterization.fit_eis`
+    does, so the DRT sees the same points); left ``None`` the screen runs here.
 
     ``two_stage_r0`` measures R0 on the high-frequency window first
     (:func:`fit_hf_r0`) and pins it in the ZARC fit, instead of letting the
@@ -849,12 +863,26 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
     direction = direction if direction is not None else SOC_SWEEP_DIRECTION
     step = step if step is not None else SOC_SWEEP_STEP_PCT
 
+    if lin_kk:
+        df, diag = eis_lin_kk.annotate_bundle(df, **(kk_opts or {}))
+        if kk_diag is None and not diag.empty:
+            kk_diag = diag
+
     order = (
         df.groupby("eis_number")["Time"].min().sort_values().index.tolist()
     )
     rows = []
     for i, eid in enumerate(order):
-        spec = df[df["eis_number"] == eid]
+        full = df[df["eis_number"] == eid]
+        # Everything downstream — the fit-free readouts, the HF R0 stage and
+        # the ZARC fit — sees the KK-consistent points only. `full` is kept for
+        # the per-measurement metadata (U, Time) below, which a rejected point
+        # does not change.
+        spec = eis_lin_kk.clean(full)
+        if len(spec) < 4:
+            logging.warning("eis %s: %d point(s) left after the KK screen — "
+                            "fitting the raw spectrum instead", eid, len(spec))
+            spec = full
         feat = eis_features(spec)
         pin = None
         if two_stage_r0:
@@ -888,17 +916,19 @@ def build_eis_table(df: pd.DataFrame, direction=None, step=None,
             {
                 "eis_number": eid,
                 "SOC_pct": np.nan,
-                "U": float(spec["U"].mean()),
-                "Time": spec["Time"].min(),
+                "U": float(full["U"].mean()),
+                "Time": full["Time"].min(),
             }
         )
-        if "segment_ID" in spec.columns:
+        if "segment_ID" in full.columns:
             # The GOLD segment this spectrum was measured in, written by
             # `output.export_eis`. `util.soc_from_steps` reads the segment one
             # procedure number earlier to get the step that set this SOC.
-            feat["segment_ID"] = str(spec["segment_ID"].iloc[0])
+            feat["segment_ID"] = str(full["segment_ID"].iloc[0])
         rows.append(feat)
     out = pd.DataFrame(rows)
+    if kk_diag is not None and not kk_diag.empty:
+        out = out.merge(kk_diag, on="eis_number", how="left")
     logging.info(
         "eis_vs_soc: %d measurements (%s sweep) — SOC_pct left NaN, filled "
         "from the step charge (or the qOCV curve)",
@@ -1291,8 +1321,16 @@ def plot_fit_overlay(df: pd.DataFrame, table: pd.DataFrame, out_png: str,
             zz = zz + _z_zarc(r_i, tau_i, a_i, w)
             n_branch += 1
         degenerate = bool(row.get("zarc_degenerate", False))
-        ax.plot(spec["Z_real"], -spec["Z_imag"], "o", ms=3, color="#2f6fdb",
-                label="measured")
+        kk_bad = (spec["kk_outlier"].astype(bool) if "kk_outlier" in spec.columns
+                  else pd.Series(False, index=spec.index))
+        ax.plot(spec.loc[~kk_bad, "Z_real"], -spec.loc[~kk_bad, "Z_imag"], "o",
+                ms=3, color="#2f6fdb", label="measured")
+        if kk_bad.any():
+            # Excluded from the fit, never from the figure — a point dropped
+            # silently is indistinguishable from one never measured.
+            ax.plot(spec.loc[kk_bad, "Z_real"], -spec.loc[kk_bad, "Z_imag"],
+                    "x", ms=7, mew=1.6, color="#c0392b", ls="none",
+                    label="KK outlier (excluded)")
         # Grey curve for a degenerate fit, matching the vs-SOC panels: the
         # overlay may look perfectly good (a degenerate fit is unconstrained,
         # not necessarily high-residual), so the colour is the warning.
@@ -1309,7 +1347,8 @@ def plot_fit_overlay(df: pd.DataFrame, table: pd.DataFrame, out_png: str,
         ax.grid(alpha=0.3)
         # Frame on measured *and* fitted, so a fit that overshoots is visible
         # as an overshoot rather than by silently rescaling the measured data.
-        _frame_nyquist(ax, (spec["Z_real"], -spec["Z_imag"]), (zz.real, -zz.imag))
+        _frame_nyquist(ax, (spec.loc[~kk_bad, "Z_real"], -spec.loc[~kk_bad, "Z_imag"]),
+                       (zz.real, -zz.imag))
         ax.legend(fontsize=7)
     for ax in axes[len(pick):]:
         ax.set_visible(False)
@@ -1634,12 +1673,28 @@ def plot_raw_spectra(df: pd.DataFrame, table: pd.DataFrame, out_png: str, title:
     ax_nyq, panels = nyquist_with_zooms(fig, gs[:, 0])
     ax_mag = fig.add_subplot(gs[0, 1])
     ax_ph = fig.add_subplot(gs[1, 1])
+    kk_shown = False
     for eid, g in _spectra_by_soc(df, soc):
         g = g.sort_values("frequency")
         color = _soc_color(soc.get(eid), cmap, norm)
         ax_nyq.plot(g["Z_real"], -g["Z_imag"], "o-", ms=3, lw=1, color=color)
         ax_mag.plot(g["frequency"], g["Z_abs"], "o-", ms=3, lw=1, color=color)
         ax_ph.plot(g["frequency"], g["phase"], "o-", ms=3, lw=1, color=color)
+        # The KK-rejected points, on the as-measured figure: the curve still
+        # runs through them (this is the raw data) but they are marked, so
+        # what the fits dropped is visible where the data itself is shown.
+        if "kk_outlier" in g.columns and g["kk_outlier"].any():
+            bad = g[g["kk_outlier"].astype(bool)]
+            lbl = None if kk_shown else "KK outlier (excluded from fits)"
+            ax_nyq.plot(bad["Z_real"], -bad["Z_imag"], "x", ms=7, mew=1.6,
+                        color="#c0392b", ls="none", label=lbl)
+            ax_mag.plot(bad["frequency"], bad["Z_abs"], "x", ms=7, mew=1.6,
+                        color="#c0392b", ls="none")
+            ax_ph.plot(bad["frequency"], bad["phase"], "x", ms=7, mew=1.6,
+                       color="#c0392b", ls="none")
+            kk_shown = True
+    if kk_shown:
+        ax_nyq.legend(fontsize=8, loc="best")
 
     ax_nyq.set_xlabel("Z_real (mΩ)")
     ax_nyq.set_ylabel("-Z_imag (mΩ)")
