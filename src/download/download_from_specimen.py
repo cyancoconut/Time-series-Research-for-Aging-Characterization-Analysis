@@ -320,7 +320,14 @@ class SpecimenDownloader:
                             )
                         chosen = temp_cols[0]
                 if chosen is not None:
+                    print(f"  using {chosen!r} as the temperature column (T1)")
                     df = df.rename(columns={chosen: "T1"})
+                else:
+                    print(
+                        "  no temperature column found "
+                        f"(columns: {list(df.columns)}) — "
+                        "this test will carry no temperature"
+                    )
 
             # EIS device files (channel "EISkanal", measurement token "EIS<n>"
             # or "INS<n>") carry the impedance-sweep columns (ActFreq, Zreal1,
