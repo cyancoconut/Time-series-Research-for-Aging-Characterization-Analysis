@@ -109,6 +109,32 @@ class SpecimenDownloader:
             test.name.replace("|", "_"),
         )
 
+    def _file_in_scope(self, segs, test_type_filter, test_name_filter):
+        """Would this exported file be re-fetched under the active filters?
+
+        ``segs`` are the "="-delimited fields of an exported filename
+        (project=specimen=start=PARENT=NAME=equipment=...), so fields 3 and 4
+        are the same ``test.parent`` / ``test.name`` the candidate loop below
+        filters on -- with "|" replaced by "_" in the name.
+
+        Deletions for ``redownload`` / unfinished-refresh are gated on this.
+        Without it the delete loop walked the *whole* specimen folder while
+        the refetch loop only considered tests passing the filters, so an
+        overwrite restricted to one programme wiped every other programme's
+        files and never downloaded them back.
+        """
+        parent, name = segs[3], segs[4]
+        if not matches_any(name, test_type_filter):
+            return False
+        if not matches_any(parent, test_name_filter):
+            return False
+        # Mirrors the candidate loop's `self.test_format not in
+        # t.name.split("|")`; the filename carries "|" as "_", so match on
+        # containment rather than splitting a name that may hold underscores.
+        if self.test_format and self.test_format not in name:
+            return False
+        return True
+
     def download_single_tests(
         self,
         specimen,
@@ -121,10 +147,13 @@ class SpecimenDownloader:
         test_type_filter="TS",
         test_name_filter=None,
     ):
-        # redownload=True forces a fresh fetch of every test: existing parquets
-        # (finished and unfinished) are deleted so they drop out of the
-        # existing_test skip-list and are downloaded again. Use it to re-pull
-        # data after a downloader fix (e.g. a newly retained column).
+        # redownload=True forces a fresh fetch of every test *the filters
+        # below select*: those existing parquets (finished and unfinished) are
+        # deleted so they drop out of the existing_test skip-list and are
+        # downloaded again. Use it to re-pull data after a downloader fix (e.g.
+        # a newly retained column). Files outside the filters are left alone --
+        # they would not be re-fetched, so deleting them would just lose them
+        # (see _file_in_scope).
         #
         # Two independent substring filters, both accepting a single substring
         # or a list of substrings (matches when *any* entry is contained, via
@@ -183,9 +212,14 @@ class SpecimenDownloader:
                 segs = file_name.split("=")
                 if len(segs) < 5:
                     continue
-                if redownload or (
-                    replace_unfinished
-                    and file_name.endswith("=unfinished.parquet")
+                if (
+                    redownload
+                    or (
+                        replace_unfinished
+                        and file_name.endswith("=unfinished.parquet")
+                    )
+                ) and self._file_in_scope(
+                    segs, test_type_filter, test_name_filter
                 ):
                     reason = "redownload" if redownload else "unfinished refresh"
                     try:
@@ -207,9 +241,14 @@ class SpecimenDownloader:
                 segs = file_name.split("=")
                 if len(segs) < 5:
                     continue
-                if redownload or (
-                    replace_unfinished
-                    and file_name.endswith("=unfinished.parquet")
+                if (
+                    redownload
+                    or (
+                        replace_unfinished
+                        and file_name.endswith("=unfinished.parquet")
+                    )
+                ) and self._file_in_scope(
+                    segs, test_type_filter, test_name_filter
                 ):
                     reason = "redownload" if redownload else "unfinished refresh"
                     print(f"  removing MinIO file ({reason}): {obj.object_name}")
