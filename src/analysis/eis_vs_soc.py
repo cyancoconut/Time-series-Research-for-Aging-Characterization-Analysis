@@ -590,7 +590,8 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     number itself is chosen once per cell from the DRT — see
     :func:`analysis.eis_drt.branch_count_vote` — or pinned by the ``eis_n_zarc``
     config key. A spectrum the count does not suit comes back with
-    ``zarc_degenerate`` true; that is reported, never silently repaired.
+    ``zarc_degenerate`` true, with ``zarc_degenerate_reason`` naming the check
+    that tripped; that is reported, never silently repaired.
 
     ``tau_seeds`` optionally supplies the first multistart's τ. Measured to make
     no difference on either chemistry — the fixed spreads find the same minima —
@@ -615,8 +616,12 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     borrow from it. ``None`` (default) fits R0 as before.
 
     Returns ``{R0_z, L_z, R1_z, tau1_z, alpha1_z, R2_z, tau2_z, alpha2_z, R_d_z,
-    tau_d_z, phi_d_z, n_zarc, zarc_rmse, zarc_degenerate, r0_pinned}`` (NaN/True
-    on failure). Slots past ``n_zarc`` are NaN — see :data:`ZARC_COLUMN_SLOTS`.
+    tau_d_z, phi_d_z, n_zarc, zarc_rmse, zarc_degenerate,
+    zarc_degenerate_reason, r0_pinned}`` (NaN/True on failure). Slots past
+    ``n_zarc`` are NaN — see :data:`ZARC_COLUMN_SLOTS`.
+    ``zarc_degenerate_reason`` names *which* check tripped (``R_d_collapsed``,
+    ``tau<i>_at_box_{min,max}``, ``alpha<i>_at_{min,1}``, ``phi_d_at_{min,max}``,
+    ``;``-joined; ``no_fit`` when no start converged), and is empty when sound.
     ``phi_d_z`` is the fitted φ, or the fixed exponent of the chosen element.
     """
     from scipy.optimize import least_squares
@@ -628,6 +633,7 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
         keys += [f"R{i}_z", f"tau{i}_z", f"alpha{i}_z"]
     fail = {k: np.nan for k in keys}
     fail["zarc_degenerate"] = True
+    fail["zarc_degenerate_reason"] = "no_fit"
     fail["n_zarc"] = n_zarc
     fail["r0_pinned"] = pin_r0 is not None and np.isfinite(pin_r0)
 
@@ -765,19 +771,39 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     # Degenerate when the diffusion branch collapses, a ZARC τ sits on the edge
     # of the resolvable band, or a CPE / diffusion exponent pins to a bound —
     # each means the reported parameters are not constrained by the data.
-    def _on_edge(v, lo, hi):
-        return bool(v <= lo * 1.05 or v >= hi * 0.95)
+    # *Which* of those it was is recorded, not just that it happened: the
+    # remedies differ (a railed τ says the branch count does not suit the
+    # spectrum, a railed α that the arc is not an arc, a collapsed R_d that
+    # the sweep never reaches the diffusion regime), and a point drawn grey in
+    # a vs-SOC panel is only readable next to the reason it is grey.
+    def _edge(v, lo, hi):
+        if v <= lo * 1.05:
+            return "min"
+        if v >= hi * 0.95:
+            return "max"
+        return None
 
-    degenerate = bool(
-        Rd_ < 1e-2
-        or any(_on_edge(t, tz_lo, tz_hi) for t, _, _ in branches)
-        or any(a <= ZARC_ALPHA_MIN * 1.02 or a >= 0.999 for _, _, a in branches)
-        or (free_phi and _on_edge(phi, ph_lo, ph_hi))
-    )
+    reasons = []
+    if Rd_ < 1e-2:
+        reasons.append("R_d_collapsed")
+    for i, (t_i, _, a_i) in enumerate(branches, start=1):
+        edge = _edge(t_i, tz_lo, tz_hi)
+        if edge:
+            reasons.append(f"tau{i}_at_box_{edge}")
+        if a_i <= ZARC_ALPHA_MIN * 1.02:
+            reasons.append(f"alpha{i}_at_min")
+        elif a_i >= 0.999:
+            reasons.append(f"alpha{i}_at_1")
+    if free_phi:
+        edge = _edge(phi, ph_lo, ph_hi)
+        if edge:
+            reasons.append(f"phi_d_at_{edge}")
+    degenerate = bool(reasons)
     out = {
         "R0_z": float(R0_), "L_z": float(L_),
         "R_d_z": float(Rd_), "tau_d_z": td, "phi_d_z": phi,
         "n_zarc": n, "zarc_rmse": rmse, "zarc_degenerate": degenerate,
+        "zarc_degenerate_reason": ";".join(reasons),
         "r0_pinned": pin_r0 is not None,
     }
     for i in range(1, n_slots + 1):
@@ -1088,12 +1114,25 @@ def _z_diffusion_from_row(row, w):
     return _z_warburg_generalized(row["R_d_z"], row["tau_d_z"], phi, w)
 
 
+#: Colour for a degenerate fit's markers in the vs-SOC panels. They used to be
+#: dropped from the figure entirely, which left a gap that read as missing data
+#: rather than as a fit whose parameters are not constrained — and on a sweep
+#: where the low-SOC end degenerates systematically, hid exactly the points
+#: worth looking at. They are drawn, in grey, and kept off the trend line.
+DEGENERATE_COLOR = "0.65"
+
+
 def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
-    """Grid of the N×ZARC+L+Warburg fit parameters vs SOC (hides degenerate).
+    """Grid of the N×ZARC+L+Warburg fit parameters vs SOC.
 
     ``N`` comes from the bundle's DRT, so the branch panels are built from the
     columns that actually carry data: an all-NaN ``R2_z`` (a one-arc fit) drops
     its three panels instead of drawing three empty axes.
+
+    Degenerate fits (``zarc_degenerate``) are drawn as grey markers rather than
+    hidden: the connecting line still runs through the sound fits only, so it
+    never implies a trend through an unconstrained parameter, but the point is
+    visible and its ``zarc_degenerate_reason`` is in the fits CSV beside it.
     """
     import matplotlib
 
@@ -1105,10 +1144,13 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
         return
     t = table.sort_values("SOC_pct").copy()
     if "zarc_degenerate" in t.columns:
-        n = int((t["zarc_degenerate"] == True).sum())  # noqa: E712
-        if n:
-            logging.info("ZARC vs-SOC plot: hiding %d degenerate fit(s)", n)
-        t = t[t["zarc_degenerate"] != True]  # noqa: E712
+        deg = t["zarc_degenerate"] == True  # noqa: E712
+        if deg.any():
+            logging.info("ZARC vs-SOC plot: %d degenerate fit(s) drawn grey",
+                         int(deg.sum()))
+    else:
+        deg = pd.Series(False, index=t.index)
+    sound = t[~deg]
     if t.empty:
         logging.info("ZARC vs-SOC plot: nothing to plot")
         return
@@ -1141,8 +1183,14 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     for ax in axes.ravel()[len(metrics):]:
         ax.axis("off")
     for ax, (col, label) in zip(axes.ravel(), metrics):
-        ax.plot(t["SOC_pct"], t[col], "o-", ms=5, color="#16a085",
+        # Line through the sound fits only — a degenerate parameter is not a
+        # point on a trend — with the degenerate ones overlaid in grey.
+        ax.plot(sound["SOC_pct"], sound[col], "o-", ms=5, color="#16a085",
                 label="2 ZARC" if mixed else None)
+        if deg.any():
+            ax.plot(t.loc[deg, "SOC_pct"], t.loc[deg, col], "o", ms=5,
+                    color=DEGENERATE_COLOR, mec=DEGENERATE_COLOR, ls="none",
+                    label="degenerate (unconstrained)")
         if mixed and one_arc.any():
             ax.plot(t.loc[one_arc, "SOC_pct"], t.loc[one_arc, col], "s",
                     ms=6, mfc="none", mec="#d35400", mew=1.4,
@@ -1162,7 +1210,7 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
                                 t["R0_hf"] + t["R0_hf_sigma"],
                                 color="#c0392b", alpha=0.15, lw=0)
             ax.legend(fontsize=7, loc="best")
-        elif mixed and one_arc.any():
+        elif (mixed and one_arc.any()) or deg.any():
             ax.legend(fontsize=7, loc="best")
         ax.set_xlabel("SOC (%)")
         ax.set_ylabel(label)
@@ -1242,13 +1290,19 @@ def plot_fit_overlay(df: pd.DataFrame, table: pd.DataFrame, out_png: str,
                 continue
             zz = zz + _z_zarc(r_i, tau_i, a_i, w)
             n_branch += 1
+        degenerate = bool(row.get("zarc_degenerate", False))
         ax.plot(spec["Z_real"], -spec["Z_imag"], "o", ms=3, color="#2f6fdb",
                 label="measured")
-        ax.plot(zz.real, -zz.imag, "-", color="#16a085",
+        # Grey curve for a degenerate fit, matching the vs-SOC panels: the
+        # overlay may look perfectly good (a degenerate fit is unconstrained,
+        # not necessarily high-residual), so the colour is the warning.
+        ax.plot(zz.real, -zz.imag, "-",
+                color=DEGENERATE_COLOR if degenerate else "#16a085",
                 label=f"{n_branch}ZARC+W ({row['zarc_rmse']:.3f})")
         title_bits = [f"SOC {row['SOC_pct']:.0f}%"]
-        if bool(row.get("zarc_degenerate", False)):
-            title_bits.append("DEGENERATE")
+        if degenerate:
+            reason = str(row.get("zarc_degenerate_reason", "") or "")
+            title_bits.append(f"DEGENERATE: {reason}" if reason else "DEGENERATE")
         ax.set_title(" | ".join(title_bits), fontsize=9)
         ax.set_xlabel("Z_real (mΩ)")
         ax.set_ylabel("-Z_imag (mΩ)")

@@ -214,7 +214,18 @@ labelled afterwards with the SOC the fits used (`label_bundle`) and plotted, so
 the DRT still costs one solve per spectrum. `eis_n_zarc` in the battery config
 pins N and skips the vote. `settings.zarc_branches` /
 `zarc_branches_source` / `zarc_branch_vote` record what happened;
-`zarc_degenerate` is reported per row and no longer changes the model.
+`zarc_degenerate` is reported per row and no longer changes the model, and
+`zarc_degenerate_reason` names *which* check tripped (`R_d_collapsed`,
+`tau<i>_at_box_{min,max}`, `alpha<i>_at_{min,1}`, `phi_d_at_{min,max}`,
+`;`-joined, `no_fit` when no start converged; empty when sound) — exported in
+`<cell>_eis_fits.csv` and tallied into `eis.degenerate_reasons`. A degenerate
+fit is **drawn, in grey**, not hidden: `plot_zarc_vs_soc` runs its trend line
+through the sound fits only but plots the degenerate points as grey markers
+(`DEGENERATE_COLOR`), and `plot_fit_overlay` greys that spectrum's fitted curve
+and puts the reason in the panel title. Dropping them left a gap that read as
+missing data rather than as an unconstrained parameter, and on a sweep whose
+low-SOC end degenerates systematically it hid exactly the points worth looking
+at. (The pulse fits' own `degenerate` flag still hides those points.)
 
 Counting only peaks **inside the τ box** is what makes the average mean
 anything — the largest feature in γ on every cell measured so far is the

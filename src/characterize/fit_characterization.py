@@ -119,7 +119,13 @@ EIS_COLS = [
     "n_zarc",
     "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
-    "zarc_rmse", "zarc_degenerate",
+    # zarc_degenerate_reason names which check tripped (R_d_collapsed /
+    # tau<i>_at_box_{min,max} / alpha<i>_at_{min,1} / phi_d_at_{min,max} /
+    # no_fit, ";"-joined), empty when the fit is sound. The flag alone said a
+    # row was unconstrained but not what to do about it, and the vs-SOC panels
+    # now draw those rows in grey rather than hiding them — this is the column
+    # that says why a point is grey.
+    "zarc_rmse", "zarc_degenerate", "zarc_degenerate_reason",
 ]
 
 #: Columns of the per-bundle DRT peak table (``<cell>_eis_drt_peaks.csv``).
@@ -1028,9 +1034,19 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     combined = pd.concat(tables, ignore_index=True)
     block["fits"] = _records(combined, EIS_COLS + ["source"])
     n_deg = int(combined.get("zarc_degenerate", pd.Series(dtype=bool)).sum())
+    # fillna: a table fitted before this column existed concats as NaN, which
+    # would otherwise be counted as the reason "nan".
+    reasons = combined.get("zarc_degenerate_reason", pd.Series(dtype=str)).fillna("")
+    reason_counts = (
+        reasons[reasons.astype(str).str.len() > 0].value_counts().to_dict()
+        if len(reasons) else {}
+    )
     if n_deg:
-        logging.warning("%d/%d EIS fits flagged degenerate", n_deg, len(combined))
+        logging.warning("%d/%d EIS fits flagged degenerate%s", n_deg, len(combined),
+                        f" ({reason_counts})" if reason_counts else "")
     block["n_degenerate"] = n_deg
+    if reason_counts:
+        block["degenerate_reasons"] = {str(k): int(v) for k, v in reason_counts.items()}
 
     # plot_zarc_vs_soc (and the raw-spectra / fit-overlay plots below) overlay
     # every row's SOC axis on one figure with no per-series separation, so two
