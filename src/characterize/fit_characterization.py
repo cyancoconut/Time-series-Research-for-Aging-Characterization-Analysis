@@ -51,7 +51,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from analysis import eis_drt, eis_vs_soc, qocv_curve
+from analysis import eis_drt, eis_lin_kk, eis_vs_soc, qocv_curve
 from util import soc_from_qocv, soc_from_steps
 from analysis import sweep_direction as sweep_direction_mod
 from characterize import pulse_fit
@@ -119,7 +119,24 @@ EIS_COLS = [
     "n_zarc",
     "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
-    "zarc_rmse", "zarc_degenerate",
+    # zarc_degenerate_reason names which check tripped (R_d_collapsed /
+    # tau<i>_at_box_{min,max} / alpha<i>_at_{min,1} / phi_d_at_{min,max} /
+    # no_fit, ";"-joined), empty when the fit is sound. The flag alone said a
+    # row was unconstrained but not what to do about it, and the vs-SOC panels
+    # now draw those rows in grey rather than hiding them — this is the column
+    # that says why a point is grey.
+    "zarc_rmse", "zarc_degenerate", "zarc_degenerate_reason",
+    # Lin-KK validity of the spectrum this row was fitted from
+    # (analysis/eis_lin_kk.py). kk_resid_rms is the quality of the
+    # KK-compliant reference fit and so the honest noise floor of the
+    # measurement: a row with a large one is a spectrum that is not
+    # KK-consistent anywhere, which no amount of outlier removal repairs and
+    # which the ECM parameters beside it should be read in the light of.
+    # kk_n_outliers is how many points were excluded before fitting, and
+    # kk_capped says the removal cap bound — i.e. the spectrum had more
+    # KK-violating points than a spectrum with outliers should.
+    "kk_M", "kk_mu", "kk_resid_max", "kk_resid_rms",
+    "kk_n_points", "kk_n_outliers", "kk_capped", "kk_skipped",
 ]
 
 #: Columns of the per-bundle DRT peak table (``<cell>_eis_drt_peaks.csv``).
@@ -779,12 +796,30 @@ def _eis_bundle_temperature(name: str, bundle_df: pd.DataFrame,
     return np.nan, "unavailable"
 
 
+def _kk_opts(cfg: dict) -> dict:
+    """Lin-KK thresholds from the battery config, defaults left to the module.
+
+    Only keys the config actually sets are passed on, so a default lives in
+    exactly one place (:mod:`analysis.eis_lin_kk`) rather than being restated
+    here where the two could drift apart.
+    """
+    keys = {
+        "eis_lin_kk_resid_floor": "resid_floor",
+        "eis_lin_kk_sigma_k": "sigma_k",
+        "eis_lin_kk_max_removed_frac": "max_removed_frac",
+        "eis_lin_kk_min_points": "min_points",
+    }
+    return {arg: float(cfg[key]) if arg != "min_points" else int(cfg[key])
+            for key, arg in keys.items() if cfg.get(key) is not None}
+
+
 def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             soc_step_pct: float = None, ir_ohm: float = None,
             two_stage_r0: bool = True, hf_f_min: float = None,
             drt: bool = True, drt_lambda: float = None,
             steps: pd.DataFrame = None, nom_capacity: float = None,
-            n_zarc: int = None) -> dict:
+            n_zarc: int = None, lin_kk: bool = True,
+            kk_opts: dict = None) -> dict:
     """N×ZARC + generalized-Warburg fit of every spectrum in every bundle.
 
     Direction is **detected per bundle** from its own per-measurement terminal
@@ -806,6 +841,12 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     ``steps`` is the GOLD step table from :func:`load_step_table`; with it, SOC
     is counted from the charge each SOC-adjust step moved, and the qOCV mapping
     is the fallback. Pass ``None`` to use the qOCV mapping alone.
+
+    ``lin_kk`` (config ``eis_lin_kk``) KK-screens every spectrum **before**
+    anything reads it — see :mod:`analysis.eis_lin_kk`. The screen runs once
+    per bundle, here, so the DRT solve, the branch-count vote and the ECM fits
+    all work on the same points; a spectrum screened twice with two different
+    point sets could vote for a branch count its own fits never saw.
 
     ``n_zarc`` (config ``eis_n_zarc``) pins the ZARC branch count. Left
     ``None`` it is **voted once for the whole cell** by the DRT
@@ -846,6 +887,15 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             "hf_r0_f_min_hz": hf_f_min if two_stage_r0 else None,
             "drt": drt,
             "drt_lambda": drt_lambda if drt else None,
+            "lin_kk": bool(lin_kk),
+            "lin_kk_resid_floor": (kk_opts or {}).get(
+                "resid_floor", eis_lin_kk.RESID_FLOOR) if lin_kk else None,
+            "lin_kk_sigma_k": (kk_opts or {}).get(
+                "sigma_k", eis_lin_kk.SIGMA_K) if lin_kk else None,
+            "lin_kk_max_removed_frac": (kk_opts or {}).get(
+                "max_removed_frac", eis_lin_kk.MAX_REMOVED_FRAC) if lin_kk else None,
+            "lin_kk_tau_extend_decades": eis_lin_kk.TAU_EXTEND_DECADES if lin_kk else None,
+            "lin_kk_elements_per_decade": eis_lin_kk.ELEMENTS_PER_DECADE if lin_kk else None,
             # Branch count. Filled in below, once, for the whole cell — see
             # the vote block after the bundles are read. Every spectrum of
             # every bundle is fitted at `zarc_branches`; nothing varies it.
@@ -898,22 +948,37 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     # the same cached solve, which is why the DRT still costs one solve per
     # spectrum despite now being consulted before the fit as well as plotted
     # after it.
-    raw_by_source = {}     # source -> raw measured-spectra df
+    raw_by_source = {}     # source -> measured spectra, KK-annotated
+    kk_by_source = {}      # source -> per-measurement Lin-KK diagnostics
     solved_by_source = {}  # source -> analysis.eis_drt.solve_bundle() result
     for path in files:
         name = os.path.basename(path)
         try:
-            raw_by_source[name] = pd.read_parquet(path)
+            bundle = pd.read_parquet(path)
         except Exception as exc:
             logging.warning("EIS read failed for %s: %s", name, exc)
             block.setdefault("errors", []).append(
                 {"source": name, "error": f"{type(exc).__name__}: {exc}"}
             )
+            continue
+        # KK screen first, so everything below — the DRT solve, the branch
+        # vote, the fits, the plots — reads one annotated frame. The rows stay
+        # in it; `eis_lin_kk.clean` is what drops them at each point of use.
+        if lin_kk:
+            try:
+                bundle, kk_by_source[name] = eis_lin_kk.annotate_bundle(
+                    bundle, label=name, **(kk_opts or {}))
+            except Exception as exc:  # noqa: BLE001 — never lose a fit to the screen
+                logging.warning("Lin-KK screen failed for %s: %s", name, exc)
+                block.setdefault("errors", []).append(
+                    {"source": name, "error": f"Lin-KK {type(exc).__name__}: {exc}"}
+                )
+        raw_by_source[name] = bundle
     if drt:
         for name, bundle_df in raw_by_source.items():
             try:
                 solved_by_source[name], _ = eis_drt.solve_bundle(
-                    bundle_df, lam=drt_lambda)
+                    eis_lin_kk.clean(bundle_df), lam=drt_lambda)
             except Exception as exc:
                 logging.warning("DRT solve failed for %s: %s", name, exc)
                 block.setdefault("errors", []).append(
@@ -969,7 +1034,8 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
             table = eis_vs_soc.build_eis_table(
                 bundle_df, direction=direction, step=step,
                 two_stage_r0=two_stage_r0, hf_f_min=hf_f_min,
-                n_zarc=n_branches)
+                n_zarc=n_branches, lin_kk=lin_kk, kk_opts=kk_opts,
+                kk_diag=kk_by_source.get(name))
             table["sweep_direction"] = direction
             table["sweep_direction_source"] = diag["sweep_direction_source"]
             table["source"] = name
@@ -1027,10 +1093,34 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
 
     combined = pd.concat(tables, ignore_index=True)
     block["fits"] = _records(combined, EIS_COLS + ["source"])
+    if "kk_n_outliers" in combined.columns:
+        n_kk = int(pd.to_numeric(combined["kk_n_outliers"], errors="coerce").fillna(0).sum())
+        n_pts = int(pd.to_numeric(combined.get("kk_n_points"), errors="coerce").fillna(0).sum())
+        n_capped = int(combined.get("kk_capped", pd.Series(dtype=bool)).fillna(False).sum())
+        block["n_kk_outliers"] = n_kk
+        if n_kk:
+            logging.info("Lin-KK: %d of %d point(s) excluded across %d spectra%s",
+                         n_kk, n_pts, len(combined),
+                         f"; {n_capped} spectrum/spectra hit the removal cap"
+                         if n_capped else "")
+        if n_capped:
+            block["n_kk_capped"] = n_capped
+            logging.warning("%d EIS spectrum/spectra are KK-suspect (removal cap "
+                            "reached) — read their fits with care", n_capped)
     n_deg = int(combined.get("zarc_degenerate", pd.Series(dtype=bool)).sum())
+    # fillna: a table fitted before this column existed concats as NaN, which
+    # would otherwise be counted as the reason "nan".
+    reasons = combined.get("zarc_degenerate_reason", pd.Series(dtype=str)).fillna("")
+    reason_counts = (
+        reasons[reasons.astype(str).str.len() > 0].value_counts().to_dict()
+        if len(reasons) else {}
+    )
     if n_deg:
-        logging.warning("%d/%d EIS fits flagged degenerate", n_deg, len(combined))
+        logging.warning("%d/%d EIS fits flagged degenerate%s", n_deg, len(combined),
+                        f" ({reason_counts})" if reason_counts else "")
     block["n_degenerate"] = n_deg
+    if reason_counts:
+        block["degenerate_reasons"] = {str(k): int(v) for k, v in reason_counts.items()}
 
     # plot_zarc_vs_soc (and the raw-spectra / fit-overlay plots below) overlay
     # every row's SOC axis on one figure with no per-series separation, so two
@@ -1293,6 +1383,8 @@ def fit_cell(cell_dir: str, nom_capacity: float, cfg: dict = None,
             drt=cfg.get("eis_drt", True),
             drt_lambda=cfg.get("eis_drt_lambda"),
             n_zarc=cfg.get("eis_n_zarc"),
+            lin_kk=cfg.get("eis_lin_kk", True),
+            kk_opts=_kk_opts(cfg),
             steps=steps, nom_capacity=nom_capacity,
         )
     if "qocv" in parts:

@@ -214,7 +214,18 @@ labelled afterwards with the SOC the fits used (`label_bundle`) and plotted, so
 the DRT still costs one solve per spectrum. `eis_n_zarc` in the battery config
 pins N and skips the vote. `settings.zarc_branches` /
 `zarc_branches_source` / `zarc_branch_vote` record what happened;
-`zarc_degenerate` is reported per row and no longer changes the model.
+`zarc_degenerate` is reported per row and no longer changes the model, and
+`zarc_degenerate_reason` names *which* check tripped (`R_d_collapsed`,
+`tau<i>_at_box_{min,max}`, `alpha<i>_at_{min,1}`, `phi_d_at_{min,max}`,
+`;`-joined, `no_fit` when no start converged; empty when sound) — exported in
+`<cell>_eis_fits.csv` and tallied into `eis.degenerate_reasons`. A degenerate
+fit is **drawn, in grey**, not hidden: `plot_zarc_vs_soc` runs its trend line
+through the sound fits only but plots the degenerate points as grey markers
+(`DEGENERATE_COLOR`), and `plot_fit_overlay` greys that spectrum's fitted curve
+and puts the reason in the panel title. Dropping them left a gap that read as
+missing data rather than as an unconstrained parameter, and on a sweep whose
+low-SOC end degenerates systematically it hid exactly the points worth looking
+at. (The pulse fits' own `degenerate` flag still hides those points.)
 
 Counting only peaks **inside the τ box** is what makes the average mean
 anything — the largest feature in γ on every cell measured so far is the
@@ -378,6 +389,70 @@ HF RMSE of the three at 0.031 vs 0.043 vs 0.049) but shifts R0 by −0.09 mΩ,
 that damages R0 most. **R0 stays monotone in SOC under all three**, so the
 two-stage fix is robust to this; left unmodelled deliberately. Untested idea:
 narrow the HF window's top instead of adding an element.
+
+**Lin-KK screen before the fit** (`analysis/eis_lin_kk.py`, `eis_lin_kk`,
+default **on**) — every spectrum is tested for Kramers-Kronig consistency
+before anything reads it, and the points that fail are excluded from the
+fit-free readouts, the HF R0 stage, the ZARC fit and the DRT. A KK-violating
+point cannot be a property of the cell (it is a disturbance during the sweep),
+and least squares has no way to reject it on its own. The screen runs **once
+per bundle**, in `fit_eis`, so the DRT solve, the branch-count vote and the
+ECM fits all see the same points.
+
+The reference circuit is `R_ohm + jωL + Σ R_k/(1+jωτ_k)` with the τ fixed —
+KK-compliant by construction, linear, one solve. It is built on
+**impedance.py** (`impedance.validation`, already a pinned dependency): its
+`get_tc_distribution` for the τ grid, its `K` element for the RC columns, its
+`calc_mu`. Three parts of its `linKK` wrapper are deliberately **not** used,
+each for a measured reason, and the module docstring carries the numbers:
+`fit_linKK(fit_type="complex")` solves the normal equations as `inv(AᵀA)Aᵀb`
+and **diverges** past M≈40 (residual 6e-3 at M=40, 0.68 at M=48, 7e4 at M=60
+on a 48-point NFPP-shaped spectrum) — solved here with `lstsq`, monotone out
+to M=120; the **μ criterion** was reading that divergence as overfitting and
+stopping at M=9–12 with the fit still 4–10 % off, so M is set from the data
+and **μ is reported, not used** (`kk_mu`); and `eval_linKK`/`residuals_linKK`
+evaluate the circuit by `eval()`-ing a string built with `repr`, which under
+NumPy 2 renders a float as `np.float64(0.1)` and raises `NameError`.
+
+Two settings, both forced by measurement: the τ grid extends
+`TAU_EXTEND_DECADES` (1) past the band at each end — a basis truncated at
+`1/(2πf_min)` cannot reproduce a dispersive diffusion tail and misfits the
+low-frequency *edge* of every such spectrum by 20–40 % at any M, which an
+outlier rule would read as a bad diffusion branch; and M is
+`ELEMENTS_PER_DECADE` (5) per decade **capped at half the point count**, the
+cap being the load-bearing half: above ~N/2 the model can interpolate the data
+and absorbs the very point it should expose (a 5 % spike at the low-frequency
+end stands 17× above its neighbours at M=25 and **0.4×** at M=60).
+
+A point is dropped only when its residual `|ΔZ|/|Z|` clears **both** an
+absolute floor (`eis_lin_kk_resid_floor`, 1 %) and `median + k·σ` of that
+spectrum's own residuals (`eis_lin_kk_sigma_k`, 5, σ = 1.4826·MAD). The floor
+alone would amputate the diffusion branch of a cell that drifts through a slow
+sweep (non-stationarity raises every low-frequency residual together — that is
+not an outlier); the MAD term alone would condemn an ordinary 0.3 % point on a
+very clean spectrum. Removal is iterated and **capped**
+(`eis_lin_kk_max_removed_frac`, 10 %); when the cap binds it is reported
+(`kk_capped`, a log warning) rather than obeyed quietly — a spectrum with 20 %
+KK-violating points is a bad measurement, not one with outliers.
+
+Nothing is deleted: the rows keep a `kk_outlier` marker and are drawn as **red
+×** on the raw-spectra and fit-overlay plots, so a point dropped from a fit is
+never indistinguishable from one never measured. `kk_M`, `kk_mu`,
+`kk_resid_max`, `kk_resid_rms`, `kk_n_points`, `kk_n_outliers`, `kk_capped`,
+`kk_skipped` are in `<cell>_eis_fits.csv`. **`kk_resid_rms` is the honest noise
+floor of the measurement** — a spectrum with a large one is not KK-consistent
+anywhere, which no outlier removal repairs and which the ECM parameters beside
+it must be read in the light of.
+
+**Known limit — an outlier at the very first or last frequency can be partly
+absorbed.** With τ extended past the band the basis has local freedom at the
+edges, so a bad edge point pulls the reference toward itself and its own
+residual shrinks: on a synthetic sweep carrying a 7 % outlier at *both* ends,
+one was excluded and the other scored 0.94 %, just under the 1 % floor. The
+fix is a *deleted* (leave-one-out) residual — score each point against a model
+fitted without it — which is cheap here (one small `lstsq` per point) but is
+not implemented yet. Until it is, check `kk_resid_max` on spectra whose fits
+look edge-dragged.
 
 **DRT** (`analysis/eis_drt.py`) — model-free companion, **run by default
 alongside every EIS fit** (`eis_drt`, default true). It also casts the vote
@@ -639,6 +714,10 @@ path) and its fork `analysis/fit_2rc_pulse.py` (standalone, flags
 | `eis_hf_r0_f_min_hz` | Lower frequency bound of the two-stage R0 window (default 100). Needs ≥10 points above it or the stage is skipped and R0 is fitted as before. |
 | `eis_drt` | Run the DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block. Diagnostic only — it does not set the ZARC branch count. ~0.5 s per bundle. |
 | `eis_drt_lambda` | Fixed DRT regularisation (default `1e-3`). Deliberately not the L-curve corner — see the DRT section. |
+| `eis_lin_kk` | Lin-KK screen each spectrum and exclude the KK-violating points before every EIS fit (**default true**) — see the Lin-KK section. Set false to fit the raw spectra. |
+| `eis_lin_kk_resid_floor` | Absolute bar on `\|ΔZ\|/\|Z\|` for a point to be an outlier candidate (default `0.01`). |
+| `eis_lin_kk_sigma_k` | Robust bar: a candidate must also exceed `median + k·σ` of its own spectrum's residuals, σ = 1.4826·MAD (default `5`). |
+| `eis_lin_kk_max_removed_frac` | Cap on the fraction of one spectrum that may be removed (default `0.1`). Reaching it flags the spectrum KK-suspect instead of trimming further. |
 | `eis_n_zarc` | Pin the ZARC branch count for the whole run (1 or 2). Unset (default), the DRT votes it — see the branch-count section, including the two cells where the vote and the ECM disagree. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
 | `running_window_days` | Monitor: `running` if last BRONZE_CU `Time` within N days (default 2) |
