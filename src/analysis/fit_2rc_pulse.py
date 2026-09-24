@@ -355,10 +355,16 @@ def select_pulse_segments(
 ):
     """Return the list of *good* pulse ``pulse_segment_id`` values, in time order.
 
-    A good pulse: Zustand in {CHA, DCH}, stable current, starting at least
-    ``remove_before_min`` minutes into its cycle, and - when a current
-    whitelist is active - carrying one of the wanted |I| amplitudes
-    (either polarity; the gate matches on |I|).
+    A good pulse: labelled ``target == "PUL"``, Zustand in {CHA, DCH}, stable
+    current, starting at least ``remove_before_min`` minutes into its cycle,
+    and - when a current whitelist is active - carrying one of the wanted |I|
+    amplitudes (either polarity; the gate matches on |I|).
+
+    ``pulse_segment_id`` is re-derived from ``Zustand`` runs alone, which cannot
+    tell a pulse from any other current plateau of the same amplitude, so the
+    pipeline's own label is honoured when the bundle carries one. Skipped when
+    ``target`` is absent or holds no ``PUL``, so unlabelled inputs to this
+    standalone fitter keep working. Mirrors ``characterize/pulse_fit.py``.
 
     ``current_a`` / ``current_tol`` default to :data:`PULSE_CURRENT_A` /
     :data:`PULSE_CURRENT_TOL` read **at call time** (``None`` sentinel),
@@ -370,8 +376,15 @@ def select_pulse_segments(
         PULSE_CURRENT_TOL if current_tol is None else float(current_tol)
     )
     pulses = labeled[labeled["Zustand"].isin(["CHA", "DCH"])]
+    use_target = "target" in pulses.columns and (pulses["target"] == "PUL").any()
     good = []
     for seg_id, grp in pulses.groupby("pulse_segment_id", sort=False):
+        if use_target and not (grp["target"] == "PUL").any():
+            logging.info(
+                "skip pulse seg %s: no PUL-labelled row (targets: %s)",
+                seg_id, sorted(set(grp["target"].astype(str))),
+            )
+            continue
         amp = _segment_amplitude(grp)
         if not _matches_current(amp, current_a, current_tol):
             logging.info(

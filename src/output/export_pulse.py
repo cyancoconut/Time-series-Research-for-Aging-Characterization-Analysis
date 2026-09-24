@@ -9,6 +9,19 @@ sliced back in (identity — ID / BM_Programm / target — is stamped from the s
 since BRONZE_CU is unsegmented and carries no ID). Falls back to the 2-row stub
 when no bronze_path is given or the window yields no rows.
 
+**Procedure 0 is never a neighbour.** ``<BM>_0`` is dismember's discard bucket,
+not a pause: it collects every dropped row (short segments, mid-pause samples)
+and therefore carries ``target="PAU"`` while spanning the *whole* test. A pulse
+at procedure 1 would otherwise pull it in as its "before" stub, and rehydrating
+it slices all of BRONZE_CU back into the bundle — every CC charge, discharge and
+restore pulse, with each real pulse duplicated at identical timestamps. The
+downstream fitter re-segments on ``Zustand`` alone, so those CC plateaus fit as
+pseudo-pulses and the duplicated rows corrupt the genuine ones. Seen on
+``J8041_Hina_10Ah_14`` BM4, whose programme opens with a pulse at procedure 1:
+631k bucket rows, 22 of 32 "fits" bogus (rmse 55-700 mV vs 1.6-6.2 mV, RC
+parameters railed at their bounds). Cells whose first pulse sits at procedure 8
+or 9 (both NFPP sweeps) never reached proc 0 and were unaffected.
+
 Filename: <cell_stem>_pulse_BM<BM_Programm>_<SOH>SOH.parquet
 Local:    <working_path>/20_export_pulse/<cell_stem>/
 MinIO:    <minio_prefix>/20_export_pulse/<cell_stem>/
@@ -104,6 +117,8 @@ def export_pulse(
         pul_procs = {_proc_num(i) for i in group["ID"].unique()}
         pul_procs.discard(None)
         neighbor_procs = {p + d for p in pul_procs for d in (-1, 1)}
+        # proc 0 is the discard bucket, not a pause - see the module docstring.
+        neighbor_procs.discard(0)
         pau_neighbors = df_pau[
             (df_pau["BM_Programm"] == bm_prog) & (df_pau["_proc"].isin(neighbor_procs))
         ].drop(columns="_proc")
