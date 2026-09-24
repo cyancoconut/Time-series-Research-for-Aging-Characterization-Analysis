@@ -4,6 +4,11 @@ import dask.dataframe as dd
 from util.add_ah_throughput import add_ah_throughput
 
 
+#: Substring in a Prozedur name marking it as an EIS procedure. Necessary but
+#: not sufficient — see the relabel in :meth:`DismemblerFunctions.dismembling`.
+EIS_NAME_MARKER = "_EIS_"
+
+
 class DismemblerFunctions:
 
     def __init__(self, MIN_ROWS, PAU_DURATION, QOCV_PROCEDURE_FILTER=None):
@@ -35,6 +40,9 @@ class DismemblerFunctions:
         processed_dfs = []
         # Define the columns that represent PAU states
         PAU_Columns = ["PAU", "PAUO", "..."]
+        # Zustand values that move charge. A procedure carrying any of them is
+        # doing the cycling itself, whatever its name says.
+        CURRENT_Columns = ["CHA", "DCH"]
 
         # Within each BM_Programm...
         for programm_name, programm_df in df_cell.groupby("BM_Programm"):
@@ -93,9 +101,30 @@ class DismemblerFunctions:
                 how="left",
             )
 
-            # Relabel PAU rows whose procedure contains "_EIS_" as EIS
+            # Relabel the pauses of a *real* EIS procedure as EIS, so the dwell
+            # windows survive the PAU stub reduction below and stay available as
+            # EIS match anchors. The name marker alone is not sufficient: a
+            # cycler procedure may mention EIS while doing the pulsing itself
+            # (csi_Hina_Puls_EIS_neg10, zho_CHAR_Pulse_EIS_CHA), and relabeling
+            # its ordinary rests takes them out of both the stub reduction and
+            # the long-PAU procedure boundary, and hands them an "EIS" target
+            # they have not earned. A real EIS procedure only ever rests — it
+            # carries no CHA/DCH at all (PDE_MEC_STD_EIS_diga is 89 k rows of
+            # pure PAU) — so require the name *and* the absence of any
+            # charge-moving Zustand anywhere in that procedure.
             mask_pau = programm_df["Zustand"].isin(PAU_Columns)
-            mask_eis = programm_df["Prozedur"].str.contains("_EIS_", na=False)
+            name_has_eis = programm_df["Prozedur"].str.contains(
+                EIS_NAME_MARKER, na=False, regex=False
+            )
+            carries_current = (
+                programm_df["Zustand"]
+                .isin(CURRENT_Columns)
+                .groupby(programm_df["Prozedur"])
+                .transform("any")
+                .fillna(False)
+                .astype(bool)
+            )
+            mask_eis = name_has_eis & ~carries_current
             programm_df.loc[mask_pau & mask_eis, ["Zustand"]] = "EIS"
             # Recompute after relabeling so EIS rows are excluded
             mask_pau = programm_df["Zustand"].isin(PAU_Columns)
