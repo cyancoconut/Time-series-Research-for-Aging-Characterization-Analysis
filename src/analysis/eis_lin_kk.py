@@ -64,7 +64,7 @@ across decades and cannot chase a single point.
 **Outlier rule.** A point is dropped only when its normalized residual
 ``|ΔZ|/|Z|`` clears *both* bars:
 
-* an absolute floor (:data:`RESID_FLOOR`, 1 %), and
+* an absolute floor (:data:`RESID_FLOOR`, 5 %), and
 * ``median + k·σ`` of this spectrum's own residuals, σ robust (1.4826·MAD,
   :data:`SIGMA_K`).
 
@@ -110,12 +110,17 @@ MAX_POINT_FRACTION = 0.5
 TAU_EXTEND_DECADES = 1.0
 
 #: Absolute floor on ``|ΔZ|/|Z|`` for a point to be an outlier candidate at
-#: all. 1 % is well above a settled dwell's noise (~0.3 %) and well below the
-#: 5–20 % a real disturbance shows.
-RESID_FLOOR = 0.01
+#: all. 5 % sits at the bottom of the 5–20 % a real disturbance shows, far
+#: above a settled dwell's noise (~0.3 %): only a point that is plainly wrong
+#: is a candidate, and an ordinary misfit — a slow sweep's drifting
+#: low-frequency tail, a dispersive diffusion edge — is left in the fit.
+RESID_FLOOR = 0.05
 
 #: How many robust σ above the spectrum's own median residual a point must sit.
-SIGMA_K = 5.0
+#: At 10 the relative bar only catches a point standing far out from its own
+#: neighbours, so a uniformly noisy spectrum is reported (``kk_resid_rms``)
+#: rather than trimmed.
+SIGMA_K = 10.0
 
 #: Cap on the fraction of a spectrum that may be removed. Above this the
 #: spectrum is reported as KK-suspect instead of being trimmed into shape.
