@@ -425,12 +425,17 @@ and absorbs the very point it should expose (a 5 % spike at the low-frequency
 end stands 17× above its neighbours at M=25 and **0.4×** at M=60).
 
 A point is dropped only when its residual `|ΔZ|/|Z|` clears **both** an
-absolute floor (`eis_lin_kk_resid_floor`, 1 %) and `median + k·σ` of that
-spectrum's own residuals (`eis_lin_kk_sigma_k`, 5, σ = 1.4826·MAD). The floor
+absolute floor (`eis_lin_kk_resid_floor`, 5 %) and `median + k·σ` of that
+spectrum's own residuals (`eis_lin_kk_sigma_k`, 10, σ = 1.4826·MAD). The floor
 alone would amputate the diffusion branch of a cell that drifts through a slow
 sweep (non-stationarity raises every low-frequency residual together — that is
 not an outlier); the MAD term alone would condemn an ordinary 0.3 % point on a
-very clean spectrum. Removal is iterated and **capped**
+very clean spectrum. Both bars are deliberately set well out — 5 % is the
+bottom of the range a real disturbance shows (a settled dwell's noise is
+~0.3 %) and 10σ only catches a point standing far out from its own
+neighbours — so the screen removes what is plainly wrong and leaves an
+ordinary misfit in the fit, to be read off `kk_resid_rms` instead. Removal is
+iterated and **capped**
 (`eis_lin_kk_max_removed_frac`, 10 %); when the cap binds it is reported
 (`kk_capped`, a log warning) rather than obeyed quietly — a spectrum with 20 %
 KK-violating points is a bad measurement, not one with outliers.
@@ -448,10 +453,10 @@ it must be read in the light of.
 absorbed.** With τ extended past the band the basis has local freedom at the
 edges, so a bad edge point pulls the reference toward itself and its own
 residual shrinks: on a synthetic sweep carrying a 7 % outlier at *both* ends,
-one was excluded and the other scored 0.94 %, just under the 1 % floor. The
-fix is a *deleted* (leave-one-out) residual — score each point against a model
-fitted without it — which is cheap here (one small `lstsq` per point) but is
-not implemented yet. Until it is, check `kk_resid_max` on spectra whose fits
+one was excluded and the other scored 0.94 %, then just under the 1 % floor
+and far under the 5 % one in force now. The fix is a *deleted* (leave-one-out)
+residual — score each point against a model fitted without it — which is cheap
+here (one small `lstsq` per point) but is not implemented yet. Until it is, check `kk_resid_max` on spectra whose fits
 look edge-dragged.
 
 **DRT** (`analysis/eis_drt.py`) — model-free companion, **run by default
@@ -715,8 +720,8 @@ path) and its fork `analysis/fit_2rc_pulse.py` (standalone, flags
 | `eis_drt` | Run the DRT beside every EIS fit (**default true**): γ/map plots + `<cell>_eis_drt_peaks.csv` + an `eis.drt` block. Diagnostic only — it does not set the ZARC branch count. ~0.5 s per bundle. |
 | `eis_drt_lambda` | Fixed DRT regularisation (default `1e-3`). Deliberately not the L-curve corner — see the DRT section. |
 | `eis_lin_kk` | Lin-KK screen each spectrum and exclude the KK-violating points before every EIS fit (**default true**) — see the Lin-KK section. Set false to fit the raw spectra. |
-| `eis_lin_kk_resid_floor` | Absolute bar on `\|ΔZ\|/\|Z\|` for a point to be an outlier candidate (default `0.01`). |
-| `eis_lin_kk_sigma_k` | Robust bar: a candidate must also exceed `median + k·σ` of its own spectrum's residuals, σ = 1.4826·MAD (default `5`). |
+| `eis_lin_kk_resid_floor` | Absolute bar on `\|ΔZ\|/\|Z\|` for a point to be an outlier candidate (default `0.05`). |
+| `eis_lin_kk_sigma_k` | Robust bar: a candidate must also exceed `median + k·σ` of its own spectrum's residuals, σ = 1.4826·MAD (default `10`). |
 | `eis_lin_kk_max_removed_frac` | Cap on the fraction of one spectrum that may be removed (default `0.1`). Reaching it flags the spectrum KK-suspect instead of trimming further. |
 | `eis_n_zarc` | Pin the ZARC branch count for the whole run (1 or 2). Unset (default), the DRT votes it — see the branch-count section, including the two cells where the vote and the ECM disagree. |
 | (always on) | `export_capacity` writes `<cell_stem>_capacity.csv` to `40_capacity_monitore/` |
