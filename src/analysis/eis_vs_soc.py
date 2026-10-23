@@ -356,6 +356,20 @@ def _z_warburg_generalized(rd, td, phi, w):
     return rd / _safe_tanh(x) / x
 
 
+def _z_warburg_generalized_transmissive(rd, td, phi, w):
+    """Generalized transmissive Warburg R·tanh((jωτ)^φ)/((jωτ)^φ).
+
+    The ``tanh`` counterpart of :func:`_z_warburg_generalized`: same sloped
+    branch at ωτ ≫ 1 (90·φ° off the real axis), but at ωτ ≪ 1 it **plateaus**
+    at ``R`` instead of turning capacitive. So it holds no charge — the cell's
+    storage is left to the OCV curve, where it belongs, rather than to a
+    capacitor ``τ/R`` set by whatever τ the fit was given. φ = 0.5 is the
+    classic finite-length Warburg (:func:`_z_warburg`).
+    """
+    x = (1j * w * td) ** phi
+    return rd * _safe_tanh(x) / x
+
+
 def _z_zarc(r, tau, alpha, w):
     """ZARC (R ∥ CPE) impedance R / (1 + (jωτ)^α); α=1 is an ideal RC."""
     return r / (1 + (1j * w * tau) ** alpha)
@@ -380,7 +394,36 @@ ZARC_ALPHA_MIN = 0.6
 #: 5 s measured best here — it beat 1 s and 2 s on every parameter's smoothness
 #: and on the SOC-100 fit, for +0.002 mΩ mean RMSE against an unpinned box.
 #: Retune per dataset if the sweep's frequency range changes materially.
+#:
+#: This pinned box applies to the **blocking** elements only (``generalized``,
+#: ``coth``) — see :func:`diffusion_tau_box`.
 DIFFUSION_TAU_BOX = (5.0, 5.0)
+
+#: Diffusion τ box for the **transmissive** elements (``generalized_transmissive``,
+#: ``tanh``), seconds. These cannot be pinned: a transmissive element plateaus
+#: near ω = 1/τ_d, and the spectra still rise at the lowest measured frequency
+#: (0.01 Hz), so a τ_d of 5 s would force the plateau inside the band. Fitted
+#: instead; on the NFPP BM22 sweep it lands at 112–132 s (two outliers, 249 s
+#: at SOC 21 % and 213 s at SOC 100 %) with no spectrum on either edge. That
+#: is past the band's ~16 s, so the DC plateau ``R_d_z`` is an
+#: **extrapolation**: what the shape of the in-band tail implies, not a
+#: measured value.
+#:
+#: The floor equals :data:`DIFFUSION_TAU_BOX`'s, so :func:`zarc_tau_box` keeps
+#: the same 1 s ZARC ceiling for every element and the boxes stay disjoint.
+DIFFUSION_TAU_BOX_TRANSMISSIVE = (5.0, 1e4)
+
+#: τ_d starts for a fitted τ_d, crossed with every ZARC start. One τ_d start
+#: per ZARC start (the pinned elements' arrangement) left the fit sensitive to
+#: which spread it was paired with.
+DIFFUSION_TAU_STARTS = (10.0, 50.0, 300.0, 3000.0)
+
+
+def diffusion_tau_box(element: str) -> tuple:
+    """``(lo, hi)`` τ_d bounds for a diffusion ``element`` — equal bounds pin it."""
+    if element in ("generalized_transmissive", "tanh"):
+        return DIFFUSION_TAU_BOX_TRANSMISSIVE
+    return DIFFUSION_TAU_BOX
 
 #: Diffusion exponent box for the ``generalized`` element. 0.5 is ideal Fickian
 #: diffusion; the fits here land at 0.32–0.42 (sub-diffusive), so the box is
@@ -421,7 +464,30 @@ def zarc_tau_box(f_min: float, f_max: float) -> tuple:
 #:   steep tail at full charge and the flat ones mid-sweep.
 #: * ``"coth"`` — as above with φ pinned to 0.5 (ISEA FittingGUI's element).
 #: * ``"tanh"`` — transmissive finite-length Warburg; plateaus at low frequency.
-ZARC_DIFFUSION_ELEMENT = "generalized"
+#: * ``"generalized_transmissive"`` — R·tanh((jωτ)^φ)/((jωτ)^φ), φ **and** τ_d
+#:   fitted. The default.
+#:
+#: Why the default moved off ``"generalized"`` (the blocking form): its
+#: low-frequency limit is a capacitor ``τ_d/R_d``, and with τ_d pinned at 5 s
+#: that capacitance is set by the pin, not the data. On NFPP BM22 it came out
+#: 6–18× smaller than the cell's real storage ``1/(dOCV/dQ)``, so a
+#: time-domain model built from it drifted away on any pulse past ~30 s
+#: (R_DC at the end of a 200 s pulse +20–25 %). The transmissive form stores
+#: nothing, so the OCV curve carries the storage. On the spectra it also fits
+#: slightly better (same Lin-KK-screened points): median RMSE 0.0113 vs
+#: 0.0130 mΩ over SOC 15–94 %, lower on 20 of 21 spectra — all but SOC 100 %
+#: (0.023 vs 0.017) — with φ ≈ 0.71–0.76. One cost: α1 rails at
+#: :data:`ZARC_ALPHA_MIN` on the three spectra below 12 % SOC
+#: (``alpha1_at_min``), where the blocking fit flags none.
+#: Fixing φ at 0.5 (``"tanh"``) instead fits the spectra 2.5–3× worse.
+#:
+#: **R_d_z / φ_d_z / τ_d_z are not comparable across the two families** — the
+#: blocking R_d is an amplitude at ω = 1/τ_d, the transmissive one a DC
+#: plateau; φ lands near 0.38 in one and 0.75 in the other on the same data.
+ZARC_DIFFUSION_ELEMENT = "generalized_transmissive"
+
+#: The elements whose exponent φ is fitted (the rest fix it at 0.5).
+_FREE_PHI_ELEMENTS = ("generalized", "generalized_transmissive")
 
 #: High-frequency window for the two-stage R0 estimate, in Hz. Above this the
 #: spectrum is described by ``R0 + jωL + (the fast arc)`` alone — the slow arc
@@ -605,11 +671,14 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     can each reproduce one low-frequency slope and misfit every other one.
 
     **Identifiability.** The ZARC τ are boxed into the measured band and the
-    diffusion τ into :data:`DIFFUSION_TAU_BOX`, disjoint from it, so the slowest
+    diffusion τ into :func:`diffusion_tau_box`, disjoint from it, so the slowest
     ZARC and the diffusion branch cannot trade roles — without this the two
     swap between spectra and the vs-SOC curves jump decades at the swap points.
     Branches are returned ordered ``τ1 < τ2 < …`` and the fit is multistarted.
-    τ_d normally lands on a box edge and carries no information; use ``R_d_z``.
+    For the blocking elements τ_d is pinned and carries no information; use
+    ``R_d_z``. For the transmissive ones it is fitted, but lands past the
+    lowest measured frequency, so it and the plateau ``R_d_z`` are
+    extrapolated from the in-band tail.
 
     ``pin_r0`` fixes R0 at a value measured beforehand (see :func:`fit_hf_r0`)
     instead of fitting it — the second stage of the two-stage R0. R0 leaves the
@@ -618,12 +687,12 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     borrow from it. ``None`` (default) fits R0 as before.
 
     Returns ``{R0_z, L_z, R1_z, tau1_z, alpha1_z, R2_z, tau2_z, alpha2_z, R_d_z,
-    tau_d_z, phi_d_z, n_zarc, zarc_rmse, zarc_degenerate,
+    tau_d_z, phi_d_z, diff_element, n_zarc, zarc_rmse, zarc_degenerate,
     zarc_degenerate_reason, r0_pinned}`` (NaN/True on failure). Slots past
     ``n_zarc`` are NaN — see :data:`ZARC_COLUMN_SLOTS`.
     ``zarc_degenerate_reason`` names *which* check tripped (``R_d_collapsed``,
     ``tau<i>_at_box_{min,max}``, ``alpha<i>_at_{min,1}``, ``phi_d_at_{min,max}``,
-    ``;``-joined; ``no_fit`` when no start converged), and is empty when sound.
+    ``tau_d_at_box_{min,max}`` (fitted τ_d only), ``;``-joined; ``no_fit`` when no start converged), and is empty when sound.
     ``phi_d_z`` is the fitted φ, or the fixed exponent of the chosen element.
     """
     from scipy.optimize import least_squares
@@ -644,9 +713,10 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
     pin_r0 = float(pin_r0) if pin_r0 is not None and np.isfinite(pin_r0) else None
 
     element = element or ZARC_DIFFUSION_ELEMENT
-    if element not in ("tanh", "coth", "generalized"):
+    if element not in ("tanh", "coth", "generalized", "generalized_transmissive"):
         raise ValueError(f"unknown diffusion element {element!r}")
-    free_phi = element == "generalized"
+    free_phi = element in _FREE_PHI_ELEMENTS
+    fail["diff_element"] = element
 
     s = spec.sort_values("frequency")
     f = s["frequency"].to_numpy(float)
@@ -660,13 +730,14 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
         "tanh": lambda rd, td, phi, wv: _z_warburg(rd, td, wv),
         "coth": lambda rd, td, phi, wv: _z_warburg_reflective(rd, td, wv),
         "generalized": _z_warburg_generalized,
+        "generalized_transmissive": _z_warburg_generalized_transmissive,
     }[element]
 
     # ZARC τ box = the band the sweep can actually resolve, half a decade of
     # slack either side. Anything outside is unconstrained by the data.
     # Capped at the diffusion box floor so the two boxes stay **disjoint** —
     # overlap is what lets the slow ZARC and the diffusion branch trade roles.
-    td_lo, td_hi = DIFFUSION_TAU_BOX
+    td_lo, td_hi = diffusion_tau_box(element)
     tz_lo, tz_hi = zarc_tau_box(f.min(), f.max())
 
     # Seeds. ``seed`` is only populated when a caller still runs the old 2RC /
@@ -687,7 +758,7 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
 
     # Free-parameter layout, in order:
     #   [R0 unless pinned], L, R_1..R_n, lt_1..lt_n, a_1..a_n, Rd,
-    #   [ltd only when DIFFUSION_TAU_BOX has width — equal bounds pin it],
+    #   [ltd only when the element's τ_d box has width — equal bounds pin it],
     #   [phi only when it is fitted].
     # A pinned R0 is dropped from the vector rather than boxed to zero width —
     # least_squares needs lb < ub.
@@ -730,12 +801,17 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
         return np.concatenate([r.real, r.imag])
 
     # Multistart: the DRT's own peak τ first (when it supplied them), then
-    # fixed spreads across the band. τ_d and φ are spread alongside.
+    # fixed spreads across the band. φ is spread alongside. A pinned τ_d is
+    # clipped onto its pin whatever the start; a fitted one gets every
+    # DIFFUSION_TAU_STARTS value crossed with every ZARC start.
     tau_starts = _tau_starts(n, tau_seeds, tz_lo, tz_hi)
-    td_starts = [seed.get("tau_d", 30.0), 3.0, 100.0, 30.0]
     phi_starts = [0.5, 0.4, 0.3, 0.45]
+    if fit_tau_d:
+        starts = [(taus, td) for taus in tau_starts for td in DIFFUSION_TAU_STARTS]
+    else:
+        starts = [(taus, td_lo) for taus in tau_starts]
     best = None
-    for k, taus in enumerate(tau_starts):
+    for k, (taus, td0) in enumerate(starts):
         x0 = [max(l0, 1e-9)]
         x0 += [rspan / max(n, 1)] * n                 # R_i
         x0 += [np.log(t) for t in taus]               # lnτ_i
@@ -744,7 +820,7 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
         if fit_r0:
             x0 = [max(r0, 1e-3)] + x0
         if fit_tau_d:
-            x0.append(np.log(td_starts[k % len(td_starts)]))
+            x0.append(np.log(td0))
         if free_phi:
             x0.append(phi_starts[k % len(phi_starts)])
         x0 = np.clip(x0, lb, ub)
@@ -800,10 +876,15 @@ def fit_nzarc_warburg_eis(spec: pd.DataFrame, n_zarc: int = 2,
         edge = _edge(phi, ph_lo, ph_hi)
         if edge:
             reasons.append(f"phi_d_at_{edge}")
+    if fit_tau_d:
+        edge = _edge(td, td_lo, td_hi)
+        if edge:
+            reasons.append(f"tau_d_at_box_{edge}")
     degenerate = bool(reasons)
     out = {
         "R0_z": float(R0_), "L_z": float(L_),
         "R_d_z": float(Rd_), "tau_d_z": td, "phi_d_z": phi,
+        "diff_element": element,
         "n_zarc": n, "zarc_rmse": rmse, "zarc_degenerate": degenerate,
         "zarc_degenerate_reason": ";".join(reasons),
         "r0_pinned": pin_r0 is not None,
@@ -1133,14 +1214,23 @@ def plot_eis_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
 def _z_diffusion_from_row(row, w):
     """Diffusion branch of a fitted table row, matching the element used.
 
-    Prefers the row's own ``phi_d_z`` so a table fitted under one element still
-    replots correctly after :data:`ZARC_DIFFUSION_ELEMENT` is changed.
+    Reads the element from the row's own ``diff_element`` — not from
+    :data:`ZARC_DIFFUSION_ELEMENT` — so a table is always redrawn with the curve
+    it was fitted with. A row without the column predates it, when every fit
+    was the blocking ``"generalized"`` form, so that is the fallback. ``tanh``
+    and ``coth`` are the generalized forms at φ = 0.5; ``coth`` keeps its own
+    π-scaled form.
     """
-    if ZARC_DIFFUSION_ELEMENT == "tanh":
-        return _z_warburg(row["R_d_z"], row["tau_d_z"], w)
+    element = row.get("diff_element", "generalized")
+    if not isinstance(element, str):         # NaN from a CSV round trip
+        element = "generalized"
+    if element == "coth":
+        return _z_warburg_reflective(row["R_d_z"], row["tau_d_z"], w)
     phi = row.get("phi_d_z", 0.5)
     if not np.isfinite(phi):
         phi = 0.5
+    if element in ("tanh", "generalized_transmissive"):
+        return _z_warburg_generalized_transmissive(row["R_d_z"], row["tau_d_z"], phi, w)
     return _z_warburg_generalized(row["R_d_z"], row["tau_d_z"], phi, w)
 
 
@@ -1188,8 +1278,13 @@ def plot_zarc_vs_soc(table: pd.DataFrame, out_png: str, title: str = ""):
     for i in range(1, ZARC_COLUMN_SLOTS + 1):
         metrics += [(f"R{i}_z", f"R{i} (mΩ)"), (f"tau{i}_z", f"τ{i} (s)"),
                     (f"alpha{i}_z", f"α{i}")]
+    # A pinned τ_d is a shape constant; a fitted one (transmissive) is a value,
+    # though extrapolated past the band. A blocking R_d is an amplitude at
+    # ω = 1/τ_d, a transmissive one the DC plateau.
+    fitted_td = t["tau_d_z"].nunique() > 1 if "tau_d_z" in t.columns else False
     metrics += [
-        ("R_d_z", "R_d — diffusion (mΩ)"), ("tau_d_z", "τ_d (s) — shape only"),
+        ("R_d_z", "R_d — diffusion plateau (mΩ)" if fitted_td else "R_d — diffusion (mΩ)"),
+        ("tau_d_z", "τ_d (s) — fitted, past band" if fitted_td else "τ_d (s) — shape only"),
         ("phi_d_z", "φ_d — diffusion exponent"),
         ("zarc_rmse", "ZARC+W rmse (mΩ)"),
     ]

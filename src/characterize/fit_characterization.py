@@ -17,10 +17,11 @@ Models are fixed defaults:
   are comparable down their own length. It is voted by the DRT
   (:func:`analysis.eis_drt.branch_count_vote`: the mean in-box peak count over
   the run, rounded) or pinned by ``eis_n_zarc``.
-  φ is fitted; τ_d is
-  **pinned** by ``DIFFUSION_TAU_BOX``, so ``R_d_z`` is the amplitude at
-  ω = 1/τ_d and ``tau_d_z`` is a shape constant, not a result. Those settings
-  are recorded in the params file so the numbers stay interpretable. Each
+  The diffusion branch is a generalized **transmissive** Warburg with φ and
+  τ_d both fitted (``analysis.eis_vs_soc.ZARC_DIFFUSION_ELEMENT``); ``R_d_z``
+  is its DC plateau, extrapolated, since τ_d lands past the lowest measured
+  frequency. The element and τ_d box are recorded in the params file so the
+  numbers stay interpretable. Each
   bundle's charge/discharge sweep leg(s) are detected from its own
   per-measurement terminal voltage (config ``soc_sweep_direction`` overrides
   detection; ``soc_step_pct`` sets the SOC step, default 5.0) — see
@@ -119,6 +120,10 @@ EIS_COLS = [
     "n_zarc",
     "R1_z", "tau1_z", "alpha1_z",
     "R2_z", "tau2_z", "alpha2_z", "R_d_z", "tau_d_z", "phi_d_z",
+    # Which diffusion element R_d/τ_d/φ belong to. The blocking and the
+    # transmissive families' R_d (amplitude at 1/τ_d vs DC plateau) and φ are
+    # different quantities, so a row is only readable next to this.
+    "diff_element",
     # zarc_degenerate_reason names which check tripped (R_d_collapsed /
     # tau<i>_at_box_{min,max} / alpha<i>_at_{min,1} / phi_d_at_{min,max} /
     # no_fit, ";"-joined), empty when the fit is sound. The flag alone said a
@@ -872,15 +877,16 @@ def fit_eis(data_dir: str, plots_dir: str, soc_direction: str = None,
     drt_lambda = float(drt_lambda) if drt_lambda is not None else DRT_LAMBDA_DEFAULT
 
     files = sorted(glob.glob(os.path.join(data_dir, "*_eis_BM*.parquet")))
+    td_box = eis_vs_soc.diffusion_tau_box(eis_vs_soc.ZARC_DIFFUSION_ELEMENT)
     block = {
         # Completed once the branch count is known, below. A run that returns
         # before that fitted nothing, so the default names an empty block.
         "model": EIS_MODEL.format(n=eis_vs_soc.ZARC_BRANCHES_DEFAULT),
         "settings": {
             "element": eis_vs_soc.ZARC_DIFFUSION_ELEMENT,
-            "tau_d_pinned_s": list(eis_vs_soc.DIFFUSION_TAU_BOX)[0],
-            "tau_d_is_fitted": eis_vs_soc.DIFFUSION_TAU_BOX[0]
-                               != eis_vs_soc.DIFFUSION_TAU_BOX[1],
+            # Equal bounds = pinned (the blocking elements); a range = fitted.
+            "tau_d_box_s": list(td_box),
+            "tau_d_is_fitted": td_box[0] != td_box[1],
             "phi_box": list(eis_vs_soc.DIFFUSION_PHI_BOX),
             "alpha_min": eis_vs_soc.ZARC_ALPHA_MIN,
             "two_stage_r0": two_stage_r0,

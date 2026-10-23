@@ -189,8 +189,8 @@ cell-level number is never mistaken for a same-programme measurement. Bundles
 exported without a `Temperature` column still fit — `T_degC` is NaN.
 
 **Models are fixed defaults**, not config keys: **2RC** for pulse
-(`analysis/fit_2rc_pulse.py`), **N×ZARC + series-L + generalized Warburg** for
-EIS (`analysis/eis_vs_soc.fit_nzarc_warburg_eis`), and no fit for qOCV (the
+(`analysis/fit_2rc_pulse.py`), **N×ZARC + series-L + generalized transmissive
+Warburg** for EIS (`analysis/eis_vs_soc.fit_nzarc_warburg_eis`), and no fit for qOCV (the
 curve plus its throughput capacities). The qOCV plot is two panels: the
 curve, and a **DVA** (`|dV/dQ|` vs SOC for both branches,
 `qocv_curve.differential_voltage` — V interpolated onto a uniform charge grid,
@@ -303,12 +303,31 @@ stretches the plotted range. The α panels' hard-coded `ylim (0.25, 1.05)` is
 replaced by a data-driven range floored at `ZARC_ALPHA_MIN`, with the bound
 drawn as a dotted line so a fit sitting on it is visible.
 
-The EIS diffusion element has φ
-**fitted** (`DIFFUSION_PHI_BOX`) but τ_d **pinned** (`DIFFUSION_TAU_BOX`, 5 s):
-`R_d_z` is the amplitude at ω = 1/τ_d and `tau_d_z` a shape constant, not a
-result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — are
-recorded in `parameters.json`'s `eis.settings`; both were tuned on the NFPP
-sweep and may need retuning for another cell type or frequency range.
+The EIS diffusion element (`ZARC_DIFFUSION_ELEMENT = "generalized_transmissive"`)
+is `R_d·tanh((jωτ_d)^φ)/(jωτ_d)^φ` with **φ and τ_d both fitted**
+(`DIFFUSION_PHI_BOX`, `DIFFUSION_TAU_BOX_TRANSMISSIVE` = 5 s … 10⁴ s). It
+**plateaus** at `R_d_z` at low frequency instead of turning capacitive, so it
+stores no charge and the cell's storage is left to the OCV curve. It replaced the
+**blocking** `R_d·coth((jωτ_d)^φ)/(jωτ_d)^φ` with τ_d pinned at 5 s
+(`DIFFUSION_TAU_BOX`, still used by `"generalized"` / `"coth"`). The blocking
+element's long-time limit is a capacitor `τ_d/R_d` set by the pin, not the
+data: on NFPP BM22 it was 6–18× smaller than `1/(dOCV/dQ)`, so an ECM built from
+it and driven with the pulse currents drifted away past ~30 s (R_DC at the end
+of a 200 s pulse +20–25 %). On the spectra the transmissive fit is also slightly
+better on the same Lin-KK-screened points: median RMSE 0.0113 vs 0.0130 mΩ over
+SOC 15–94 %, lower on 20 of 21 spectra (all but SOC 100 %: 0.023 vs 0.017), but α1
+rails at `ZARC_ALPHA_MIN` on the three spectra below 12 % SOC where the blocking
+fit flagged none. τ_d lands at 112–132 s (outliers 249 s, 213 s) — **past the
+band's ~16 s**, so `R_d_z` (the DC plateau) and `tau_d_z` are extrapolated from
+the shape of the in-band tail, not measured. Fixing φ at 0.5 (`"tanh"`) fits
+the spectra 2.5–3× worse. **The two families' `R_d_z`/`phi_d_z` are different
+quantities** (amplitude at 1/τ_d vs DC plateau; φ ≈ 0.38 vs ≈ 0.75 on the same
+data), so every row carries `diff_element` and `plot_fit_overlay` redraws each
+row with its own element (a row without the column is blocking — it predates
+it). A fitted τ_d on a box edge is flagged `tau_d_at_box_{min,max}`. Those
+settings — element, `tau_d_box_s`, `tau_d_is_fitted`, φ box, `ZARC_ALPHA_MIN`
+— are recorded in `parameters.json`'s `eis.settings`; all were tuned on the
+NFPP sweep and may need retuning for another cell type or frequency range.
 
 **Two-stage R0** (`eis_two_stage_r0`, default **on** — this is the standard
 path; set false only to reproduce a pre-#70 fit) — in the single-stage

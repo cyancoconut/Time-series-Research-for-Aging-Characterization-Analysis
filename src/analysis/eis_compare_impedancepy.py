@@ -59,6 +59,11 @@ from analysis.eis_vs_soc import (
     _z_zarc,
 )
 
+#: impedance.py's ``Wo`` is the open (blocking, ``coth``) Warburg with τ pinned
+#: at ``DIFFUSION_TAU_BOX[0]``, so the in-house fit is held to the blocking form
+#: it is benchmarked against — whatever ``ZARC_DIFFUSION_ELEMENT`` defaults to.
+BENCH_ELEMENT = "generalized"
+
 #: Canonical comparison parameters. Anything a variant does not have is NaN.
 CANON = ["R0", "L", "R1", "tau1", "alpha1", "R2", "tau2", "alpha2",
          "R_d", "tau_d", "phi_d"]
@@ -130,11 +135,13 @@ def ours_C(spec, feat, seed, phi_fixed=False):
         # ``degenerate`` for this variant with that in mind.
         ev.DIFFUSION_PHI_BOX = (0.4999, 0.5001)
         try:
-            f = fit_zarc_warburg_eis(spec, seed=seed, r_tot0=feat["R_tot"])
+            f = fit_zarc_warburg_eis(spec, seed=seed, r_tot0=feat["R_tot"],
+                                     element=BENCH_ELEMENT)
         finally:
             ev.DIFFUSION_PHI_BOX = old
     else:
-        f = fit_zarc_warburg_eis(spec, seed=seed, r_tot0=feat["R_tot"])
+        f = fit_zarc_warburg_eis(spec, seed=seed, r_tot0=feat["R_tot"],
+                                     element=BENCH_ELEMENT)
     return _nan_canon(R0=f["R0_z"], L=f["L_z"],
                       R1=f["R1_z"], tau1=f["tau1_z"], alpha1=f["alpha1_z"],
                       R2=f["R2_z"], tau2=f["tau2_z"], alpha2=f["alpha2_z"],
