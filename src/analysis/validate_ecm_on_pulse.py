@@ -7,8 +7,8 @@ pulse and through the relaxation behind it.
 
 Time-domain response
 --------------------
-The fitted impedance ``Z(s)`` (``eis_vs_soc``'s own element functions, so every
-diffusion element the fitter writes is evaluated exactly as it was fitted) is
+The fitted impedance ``Z(s)`` (``eis_vs_soc``'s own element functions, so the
+model is evaluated exactly as it was fitted) is
 turned into a step response ``h(t) = L⁻¹{Z(s)/s}`` by fixed-Talbot numerical
 inversion (Abate & Valkó 2004), and superposed over the piecewise-constant
 current history::
@@ -27,26 +27,24 @@ Two variants are reported:
     the EIS model alone.
 ``ocv``
     ``ecm + dOCV/dQ · ΔQ``, the coulomb-counted OCV drift on the slope of the
-    mean qOCV branch. Needed with a **transmissive** diffusion element, which
-    stores no charge; with the **blocking** element it double-counts whatever
-    storage the capacitive tail already carries.
+    mean qOCV branch. A diagnostic: the blocking Warburg's capacitive tail
+    already carries charge storage, so this double-counts part of it.
 
 Relaxation is scored up to the next sample that carries current (or the next
 data gap), so a following restore step never leaks into it.
 
 Measured on ``J8049_Namey_NFPP_28Ah_02`` BM22: on the 30 s 0.35C pulses
 R_DC(1 s) is 3.65–3.70 measured vs 3.68–3.69 mΩ predicted, relaxation RMSE
-1.0–1.2 mV, with either diffusion element. On the 200 s 0.1C pulses the
-blocking element (τ_d pinned 5 s, its capacitor ``τ_d/R_d`` 6–18× too small)
-puts end-of-pulse R_DC 10–25 % high; the transmissive one + OCV −7…+6 %. 1C
-charge pulses below 12 % SOC are over-predicted by tens to hundreds of mV by
-both — a large-signal (Butler–Volmer) effect a small-signal impedance cannot
-carry.
+1.0–1.2 mV. On the 200 s 0.1C pulses end-of-pulse R_DC is 10–25 % high — the
+Warburg's capacitor ``τ_d/R_d`` (τ_d pinned 5 s) is 6–18× smaller than the
+cell's ``1/(dOCV/dQ)``, so the model drifts too far past ~30 s. 1C charge
+pulses below 12 % SOC are over-predicted by tens to hundreds of mV — a
+large-signal (Butler–Volmer) effect a small-signal impedance cannot carry.
 
 Usage::
 
     python -m analysis.validate_ecm_on_pulse <cell_dir> [--fits CSV] [--bm N]
-        [-o OUT_DIR] [--nom-capacity AH] [--ocv-variant]
+        [-o OUT_DIR] [--nom-capacity AH] [--no-ocv-variant]
 """
 from __future__ import annotations
 
@@ -72,8 +70,6 @@ LIVE_A = 0.05           # |I| above this ends a relaxation window
 TALBOT_M = 24
 MOHM = 1e-3             # eis_fits.csv is in mΩ
 RDC_DT_S = (1.0, 10.0, 20.0)
-#: diffusion elements ``eis_vs_soc._z_diffusion_from_row`` evaluates
-KNOWN_ELEMENTS = {"generalized", "generalized_transmissive", "coth", "tanh"}
 
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 C_ECM, C_OCV = "#2a78d6", "#eb6834"
@@ -175,13 +171,13 @@ def load_inputs(cell_dir: Path, fits_csv: Path, bm: int | None):
         bm = bms[0]
     if "source" in fits:
         fits = fits[fits["source"].map(_bm_of) == bm]
-    # _z_diffusion_from_row falls back to the blocking form for any name it does
-    # not know, so a table written by a newer fitter would be evaluated with the
-    # wrong element without a word — refuse it instead.
-    unknown = set(fits.get("diff_element", pd.Series(dtype=str)).dropna()) - KNOWN_ELEMENTS
-    if unknown:
-        raise SystemExit(f"unknown diff_element {sorted(unknown)}; "
-                         "eis_vs_soc._z_diffusion_from_row cannot evaluate it")
+    # _z_diffusion_from_row evaluates the module's ZARC_DIFFUSION_ELEMENT, not the
+    # row's, so a table fitted with any other element would be evaluated with the
+    # wrong one without a word — refuse it instead.
+    other = set(fits.get("diff_element", pd.Series(dtype=str)).dropna()) - {ev.ZARC_DIFFUSION_ELEMENT}
+    if other:
+        raise SystemExit(f"fits use diff_element {sorted(other)}, but eis_vs_soc "
+                         f"evaluates {ev.ZARC_DIFFUSION_ELEMENT!r}")
     eis = pd.read_parquet(_one(data.glob(f"*_eis_BM{bm}_*.parquet"), f"EIS bundle BM{bm}"))
     fits = fits.assign(t_end=fits["eis_number"].map(eis.groupby("eis_number")["Time"].max()))
     fits = fits.dropna(subset=["t_end"]).sort_values("t_end").reset_index(drop=True)
@@ -261,7 +257,6 @@ def validate(fits, pulse, slope_at, nom_capacity):
         rec = dict(ID=pid, dir="CHA" if I > 0 else "DCH", I_A=round(I, 2),
                    C_rate=round(I / nom_capacity, 3), dur_s=round(ps["t1"] - ps["t0"], 1),
                    SOC_pct=p["SOC_pct"], eis_number=p["eis_number"],
-                   diff_element=p.get("diff_element", "generalized"),
                    eis_degenerate=p.get("zarc_degenerate"),
                    history_s=round(ps["t0"] - h0, 0), relax_s=round(t[-1] - ps["t1"], 0))
         for name, vm in (("ecm", v_ecm), ("ocv", v_ocv)):
