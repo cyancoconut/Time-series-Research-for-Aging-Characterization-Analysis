@@ -310,6 +310,27 @@ result. Those settings — element, pinned τ_d, φ box, `ZARC_ALPHA_MIN` — ar
 recorded in `parameters.json`'s `eis.settings`; both were tuned on the NFPP
 sweep and may need retuning for another cell type or frequency range.
 
+**Validating the ECM on the pulses** (`analysis/validate_ecm_on_pulse.py`,
+`python -m analysis.validate_ecm_on_pulse <cell_dir> [--fits CSV] [--bm N] [-o OUT]`)
+— standalone, not on Tab 7. Fits nothing: each pulse of the same programme is
+predicted from the ECM of the EIS spectrum at its SOC step (step response
+`L⁻¹{Z(s)/s}` by fixed-Talbot inversion of the fitter's own element functions,
+superposed over the measured current steps) and scored during the pulse and
+through the relaxation. Variant `ocv` adds `dOCV/dQ·ΔQ` from the mean qOCV
+branch — required with the transmissive element, which stores no charge;
+double-counting with the blocking one. Writes
+`<stem>_BM<n>_ecm_pulse_validation.csv` + `pulse_overlays.png` + `rdc_vs_soc.png`
+(default `<cell_dir>/ecm_pulse_validation/`). It refuses a `diff_element` it
+does not know rather than letting `_z_diffusion_from_row` evaluate it as
+blocking. On NFPP_02 BM22: the 30 s 0.35C pulses are predicted equally well
+by both elements — R_DC(1 s) 3.65–3.70 measured vs 3.68–3.69 mΩ, relaxation
+RMSE 1.0–1.2 mV (blocking alone, transmissive + OCV). The difference is in the
+three 200 s 0.1C pulses at SOC 10–99 %: blocking (τ_d pinned 5 s) puts their
+end-of-pulse R_DC 10–25 % high, transmissive (τ_d free) + OCV −7…+6 %. 1C
+charge below 12 % SOC is over-predicted by tens to hundreds of mV by both — a
+large-signal (Butler–Volmer) effect no small-signal impedance carries — and the
+SOC 100 % pulses fail for both (EIS00001 is the worst-fitted spectrum).
+
 **Two-stage R0** (`eis_two_stage_r0`, default **on** — this is the standard
 path; set false only to reproduce a pre-#70 fit) — in the single-stage
 full-band fit R0 and the mid-frequency ZARC are correlated: a **depressed** arc
