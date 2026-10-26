@@ -1312,6 +1312,14 @@ def summarize_qocv(data_dir: str, plots_dir: str, nom_capacity: float) -> dict:
         block["plot"] = os.path.relpath(out_png, os.path.dirname(plots_dir))
     except Exception as exc:
         logging.warning("qOCV plot failed: %s", exc)
+    # ICA (dQ/dV) beside the DVA: peaks mark the plateaus the DVA shows as
+    # valleys. Separate try, so a failed ICA never costs the qOCV plot.
+    ica_png = os.path.join(plots_dir, f"qocv_ica_{_temp_tag(temp)}.png")
+    try:
+        qocv_curve.plot_dqdv(pair["cha"], pair["dch"], ica_png)
+        block["plot_ica"] = os.path.relpath(ica_png, os.path.dirname(plots_dir))
+    except Exception as exc:
+        logging.warning("qOCV ICA plot failed: %s", exc)
     return block
 
 

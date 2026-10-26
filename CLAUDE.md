@@ -168,6 +168,7 @@ never overwrites the CU `GOLD/<cell>.parquet` or pollutes
             eis_{<N>zarc_warburg,raw_spectra,fit_overlay,nyquist}_<stem>_<direction>_<T>degreeC.png
             eis_drt_overlay_<stem>_<direction>_<T>degreeC.png
             qocv_<T>degreeC.png
+            qocv_ica_<T>degreeC.png
 ```
 
 MinIO mirrors this under `<prefix>/10_initial_characterization/<cell_stem>/`,
@@ -198,6 +199,9 @@ Savitzky-Golay smoothed, then differentiated). Always drawn, no flag. Its y
 axis is scaled to the SOC 10–95 % interior because dV/dQ diverges into both
 voltage rails and would otherwise flatten the staging structure; the SOC axis
 is normalised against the full sweep so both panels line up.
+Beside it, `qocv_ica_<T>degreeC.png` — the **ICA** (`dQ/dV` vs voltage and vs
+SOC, `qocv_curve.plot_dqdv`), recorded as `qocv.plot_ica`; plotted in its own
+`try`, so an ICA failure never costs the qOCV/DVA figure.
 
 **EIS branch count is one number per run, voted by the DRT.** `N` in `N×ZARC`
 is fixed for a whole cell: every spectrum of every check-up is fitted at the
