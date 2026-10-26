@@ -75,6 +75,18 @@ DVA_TRIM_PCT = 2.0    # drop this much SOC at each end (dV/dQ blows up at the ra
 from util.io_qocv import _parse_soh, _parse_bm, load_sweep, soc_axis  # noqa: F401,E402
 
 
+def _cell_name(path):
+    """Cell stem for a figure title, from ``<cell>_qocv_…`` in the filename.
+
+    Not the parent folder: that is the cell only under ``30_export_qocv/<cell>/``;
+    in the characterization layout the bundles sit in ``<cell>/data/``.
+    """
+    base = os.path.basename(path)
+    if "_qocv_" in base:
+        return base.split("_qocv_")[0]
+    return os.path.basename(os.path.dirname(path))
+
+
 def differential_capacity(v, q, dv=DV, window=SG_WINDOW, poly=SG_POLY):
     """dQ/dV on a uniform voltage grid. Returns ``(v_grid, dqdv, soc_grid)``.
 
@@ -216,7 +228,7 @@ def plot_qocv(cha_path, dch_path, out_png, nom_capacity=NOM_CAPACITY_DEFAULT,
 
     soh = _parse_soh(os.path.basename(cha_path))
     temp_txt = "" if temp_degC is None else f", {float(temp_degC):.1f} °C"
-    fig.suptitle(f"qOCV — {os.path.basename(os.path.dirname(cha_path))} "
+    fig.suptitle(f"qOCV — {_cell_name(cha_path)} "
                  f"@ {soh:.1f}% SOH{temp_txt}  "
                  f"(hyst ≈ {hyst:.0f} mV over 20–80%)")
     for a in (ax, axd):
@@ -253,7 +265,7 @@ def plot_dqdv(cha_path, dch_path, out_png):
         a.grid(alpha=0.3)
         a.legend()
     soh = _parse_soh(os.path.basename(cha_path))
-    fig.suptitle(f"qOCV differential — {os.path.basename(os.path.dirname(cha_path))} "
+    fig.suptitle(f"qOCV differential — {_cell_name(cha_path)} "
                  f"@ {soh:.1f}% SOH")
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
